@@ -213,8 +213,8 @@ export const SlinkyConfig = Schema.Struct({
 });
 export type SlinkyConfig = typeof SlinkyConfig.Type;
 
-const decodeManifest = Schema.decodeUnknownSync(Manifest);
-const decodeState = Schema.decodeUnknownSync(State);
+const decodeManifest = Schema.decodeUnknownSync(Schema.toType(Manifest));
+const decodeState = Schema.decodeUnknownSync(Schema.toType(State));
 
 export function getSkill(manifest: Manifest, name: string): Skill | undefined {
   return Object.hasOwn(manifest.skills, name) ? manifest.skills[name] : undefined;

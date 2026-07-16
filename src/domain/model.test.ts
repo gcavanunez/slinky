@@ -2,11 +2,15 @@ import { describe, expect, test } from "bun:test";
 import * as Schema from "effect/Schema";
 import {
   Manifest,
+  ProjectLink,
   State,
   getSkill,
   validateState,
+  withManifestSkill,
   withProfile,
+  withProjectLink,
   withSkillEnabled,
+  withoutProjectLink,
 } from "./model.ts";
 
 const strict = { errors: "all", onExcessProperty: "error" } as const;
@@ -168,6 +172,59 @@ describe("domain schemas", () => {
     expect(profiled.activeProfile).toBe("work");
     expect(profiled.disabledSkills).toEqual(["bar"]);
     expect(enabled.activeProfile).toBeNull();
+  });
+
+  test("transitions validate state that already contains decoded project timestamps", () => {
+    const initial = Schema.decodeUnknownSync(State)({
+      ...stateInput(),
+      projectLinks: [
+        {
+          mode: "symlink",
+          project: "/tmp/project-one",
+          skill: "foo",
+          targets: [".agents/skills/foo"],
+          excludedTargets: [],
+          linkedAt: "2026-07-13T12:00:00.000Z",
+        },
+      ],
+    });
+    const first = initial.projectLinks[0];
+    if (!first) throw new Error("expected first project link");
+    const second = Schema.decodeUnknownSync(ProjectLink)({
+      mode: "symlink",
+      project: "/tmp/project-two",
+      skill: "bar",
+      targets: [".agents/skills/bar"],
+      excludedTargets: [],
+      linkedAt: "2026-07-14T12:00:00.000Z",
+    });
+
+    const added = withProjectLink(initial, second);
+    const addedFirst = added.projectLinks[0];
+    if (!addedFirst) throw new Error("expected added first project link");
+    const enabled = withSkillEnabled(added, "bar", true);
+    const removed = withoutProjectLink(added, addedFirst);
+
+    expect(typeof first.linkedAt).not.toBe("string");
+    expect(added.projectLinks).toEqual([first, second]);
+    expect(enabled.disabledSkills).toEqual([]);
+    expect(removed.projectLinks).toEqual([second]);
+    expect(initial.projectLinks).toEqual([first]);
+  });
+
+  test("manifest transitions validate decoded vendor timestamps", () => {
+    const manifest = Schema.decodeUnknownSync(Manifest)(manifestInput(), strict);
+    const updated = withManifestSkill(manifest, "foo", {
+      origin: "local",
+      path: "skills/foo",
+      contentHash: "c".repeat(64),
+    });
+    const vendor = getSkill(updated, "bar");
+
+    expect(vendor?.origin).toBe("vendor");
+    expect(vendor?.origin === "vendor" ? typeof vendor.vendoredAt : "missing").not.toBe("string");
+    expect(getSkill(updated, "foo")?.contentHash).toBe("c".repeat(64));
+    expect(getSkill(manifest, "foo")?.contentHash).toBe(HASH);
   });
 
   test("rejects profile drift and prototype-like phantom references", () => {

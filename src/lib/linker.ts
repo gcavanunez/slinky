@@ -106,8 +106,7 @@ export function linkSkill(
         : { ...common, mode: "symlink" };
     const link = decodeProjectLink(linkInput);
 
-    // The aggregate transition decodes its input, so retain the encoded timestamp here.
-    return { state: withProjectLink(state, linkInput as unknown as ProjectLink), link };
+    return { state: withProjectLink(state, link), link };
   } catch (error) {
     if (excludedTargets.length > 0) {
       updateExcludeFile(
