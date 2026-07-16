@@ -1,0 +1,46 @@
+{
+  "name": "@gcavanunez/slinky",
+  "version": "0.1.0",
+  "description": "Standalone CLI and TUI for managing a separate agent skills repository.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "bun": ">=1.3.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gcavanunez/slinky.git"
+  },
+  "bin": {
+    "slinky": "./slinky"
+  },
+  "files": [
+    "slinky",
+    "src",
+    "skills",
+    "docs",
+    "tsconfig.json"
+  ],
+  "scripts": {
+    "cli": "bun src/cli.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "build:bin": "bun build --compile ./src/cli.ts --outfile dist/slinky",
+    "prepublishOnly": "bun run typecheck && bun test"
+  },
+  "dependencies": {
+    "@effect/platform-node": "4.0.0-beta.64",
+    "@opentui/core": "^0.4.3",
+    "@opentui/react": "^0.4.3",
+    "effect": "4.0.0-beta.64",
+    "react": "^19.2.7"
+  },
+  "overrides": {
+    "@effect/platform-node-shared": "4.0.0-beta.64"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/react": "^19.2.17",
+    "typescript": "^5.7.0"
+  }
+}
