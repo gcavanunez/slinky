@@ -10,21 +10,25 @@ import {
 } from "./lib/adopt.ts";
 import type { Adoption } from "./lib/adopt.ts";
 import { backupGlobalDirs } from "./lib/bootstrap.ts";
+import {
+  applyProfile,
+  linkProjectSkill,
+  setSkillsEnabled,
+  unlinkProjectSkill,
+} from "./lib/catalogActions.ts";
+import type { ActionResult } from "./lib/catalogActions.ts";
 import { contentHash } from "./lib/hash.ts";
 import { diffDirs, isClean, unifiedDiff } from "./lib/diff.ts";
-import { applyUnlink, checkLink, linkSkill, prepareUnlink, unlinkSkill } from "./lib/linker.ts";
+import { checkLink } from "./lib/linker.ts";
 import {
   alignStateWithManifest,
-  getProfile,
   getSkill,
   isSkillEnabled,
   loadManifest,
   loadState,
   saveManifest,
   saveState,
-  withProfile,
   withManifestSkill,
-  withSkillEnabled,
 } from "./lib/manifest.ts";
 import type { Manifest, State } from "./lib/manifest.ts";
 import {
@@ -114,6 +118,19 @@ function runSync(manifest: Manifest, state: State, flags: Set<string>): void {
   for (const d of res.done) console.log(`  ${d}`);
   for (const s of res.skipped) console.log(c.yellow(`  skipped: ${s}`));
   if (res.done.length === 0 && res.skipped.length === 0) console.log("in sync; nothing to do");
+}
+
+function renderAction(result: ActionResult): void {
+  for (const warning of result.warnings) console.log(c.yellow(`warn: ${warning}`));
+  if (result.dryRun) {
+    if (result.messages.length === 0) console.log("nothing to do");
+    for (const message of result.messages) console.log(`would ${message}`);
+    return;
+  }
+  for (const message of result.messages) console.log(`  ${message}`);
+  if (result.messages.length === 0 && result.warnings.length === 0) {
+    console.log("in sync; nothing to do");
+  }
 }
 
 function cmdStatus(manifest: Manifest, state: State): void {
@@ -321,12 +338,10 @@ switch (cmd) {
   case "disable": {
     assertFlags(["--dry-run", "--force"]);
     if (args.length === 0) fail(`usage: ${cmd} <skill...>`);
-    for (const name of args) {
-      if (!getSkill(manifest, name)) fail(`unknown skill: ${name}`);
-      state = withSkillEnabled(state, name, cmd === "enable");
-    }
-    saveState(state);
-    runSync(manifest, state, flags);
+    renderAction(setSkillsEnabled(args, cmd === "enable", {
+      dryRun: flags.has("--dry-run"),
+      force: flags.has("--force"),
+    }));
     break;
   }
 
@@ -343,11 +358,10 @@ switch (cmd) {
     } else if (sub === "apply") {
       const name = args[1];
       if (!name) fail("usage: profile apply <name>");
-      const members = getProfile(manifest, name);
-      if (!members) fail(`unknown profile: ${name}`);
-      state = withProfile(manifest, state, name);
-      saveState(state);
-      runSync(manifest, state, flags);
+      renderAction(applyProfile(name, {
+        dryRun: flags.has("--dry-run"),
+        force: flags.has("--force"),
+      }));
     } else {
       fail("usage: profile list | profile apply <name>");
     }
@@ -361,22 +375,13 @@ switch (cmd) {
     const project = projectArg ?? process.cwd();
     if (resolveDir(project) === REPO) fail("refusing to link a skill into the skills repo itself");
     const mode = flags.has("--copy") ? "copy" : flags.has("--symlink") ? "symlink" : "copy";
-    const result = linkSkill(manifest, state, {
+    const result = linkProjectSkill({
       skill,
       project,
       mode,
       gitExclude: !flags.has("--no-exclude"),
       claude: !flags.has("--no-claude"),
     });
-    state = result.state;
-    try {
-      saveState(state);
-    } catch (error) {
-      try {
-        unlinkSkill(manifest, state, skill, result.link.project, { force: true });
-      } catch {}
-      throw error;
-    }
     const link = result.link;
     console.log(`linked ${c.bold(skill)} (${mode}) into ${link.project}`);
     for (const t of link.targets) console.log(`  ${t}`);
@@ -388,21 +393,10 @@ switch (cmd) {
     assertFlags(["--force"]);
     const [skill, projectArg] = args;
     if (!skill) fail("usage: unlink <skill> [project]  (project defaults to cwd)");
-    const previousState = state;
-    const result = prepareUnlink(manifest, state, skill, projectArg ?? process.cwd(), {
+    const result = unlinkProjectSkill(skill, projectArg ?? process.cwd(), {
       force: flags.has("--force"),
     });
-    state = result.state;
-    saveState(state);
-    try {
-      const warnings = applyUnlink(result.link);
-      for (const warning of warnings) console.log(c.yellow(`warn: ${warning}`));
-    } catch (error) {
-      try {
-        saveState(previousState);
-      } catch {}
-      throw error;
-    }
+    for (const warning of result.warnings) console.log(c.yellow(`warn: ${warning}`));
     const link = result.link;
     console.log(`unlinked ${c.bold(skill)} from ${link.project}`);
     break;

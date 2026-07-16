@@ -1,9 +1,60 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const roots: string[] = [];
+
+function fixture(disabledSkills: ReadonlyArray<string> = []) {
+  const root = mkdtempSync(join(tmpdir(), "slinky-cli-actions-"));
+  roots.push(root);
+  const host = join(root, "host");
+  const home = join(root, "home");
+  mkdirSync(join(host, ".local"), { recursive: true });
+  mkdirSync(home, { recursive: true });
+  for (const name of ["foo", "bar"]) {
+    mkdirSync(join(host, "skills", name), { recursive: true });
+    writeFileSync(join(host, "skills", name, "SKILL.md"), `# ${name}\n`);
+  }
+  writeFileSync(
+    join(host, "skills.manifest.json"),
+    `${JSON.stringify({
+      version: 1,
+      skills: {
+        foo: { origin: "local", path: "skills/foo", contentHash: "a".repeat(64) },
+        bar: { origin: "local", path: "skills/bar", contentHash: "b".repeat(64) },
+      },
+      profiles: { focus: ["foo"] },
+    })}\n`,
+  );
+  const statePath = join(host, ".local", "state.json");
+  writeFileSync(
+    statePath,
+    `${JSON.stringify({
+      version: 1,
+      disabledSkills,
+      activeProfile: null,
+      projectLinks: [],
+      recentProjects: [],
+    }, null, 2)}\n`,
+  );
+  return { root, host, home, statePath };
+}
+
+function runCli(host: string, home: string, args: ReadonlyArray<string>) {
+  const cli = join(import.meta.dir, "cli.ts");
+  return Bun.spawnSync([process.execPath, cli, ...args], {
+    env: { ...process.env, HOME: home, SLINKY_REPO: host },
+  });
+}
+
+function stateAt(path: string): {
+  disabledSkills: string[];
+  activeProfile: string | null;
+  projectLinks: Array<{ skill: string; project: string }>;
+} {
+  return JSON.parse(readFileSync(path, "utf8"));
+}
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -59,5 +110,67 @@ describe("CLI options", () => {
     expect(result.stdout.toString()).toContain("foo: refreshed manifest hash");
     expect(manifest.skills.foo.contentHash).not.toBe("0".repeat(64));
     expect(manifest.skills.foo.contentHash).toHaveLength(64);
+  });
+});
+
+describe("CLI catalog actions", () => {
+  test("enable and profile dry runs preserve state bytes and global stores", () => {
+    const f = fixture(["foo"]);
+    const before = readFileSync(f.statePath);
+
+    const enable = runCli(f.host, f.home, ["enable", "foo", "--dry-run"]);
+    const profile = runCli(f.host, f.home, ["profile", "apply", "focus", "--dry-run"]);
+
+    expect(enable.exitCode).toBe(0);
+    expect(enable.stdout.toString()).toContain("would ensure-agents-symlink foo");
+    expect(profile.exitCode).toBe(0);
+    expect(profile.stdout.toString()).toContain("would ensure-agents-symlink foo");
+    expect(readFileSync(f.statePath)).toEqual(before);
+    expect(() => lstatSync(join(f.home, ".agents"))).toThrow();
+    expect(() => lstatSync(join(f.home, ".claude"))).toThrow();
+  });
+
+  test("applied enable and disable update state and global stores", () => {
+    const f = fixture(["foo", "bar"]);
+
+    const enable = runCli(f.host, f.home, ["enable", "foo", "bar"]);
+    expect(enable.exitCode).toBe(0);
+    expect(stateAt(f.statePath).disabledSkills).toEqual([]);
+    for (const name of ["foo", "bar"]) {
+      expect(lstatSync(join(f.home, ".agents", "skills", name)).isSymbolicLink()).toBe(true);
+      expect(lstatSync(join(f.home, ".claude", "skills", name)).isSymbolicLink()).toBe(true);
+    }
+
+    const disable = runCli(f.host, f.home, ["disable", "foo", "bar"]);
+    expect(disable.exitCode).toBe(0);
+    expect(stateAt(f.statePath).disabledSkills).toEqual(["bar", "foo"]);
+    expect(() => lstatSync(join(f.home, ".agents", "skills", "foo"))).toThrow();
+    expect(() => lstatSync(join(f.home, ".agents", "skills", "bar"))).toThrow();
+  });
+
+  test("link followed by unlink updates both project targets and state", () => {
+    const f = fixture();
+    const project = join(f.root, "project");
+    mkdirSync(join(project, ".claude"), { recursive: true });
+
+    const link = runCli(f.host, f.home, [
+      "link",
+      "foo",
+      project,
+      "--symlink",
+      "--no-exclude",
+    ]);
+    expect(link.exitCode).toBe(0);
+    expect(link.stdout.toString()).toContain(`linked \u001b[1mfoo\u001b[0m (symlink) into ${project}`);
+    expect(stateAt(f.statePath).projectLinks).toHaveLength(1);
+    expect(lstatSync(join(project, ".agents", "skills", "foo")).isSymbolicLink()).toBe(true);
+    expect(lstatSync(join(project, ".claude", "skills", "foo")).isSymbolicLink()).toBe(true);
+
+    const unlink = runCli(f.host, f.home, ["unlink", "foo", project]);
+    expect(unlink.exitCode).toBe(0);
+    expect(unlink.stdout.toString()).toContain(`unlinked \u001b[1mfoo\u001b[0m from ${project}`);
+    expect(stateAt(f.statePath).projectLinks).toEqual([]);
+    expect(() => lstatSync(join(project, ".agents", "skills", "foo"))).toThrow();
+    expect(() => lstatSync(join(project, ".claude", "skills", "foo"))).toThrow();
   });
 });

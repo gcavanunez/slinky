@@ -3,6 +3,7 @@ import { dirname, join, posix, resolve } from "node:path";
 import * as Schema from "effect/Schema";
 import {
   ProjectLink,
+  formatUtc,
   getSkill,
   nowUtc,
   withProjectLink,
@@ -97,15 +98,16 @@ export function linkSkill(
       skill: opts.skill,
       targets,
       excludedTargets,
-      linkedAt: nowUtc(),
+      linkedAt: formatUtc(nowUtc()),
     };
-    const link = decodeProjectLink(
+    const linkInput =
       opts.mode === "copy"
         ? { ...common, mode: "copy", snapshotHash: contentHash(source) }
-        : { ...common, mode: "symlink" },
-    );
+        : { ...common, mode: "symlink" };
+    const link = decodeProjectLink(linkInput);
 
-    return { state: withProjectLink(state, link), link };
+    // The aggregate transition decodes its input, so retain the encoded timestamp here.
+    return { state: withProjectLink(state, linkInput as unknown as ProjectLink), link };
   } catch (error) {
     if (excludedTargets.length > 0) {
       updateExcludeFile(

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as Schema from "effect/Schema";
@@ -87,59 +87,5 @@ describe("discoverProjectSkills", () => {
     expect(projectSkillFiles(root, agentsOnly)).toEqual(["SKILL.md", "notes.md"]);
     expect(readProjectSkillFile(root, agentsOnly, "notes.md")).toEqual(["notes", ""]);
     expect(projectSkillDescription(root, agentsOnly)).toBe("Project-only fixture.");
-  });
-});
-
-describe("setSkillsEnabled", () => {
-  test("persists and reconciles a group as one operation", () => {
-    const root = mkdtempSync(join(tmpdir(), "slinky-group-toggle-"));
-    roots.push(root);
-    const host = join(root, "host");
-    const home = join(root, "home");
-    mkdirSync(join(host, ".local"), { recursive: true });
-    mkdirSync(join(host, "skills", "foo"), { recursive: true });
-    mkdirSync(join(host, "skills", "bar"), { recursive: true });
-    mkdirSync(home, { recursive: true });
-    writeFileSync(join(host, "skills", "foo", "SKILL.md"), "# foo\n");
-    writeFileSync(join(host, "skills", "bar", "SKILL.md"), "# bar\n");
-    writeFileSync(
-      join(host, "skills.manifest.json"),
-      `${JSON.stringify({
-        version,
-        skills: {
-          foo: { origin: "local", path: "skills/foo", contentHash: "a".repeat(64) },
-          bar: { origin: "local", path: "skills/bar", contentHash: "b".repeat(64) },
-        },
-        profiles: {},
-      })}\n`,
-    );
-    writeFileSync(
-      join(host, ".local", "state.json"),
-      `${JSON.stringify({
-        version,
-        disabledSkills: [],
-        activeProfile: null,
-        projectLinks: [],
-        recentProjects: [],
-      })}\n`,
-    );
-
-    const source = join(import.meta.dir, "data.ts");
-    const toggle = (enabled: boolean) => Bun.spawnSync(
-      [
-        process.execPath,
-        "-e",
-        `import { setSkillsEnabled } from ${JSON.stringify(source)}; setSkillsEnabled(["foo", "bar"], ${enabled});`,
-      ],
-      { env: { ...process.env, HOME: home, SLINKY_REPO: host } },
-    );
-
-    expect(toggle(false).exitCode).toBe(0);
-    expect(JSON.parse(readFileSync(join(host, ".local", "state.json"), "utf8")).disabledSkills)
-      .toEqual(["bar", "foo"]);
-
-    expect(toggle(true).exitCode).toBe(0);
-    expect(JSON.parse(readFileSync(join(host, ".local", "state.json"), "utf8")).disabledSkills)
-      .toEqual([]);
   });
 });

@@ -3,6 +3,8 @@ import { existsSync } from "node:fs";
 import { basename } from "node:path";
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import type { KeyEvent } from "@opentui/core";
+import { applyProfile, linkProjectSkill, setSkillsEnabled } from "../lib/catalogActions.ts";
+import type { ActionResult } from "../lib/catalogActions.ts";
 import type { DirDiff } from "../lib/diff.ts";
 import { formatUtc, getProfile } from "../lib/manifest.ts";
 import { REPO } from "../lib/paths.ts";
@@ -10,9 +12,7 @@ import { Hint, Modal, TextLine } from "./components.tsx";
 import { colors } from "./theme.ts";
 import { clamp, fitCell, printable, windowOf } from "./util.ts";
 import {
-  applyProfile,
   diffSkill,
-  doLink,
   expandHome,
   linksForSkill,
   loadCatalog,
@@ -21,14 +21,11 @@ import {
   projectSkillPath,
   readProjectSkillFile,
   readSkillFile,
-  setEnabled,
-  setSkillsEnabled,
   skillDescription,
   skillFiles,
   verifyRow,
 } from "./data.ts";
 import type {
-  ActionResult,
   Catalog,
   CatalogRow,
   DiffResult,
@@ -378,15 +375,18 @@ export function App() {
       return true;
     }
     if (key.name === "return" || key.name === "enter") {
-      const res = doLink({
-        skill: current.name,
-        project: linkFlow.input,
-        mode: linkFlow.mode,
-        gitExclude: linkFlow.exclude,
-        claude: linkFlow.claude,
-      });
-      if (res.error) notify(res.error, true);
-      else notify(`linked ${current.name} (${linkFlow.mode}) into ${linkFlow.input}`);
+      try {
+        linkProjectSkill({
+          skill: current.name,
+          project: linkFlow.input,
+          mode: linkFlow.mode,
+          gitExclude: linkFlow.exclude,
+          claude: linkFlow.claude,
+        });
+        notify(`linked ${current.name} (${linkFlow.mode}) into ${linkFlow.input}`);
+      } catch (err) {
+        notify(err instanceof Error ? err.message : String(err), true);
+      }
       setLinkFlow(null);
       setMode("list");
       refresh();
@@ -521,7 +521,7 @@ export function App() {
     }
     if (!current) return;
     if (key.name === "space") {
-      const res = setEnabled(current.name, !current.enabled);
+      const res = setSkillsEnabled([current.name], !current.enabled);
       reportAction(`${current.enabled ? "disabled" : "enabled"} ${current.name}`, res);
       refresh();
       return;

@@ -4,20 +4,14 @@ import { homedir } from "node:os";
 import { contentHash, walkFiles } from "../lib/hash.ts";
 import { diffDirs } from "../lib/diff.ts";
 import type { DirDiff } from "../lib/diff.ts";
-import { linkSkill, unlinkSkill } from "../lib/linker.ts";
-import type { LinkOptions } from "../lib/linker.ts";
 import {
-  getProfile,
   isSkillEnabled,
   loadManifest,
   loadState,
-  saveState,
-  withProfile,
-  withSkillEnabled,
 } from "../lib/manifest.ts";
 import type { Manifest, ProjectLink, Skill, State } from "../lib/manifest.ts";
 import { AGENTS_SKILLS, REPO } from "../lib/paths.ts";
-import { apply, observe, planSync } from "../lib/reconcile.ts";
+import { observe } from "../lib/reconcile.ts";
 import type { LiveKind } from "../lib/reconcile.ts";
 
 export type LiveStatus = "ok" | "drift" | "missing" | "off" | "stale" | "checking";
@@ -128,48 +122,6 @@ export function verifyRow(row: CatalogRow): CatalogRow {
   return { ...row, live: ok ? "ok" : "drift" };
 }
 
-export interface ActionResult {
-  messages: string[];
-  warnings: string[];
-}
-
-function syncNow(manifest: Manifest, state: State): ActionResult {
-  const plan = planSync(manifest, state, observe(), {});
-  const res = apply(plan, {});
-  return { messages: res.done, warnings: [...plan.warnings, ...res.skipped] };
-}
-
-/** Toggle a skill and reconcile immediately. */
-export function setEnabled(name: string, enabled: boolean): ActionResult {
-  const manifest = loadManifest();
-  const state = loadState(manifest);
-  const next = withSkillEnabled(state, name, enabled);
-  saveState(next);
-  return syncNow(manifest, next);
-}
-
-/** Toggle a group with one state write and one reconciliation pass. */
-export function setSkillsEnabled(names: ReadonlyArray<string>, enabled: boolean): ActionResult {
-  const manifest = loadManifest();
-  const state = loadState(manifest);
-  const next = names.reduce(
-    (current, name) => withSkillEnabled(current, name, enabled),
-    state,
-  );
-  saveState(next);
-  return syncNow(manifest, next);
-}
-
-export function applyProfile(name: string): ActionResult {
-  const manifest = loadManifest();
-  const state = loadState(manifest);
-  const members = getProfile(manifest, name);
-  if (!members) return { messages: [], warnings: [`unknown profile: ${name}`] };
-  const next = withProfile(manifest, state, name);
-  saveState(next);
-  return syncNow(manifest, next);
-}
-
 export type DiffResult =
   | { kind: "local" }
   | { kind: "not-installed" }
@@ -180,25 +132,6 @@ export function diffSkill(row: CatalogRow): DiffResult {
   const live = join(AGENTS_SKILLS, row.name);
   if (!existsSync(live)) return { kind: "not-installed" };
   return { kind: "diff", diff: diffDirs(join(REPO, row.meta.path), live) };
-}
-
-export function doLink(opts: LinkOptions): { link?: ProjectLink; error?: string } {
-  const manifest = loadManifest();
-  const state = loadState(manifest);
-  try {
-    const { link, state: next } = linkSkill(manifest, state, opts);
-    try {
-      saveState(next);
-    } catch (error) {
-      try {
-        unlinkSkill(manifest, next, link.skill, link.project, { force: true });
-      } catch {}
-      throw error;
-    }
-    return { link };
-  } catch (err) {
-    return { error: err instanceof Error ? err.message : String(err) };
-  }
 }
 
 export function linksForSkill(state: State, name: string): ReadonlyArray<ProjectLink> {
