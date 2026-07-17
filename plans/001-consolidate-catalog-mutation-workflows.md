@@ -113,8 +113,12 @@ Applicable conventions:
 
 - `src/lib/catalogActions.ts` (create)
 - `src/lib/catalogActions.test.ts` (create)
+- `src/domain/model.ts` (type-side validation for immutable aggregate transitions only)
+- `src/domain/model.test.ts` (transformed-value transition regression tests)
 - `src/cli.ts`
 - `src/cli.test.ts`
+- `src/lib/linker.ts` (only the `linkedAt` schema-boundary correction described below)
+- `src/lib/linker.test.ts` (one regression test for successful link construction)
 - `src/tui/data.ts`
 - `src/tui/App.tsx`
 - `src/tui/data.test.ts` only if existing mutation tests need moving to `catalogActions.test.ts`
@@ -123,7 +127,8 @@ Applicable conventions:
 **Out of scope**:
 
 - `src/lib/reconcile.ts`: do not add selected-skill scoping in this plan.
-- `src/lib/linker.ts`: do not redesign link deletion, quarantine, or race handling.
+- `src/lib/linker.ts`: except for encoding `linkedAt` correctly before `ProjectLink` decoding, do not redesign link deletion, quarantine, or race handling.
+- `src/domain/model.ts`: do not change persisted schemas or encoded data shapes; only correct internal immutable transitions to validate already-decoded values through `Schema.toType`.
 - `src/lib/manifest.ts`: do not redesign persistence or introduce dependency injection.
 - Vendor/update/adopt/bootstrap/rehash workflows.
 - TUI layout, project-only discovery, previews, and author grouping.
@@ -154,6 +159,8 @@ Cover these behaviors before switching callers:
 6. Successful link persists one `ProjectLink` and creates its targets.
 7. Successful unlink removes its targets and persisted `ProjectLink`.
 8. A failed state save after link creation compensates by removing only the paths created by that link. If this cannot be induced deterministically without changing an out-of-scope module, STOP and report rather than weakening the assertion.
+
+Whole-catalog reconciliation is intentionally preserved. Assertions for a selected batch must allow messages for unrelated enabled skills whose global entries also need repair.
 
 Use valid aggregate manifest/state JSON fixtures and a temporary home. Do not touch the developer's real `~/.agents`, `~/.claude`, config, or skills host.
 
@@ -201,6 +208,10 @@ Implementation requirements:
 - `linkProjectSkill` must own the existing link-then-save compensation behavior currently duplicated in CLI and TUI.
 - `unlinkProjectSkill` must own the existing prepare, save-next-state, apply deletion, and restore-previous-state-on-failure behavior from the CLI.
 - Preserve current error propagation. Do not add a generic Result abstraction or Effect service.
+
+The new link tests expose a pre-existing schema-boundary defect in `src/lib/linker.ts`: `ProjectLink` decoding expects the encoded timestamp string, but `linkedAt` currently receives `nowUtc()` as a `DateTime.Utc` value. Change only that assignment to pass the canonical string produced by `formatUtc(nowUtc())`, and add one direct successful-link regression test in `src/lib/linker.test.ts`. Do not broaden this plan to other timestamp call sites.
+
+The immutable aggregate helpers in `src/domain/model.ts` currently call encoded-side decoders on values that are already decoded. Replace the private transition validators with `Schema.decodeUnknownSync(Schema.toType(Manifest))` and `Schema.decodeUnknownSync(Schema.toType(State))`. Loading persisted JSON must continue using the original schemas. With this correction, `linkSkill` must pass the decoded `link` value to `withProjectLink`; do not use casts to disguise encoded data as `ProjectLink`.
 
 Move the existing batch mutation integration test from `src/tui/data.test.ts` into `src/lib/catalogActions.test.ts`; it no longer belongs to the TUI read-model test.
 
@@ -313,7 +324,9 @@ Stop and report rather than improvising if:
 
 - Any recorded checksum differs and the relevant mutation code no longer matches the Current State excerpts.
 - An initial Git baseline still does not exist when isolated-worktree execution is requested.
-- Link compensation cannot be tested without changing `src/lib/manifest.ts`, `src/lib/linker.ts`, or introducing a broad dependency-injection framework.
+- Link compensation cannot be tested without changing `src/lib/manifest.ts`, making additional changes in `src/lib/linker.ts`, or introducing a broad dependency-injection framework.
+- The `linkedAt` correction requires any change beyond converting `nowUtc()` to its canonical encoded string or requires changing the `ProjectLink` schema.
+- Correcting immutable transitions requires changing any persisted schema, encoded JSON shape, or public function signature rather than only switching private transition validation to `Schema.toType`.
 - Consolidation requires changing reconciliation scope, filesystem replacement semantics, or project-link schema.
 - Existing CLI and TUI behavior conflict in a way not explicitly resolved by this plan, other than the intentional dry-run correction.
 - Any verification command fails twice after a reasonable correction attempt.
