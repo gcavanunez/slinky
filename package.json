@@ -21,11 +21,20 @@
     "docs",
     "tsconfig.json"
   ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "registry": "https://registry.npmjs.org/"
+  },
   "scripts": {
     "cli": "bun src/cli.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "build:bin": "bun build --compile ./src/cli.ts --outfile dist/slinky",
+    "changeset": "npm exec --package @changesets/cli@2.31.0 -- changeset",
+    "changeset:status": "npm exec --package @changesets/cli@2.31.0 -- changeset status",
+    "changeset:version": "npm exec --package @changesets/cli@2.31.0 -- changeset version",
+    "release": "npm exec --package @changesets/cli@2.31.0 -- changeset publish",
     "prepublishOnly": "bun run typecheck && bun test"
   },
   "dependencies": {
