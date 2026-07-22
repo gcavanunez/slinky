@@ -1,16 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { existsSync } from "node:fs";
-import { basename } from "node:path";
+import { basename, extname } from "node:path";
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
-import type { KeyEvent } from "@opentui/core";
+import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core";
 import { applyProfile, linkProjectSkill, setSkillsEnabled } from "../lib/catalogActions.ts";
 import type { ActionResult } from "../lib/catalogActions.ts";
 import type { DirDiff } from "../lib/diff.ts";
 import { formatUtc, getProfile } from "../lib/manifest.ts";
 import { REPO } from "../lib/paths.ts";
 import { Hint, Modal, TextLine } from "./components.tsx";
-import { colors } from "./theme.ts";
-import { clamp, fitCell, printable, windowOf } from "./util.ts";
+import { colors, createMarkdownSyntax } from "./theme.ts";
+import { clamp, fileTreeRows, fitCell, markdownBody, printable, windowOf } from "./util.ts";
 import {
   diffSkill,
   expandHome,
@@ -34,18 +34,16 @@ import type {
 } from "./data.ts";
 
 type Mode = "list" | "help" | "detail" | "profiles" | "diff" | "link";
+type Panel = "authors" | "skills" | "content" | "files";
+type PrimaryPanel = Exclude<Panel, "files">;
+type SkillItem = { kind: "skill"; row: CatalogRow } | { kind: "project-skill"; skill: ProjectSkill };
 
-type ListItem =
-  | {
-      kind: "header";
-      label: string;
-      count: number;
-      enabledCount: number | null;
-      rows: ReadonlyArray<CatalogRow> | null;
-      collapsed: boolean;
-    }
-  | { kind: "skill"; row: CatalogRow }
-  | { kind: "project-skill"; skill: ProjectSkill };
+interface AuthorGroup {
+  label: string;
+  enabledCount: number | null;
+  rows: ReadonlyArray<CatalogRow> | null;
+  skills: SkillItem[];
+}
 
 /** Tree group for a row: "local" or the vendor owner (vendor/<owner>/<skill>). */
 function ownerOf(row: CatalogRow): string {
@@ -87,9 +85,10 @@ export function App() {
 
   const [catalog, setCatalog] = useState<Catalog>(() => loadCatalog());
   const [nonce, setNonce] = useState(0);
-  // index 0 is always the first group header; start on the first skill
-  const [selected, setSelected] = useState(1);
-  const [offset, setOffset] = useState(0);
+  const [selectedAuthor, setSelectedAuthor] = useState(0);
+  const [selectedSkill, setSelectedSkill] = useState(0);
+  const [panel, setPanel] = useState<Panel>("skills");
+  const [expanded, setExpanded] = useState<PrimaryPanel | null>(null);
   const [mode, setMode] = useState<Mode>("list");
   const [filterMode, setFilterMode] = useState(false);
   const [filterText, setFilterText] = useState("");
@@ -97,15 +96,17 @@ export function App() {
   const [profileIndex, setProfileIndex] = useState(0);
   const [diffResult, setDiffResult] = useState<DiffResult | null>(null);
   const [linkFlow, setLinkFlow] = useState<LinkFlow | null>(null);
-  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
-  const [preview, setPreview] = useState(false);
   const [previewFile, setPreviewFile] = useState(0);
-  const [previewScroll, setPreviewScroll] = useState(0);
+  const [previewRestore, setPreviewRestore] = useState(0);
 
   const quitting = useRef(false);
   const pendingG = useRef(0);
+  const previewScroll = useRef<ScrollBoxRenderable | null>(null);
   const rowsRef = useRef(catalog.rows);
   rowsRef.current = catalog.rows;
+  const syntaxStyle = useMemo(() => createMarkdownSyntax(), []);
+
+  useEffect(() => () => syntaxStyle.destroy(), [syntaxStyle]);
 
   const filtered = useMemo(
     () =>
@@ -115,10 +116,8 @@ export function App() {
     [catalog.rows, filterText],
   );
 
-  // Tree view: group skills under their origin owner (local first, then vendors).
-  // Filtering ignores folds so matches are never hidden.
-  const items = useMemo<ListItem[]>(() => {
-    const out: ListItem[] = [];
+  const groups = useMemo<AuthorGroup[]>(() => {
+    const out: AuthorGroup[] = [];
     const projectOnly = catalog.projectSkills
       .filter(
         (skill) =>
@@ -127,80 +126,86 @@ export function App() {
       )
       .sort((a, b) => Number(b.agents) - Number(a.agents) || a.name.localeCompare(b.name));
     if (projectOnly.length > 0) {
-      const label = "project only";
-      const isCollapsed = collapsed.has(label) && !filterText;
       out.push({
-        kind: "header",
-        label,
-        count: projectOnly.length,
+        label: "project only",
         enabledCount: null,
         rows: null,
-        collapsed: isCollapsed,
+        skills: projectOnly.map((skill) => ({ kind: "project-skill", skill })),
       });
-      if (!isCollapsed) {
-        for (const skill of projectOnly) out.push({ kind: "project-skill", skill });
-      }
     }
 
-    const groups = new Map<string, CatalogRow[]>();
+    const byOwner = new Map<string, CatalogRow[]>();
     for (const row of filtered) {
       const key = ownerOf(row);
-      const bucket = groups.get(key);
+      const bucket = byOwner.get(key);
       if (bucket) bucket.push(row);
-      else groups.set(key, [row]);
+      else byOwner.set(key, [row]);
     }
-    const keys = [...groups.keys()].sort((a, b) =>
+    const keys = [...byOwner.keys()].sort((a, b) =>
       a === "local" ? -1 : b === "local" ? 1 : a < b ? -1 : 1,
     );
     for (const key of keys) {
-      const rows = groups.get(key) ?? [];
-      const isCollapsed = collapsed.has(key) && !filterText;
+      const rows = byOwner.get(key) ?? [];
       out.push({
-        kind: "header",
         label: key,
-        count: rows.length,
         enabledCount: rows.filter((r) => r.enabled).length,
         rows,
-        collapsed: isCollapsed,
+        skills: rows.map((row) => ({ kind: "skill", row })),
       });
-      if (!isCollapsed) for (const row of rows) out.push({ kind: "skill", row });
     }
     return out;
-  }, [catalog.manifest.skills, catalog.projectSkills, filtered, collapsed, filterText]);
+  }, [catalog.manifest.skills, catalog.projectSkills, filtered, filterText]);
 
-  const viewport = Math.max(3, rowsAvail - 4 - (filterMode || filterText ? 1 : 0));
-  const selItem = clamp(selected, 0, Math.max(0, items.length - 1));
-  const win = windowOf(offset, selItem, items.length, viewport);
-  const currentItem = items[selItem];
+  const viewport = Math.max(3, rowsAvail - 3 - (filterMode || filterText ? 1 : 0));
+  const authorIndex = clamp(selectedAuthor, 0, Math.max(0, groups.length - 1));
+  const currentGroup = groups[authorIndex];
+  const skillIndex = clamp(selectedSkill, 0, Math.max(0, (currentGroup?.skills.length ?? 1) - 1));
+  const currentItem = currentGroup?.skills[skillIndex];
   const current: CatalogRow | undefined =
     currentItem?.kind === "skill" ? currentItem.row : undefined;
   const currentProjectSkill: ProjectSkill | undefined =
     currentItem?.kind === "project-skill" ? currentItem.skill : undefined;
-  const currentHeader = currentItem?.kind === "header" ? currentItem : undefined;
   const profileNames = Object.keys(catalog.manifest.profiles);
 
-  useEffect(() => setOffset(win), [win]);
+  useEffect(() => {
+    setSelectedAuthor((index) => clamp(index, 0, Math.max(0, groups.length - 1)));
+  }, [groups.length]);
 
-  // Reset preview file/scroll when the selected skill changes.
+  useEffect(() => {
+    setSelectedSkill((index) =>
+      clamp(index, 0, Math.max(0, (currentGroup?.skills.length ?? 1) - 1)),
+    );
+  }, [currentGroup?.skills.length]);
+
   const currentName = current?.name ?? currentProjectSkill?.name;
   useEffect(() => {
     setPreviewFile(0);
-    setPreviewScroll(0);
+    setPreviewRestore(0);
+    previewScroll.current?.scrollTo(0);
   }, [currentName]);
 
   const previewData = useMemo(() => {
-    if (!preview || (!current && !currentProjectSkill)) return null;
+    if (!current && !currentProjectSkill) return null;
     const files = current
       ? skillFiles(current.meta)
-      : projectSkillFiles(catalog.project, currentProjectSkill!);
+      : currentProjectSkill
+        ? projectSkillFiles(catalog.project, currentProjectSkill)
+        : [];
     if (files.length === 0) return null;
     const idx = clamp(previewFile, 0, files.length - 1);
     const file = files[idx] ?? "SKILL.md";
-    const lines = current
+    const content = current
       ? readSkillFile(current.meta, file)
-      : readProjectSkillFile(catalog.project, currentProjectSkill!, file);
-    return { files, idx, file, lines };
-  }, [preview, current, currentProjectSkill, catalog.project, previewFile]);
+      : currentProjectSkill
+        ? readProjectSkillFile(catalog.project, currentProjectSkill, file)
+        : "";
+    return { files, idx, file, content };
+  }, [current, currentProjectSkill, catalog.project, previewFile]);
+
+  useEffect(() => {
+    setPreviewRestore(0);
+    previewScroll.current?.scrollTo(0);
+  }, [previewData?.file]);
 
   // Incrementally hash-verify vendor rows after (re)load.
   useEffect(() => {
@@ -269,7 +274,8 @@ export function App() {
     const p = printable(key);
     if (p) {
       setFilterText((t) => t + p);
-      setSelected(1); // index 0 is the first group header; land on its first skill
+      setSelectedAuthor(0);
+      setSelectedSkill(0);
     }
     return true;
   };
@@ -396,50 +402,107 @@ export function App() {
   };
 
   const handleList = (key: KeyEvent): void => {
-    const move = (delta: number) =>
-      setSelected((i) => clamp(i + delta, 0, Math.max(0, items.length - 1)));
-    if (key.name === "q" || (key.ctrl && key.name === "c")) return quit();
+    const panelOrder: Panel[] = previewData
+      ? ["authors", "skills", "content", "files"]
+      : ["authors", "skills", "content"];
+    const focusPanel = (next: Panel) => {
+      if (panel === "content" && next !== "content") {
+        setPreviewRestore(previewScroll.current?.scrollTop ?? 0);
+      }
+      setPanel(next);
+      setExpanded(null);
+    };
+    const movePanel = (delta: number) => {
+      const index = Math.max(0, panelOrder.indexOf(panel));
+      focusPanel(panelOrder[clamp(index + delta, 0, panelOrder.length - 1)] ?? panel);
+    };
+    const moveAuthor = (delta: number) => {
+      setSelectedAuthor((index) => clamp(index + delta, 0, Math.max(0, groups.length - 1)));
+      setSelectedSkill(0);
+    };
+    const moveSkill = (delta: number) =>
+      setSelectedSkill((index) =>
+        clamp(index + delta, 0, Math.max(0, (currentGroup?.skills.length ?? 1) - 1)),
+      );
+    const moveFile = (delta: number) => {
+      if (!previewData) return;
+      setPreviewFile((index) => clamp(index + delta, 0, previewData.files.length - 1));
+    };
+    const focusedPrimary: PrimaryPanel = panel === "files" ? "content" : panel;
 
-    // preview panel
-    if (key.name === "tab" || key.name === "v") {
-      setPreview((p) => !p);
+    if (key.name === "q" || (key.ctrl && key.name === "c")) return quit();
+    if (key.name === "tab") {
+      const index = Math.max(0, panelOrder.indexOf(panel));
+      focusPanel(panelOrder[(index + 1) % panelOrder.length] ?? "authors");
       return;
     }
-    if (preview && previewData) {
-      const maxScroll = Math.max(0, previewData.lines.length - (viewport - 3));
-      if (key.name === "j" && key.shift) return setPreviewScroll((s) => clamp(s + 3, 0, maxScroll));
-      if (key.name === "k" && key.shift) return setPreviewScroll((s) => clamp(s - 3, 0, maxScroll));
-      if (key.name === "]") {
-        setPreviewScroll(0);
-        return setPreviewFile((i) => clamp(i + 1, 0, previewData.files.length - 1));
-      }
-      if (key.name === "[") {
-        setPreviewScroll(0);
-        return setPreviewFile((i) => clamp(i - 1, 0, previewData.files.length - 1));
-      }
+    if (key.name === "left" || (key.name === "h" && !key.shift)) return movePanel(-1);
+    if (key.name === "right" || (key.name === "l" && !key.shift)) return movePanel(1);
+    if (key.name === "0") {
+      focusPanel("authors");
+      return;
+    }
+    if (key.name === "$" || (key.name === "4" && key.shift)) {
+      focusPanel(previewData ? "files" : "content");
+      return;
+    }
+    if (key.name === "x") {
+      setExpanded((value) => value === focusedPrimary ? null : focusedPrimary);
+      return;
+    }
+    if (key.name === "v") {
+      setPanel("content");
+      setExpanded((value) => value === "content" ? null : "content");
+      return;
+    }
+    if (key.name === "escape") {
+      if (expanded) setExpanded(null);
+      else if (filterText) setFilterText("");
+      return;
+    }
+    if (previewData && key.name === "]") return moveFile(1);
+    if (previewData && key.name === "[") return moveFile(-1);
+    if ((key.name === "j" && key.shift) || key.name === "pagedown") {
+      previewScroll.current?.scrollBy(key.name === "pagedown" ? viewport - 3 : 3);
+      return;
+    }
+    if ((key.name === "k" && key.shift) || key.name === "pageup") {
+      previewScroll.current?.scrollBy(key.name === "pageup" ? -(viewport - 3) : -3);
+      return;
     }
 
-    if ((key.name === "j" && !key.shift) || key.name === "down") return move(1);
-    if ((key.name === "k" && !key.shift) || key.name === "up") return move(-1);
-    if (key.ctrl && key.name === "d") return move(Math.floor(viewport / 2));
-    if (key.ctrl && key.name === "u") return move(-Math.floor(viewport / 2));
+    const moveFocused = (delta: number) => {
+      if (panel === "authors") moveAuthor(delta);
+      else if (panel === "skills") moveSkill(delta);
+      else if (panel === "files") moveFile(delta);
+      else previewScroll.current?.scrollBy(delta);
+    };
+    if ((key.name === "j" && !key.shift) || key.name === "down") return moveFocused(1);
+    if ((key.name === "k" && !key.shift) || key.name === "up") return moveFocused(-1);
+    if (key.ctrl && key.name === "d") return moveFocused(Math.floor(viewport / 2));
+    if (key.ctrl && key.name === "u") return moveFocused(-Math.floor(viewport / 2));
     if (key.name === "g" && !key.shift) {
       const now = Date.now();
       if (now - pendingG.current < 500) {
-        setSelected(0);
+        if (panel === "authors") setSelectedAuthor(0);
+        else if (panel === "skills") setSelectedSkill(0);
+        else if (panel === "files") setPreviewFile(0);
+        else previewScroll.current?.scrollTo(0);
         pendingG.current = 0;
       } else {
         pendingG.current = now;
       }
       return;
     }
-    if (key.name === "g" && key.shift) return setSelected(Math.max(0, items.length - 1));
-    if (key.name === "/") {
-      setFilterMode(true);
-      setFilterText("");
+    if (key.name === "g" && key.shift) {
+      if (panel === "authors") setSelectedAuthor(Math.max(0, groups.length - 1));
+      else if (panel === "skills") setSelectedSkill(Math.max(0, (currentGroup?.skills.length ?? 1) - 1));
+      else if (panel === "files") setPreviewFile(Math.max(0, (previewData?.files.length ?? 1) - 1));
+      else previewScroll.current?.scrollTo(previewScroll.current.scrollHeight);
       return;
     }
-    if (key.name === "escape" && filterText) {
+    if (key.name === "/") {
+      setFilterMode(true);
       setFilterText("");
       return;
     }
@@ -482,56 +545,34 @@ export function App() {
       return setMode("profiles");
     }
 
-    // fold handling
-    const toggleFold = (label: string) =>
-      setCollapsed((prev) => {
-        const next = new Set(prev);
-        if (next.has(label)) next.delete(label);
-        else next.add(label);
-        return next;
-      });
-    if (currentItem?.kind === "header") {
-      if (key.name === "space" && currentItem.rows) {
-        const enable = !currentItem.rows.some((row) => row.enabled);
-        const result = setSkillsEnabled(currentItem.rows.map((row) => row.name), enable);
-        reportAction(`${enable ? "enabled" : "disabled"} ${currentItem.label}`, result);
+    if (key.name === "return" || key.name === "enter") {
+      if (panel === "authors") setPanel("skills");
+      else if (panel === "skills" || panel === "files") setPanel("content");
+      else if (current || currentProjectSkill) setMode("detail");
+      return;
+    }
+    if (key.name === "space") {
+      if (panel === "authors" && currentGroup?.rows) {
+        const enable = !currentGroup.rows.some((row) => row.enabled);
+        const result = setSkillsEnabled(currentGroup.rows.map((row) => row.name), enable);
+        reportAction(`${enable ? "enabled" : "disabled"} ${currentGroup.label}`, result);
         refresh();
         return;
       }
-      if (["return", "enter", "h", "left", "right"].includes(key.name)) {
-        return toggleFold(currentItem.label);
-      }
-      return;
-    }
-    const currentGroup = current
-      ? ownerOf(current)
-      : currentProjectSkill ? "project only" : undefined;
-    if ((key.name === "h" || key.name === "left") && currentGroup && !filterText) {
-      // fold the group under the cursor; selection lands on its header
-      const headerIndex = items.findIndex(
-        (item) => item.kind === "header" && item.label === currentGroup,
-      );
-      if (headerIndex >= 0) setSelected(headerIndex);
-      return toggleFold(currentGroup);
-    }
-
-    if (currentProjectSkill) {
-      if (key.name === "return" || key.name === "enter") return setMode("detail");
-      return;
-    }
-    if (!current) return;
-    if (key.name === "space") {
+      if (panel !== "skills") return;
+      if (!current) return;
       const res = setSkillsEnabled([current.name], !current.enabled);
       reportAction(`${current.enabled ? "disabled" : "enabled"} ${current.name}`, res);
       refresh();
       return;
     }
-    if (key.name === "return" || key.name === "enter") return setMode("detail");
+    if (key.name === "i" && (current || currentProjectSkill)) return setMode("detail");
+    if (!current) return;
     if (key.name === "d") {
       setDiffResult(diffSkill(current));
       return setMode("diff");
     }
-    if (key.name === "l") {
+    if (key.name === "l" && key.shift) {
       // prefer the directory Slinky was launched from (unless it's the skills repo)
       const cwd = process.cwd();
       const defaultProject = cwd !== REPO ? cwd : (catalog.state.recentProjects[0] ?? "");
@@ -556,34 +597,34 @@ export function App() {
 
   // ---- render ------------------------------------------------------------
 
-  const hereW = 6;
-  const nameW = Math.max(20, Math.min(34, ...[30]), ...catalog.rows.map((r) => r.name.length)) + 2;
-  const listW = preview ? hereW + nameW + 25 : cols;
   const enabledCount = catalog.rows.filter((r) => r.enabled).length;
   const hereCount = catalog.projectSkills.length;
   const projectName = basename(catalog.project) || catalog.project;
-
-  const header = (
-    <TextLine fg={colors.text} bg={colors.headerBg}>
-      <span fg={colors.accent}>{" slinky "}</span>
-      <span fg={colors.muted}>
-        {`${enabledCount}/${catalog.rows.length} enabled · profile: ${catalog.state.activeProfile ?? "-"} · project: ${projectName} · ${hereCount} here`}
-      </span>
-    </TextLine>
-  );
-
-  const columns = (
-    <TextLine fg={colors.muted}>
-      {`${fitCell("HERE", hereW)}${fitCell("NAME", nameW)}${fitCell("ON", 5)}${fitCell("LIVE", 9)}${fitCell("UP", 4)}CLAUDE`}
-    </TextLine>
-  );
+  const matchCount = groups.reduce((count, group) => count + group.skills.length, 0);
+  const narrow = cols < 96;
+  const tiny = cols < 48;
+  const focusedPrimary: PrimaryPanel = panel === "files" ? "content" : panel;
+  const showAuthors = expanded ? expanded === "authors" : narrow ? focusedPrimary === "authors" : true;
+  const showSkills = expanded ? expanded === "skills" : narrow ? focusedPrimary === "skills" : true;
+  const showContent = expanded ? expanded === "content" : narrow ? focusedPrimary === "content" : true;
+  const authorW = Math.max(18, Math.min(25, Math.floor(cols * 0.19)));
+  const skillW = Math.max(25, Math.min(36, Math.floor(cols * 0.27)));
+  const fileTreeW = Math.max(18, Math.min(28, Math.floor(cols * 0.21)));
+  const authorViewport = Math.max(1, viewport - 2);
+  const authorWin = windowOf(0, authorIndex, groups.length, authorViewport);
+  const skillViewport = Math.max(1, viewport - 2);
+  const skillWin = windowOf(0, skillIndex, currentGroup?.skills.length ?? 0, skillViewport);
+  const authorsWidth = expanded === "authors" || narrow ? cols : authorW;
+  const skillsWidth = expanded === "skills" || narrow ? cols : skillW;
+  const authorLabelW = Math.max(4, authorsWidth - 10);
+  const skillLabelW = Math.max(4, skillsWidth - 20);
 
   const upstreamCell = (row: CatalogRow): { label: string; fg: string } => {
     switch (row.upstream) {
       case "update":
         return { label: "^", fg: colors.yellow };
       case "gone":
-        return { label: "\u00d7", fg: colors.red };
+        return { label: "×", fg: colors.red };
       case "current":
         return { label: "=", fg: colors.muted };
       default:
@@ -591,68 +632,66 @@ export function App() {
     }
   };
 
-  const listRows = items.slice(win, win + viewport).map((item, i) => {
-    const itemIndex = win + i;
-    if (item.kind === "header") {
-      const isSel = itemIndex === selItem;
-      const arrow = item.collapsed ? "\u25b8" : "\u25be";
-      return (
-        <TextLine key={`h:${item.label}`} bg={isSel ? colors.selectedBg : undefined}>
-          <span fg={colors.accent}>{` ${arrow} ${item.label} `}</span>
-          <span fg={colors.muted}>
-            {item.enabledCount === null ? `(${item.count})` : `(${item.enabledCount}/${item.count})`}
-          </span>
-        </TextLine>
-      );
-    }
-    if (item.kind === "project-skill") {
-      const isSel = itemIndex === selItem;
-      return (
-        <TextLine
-          key={`p:${item.skill.name}`}
-          fg={isSel ? colors.selectedText : colors.yellow}
-          bg={isSel ? colors.selectedBg : undefined}
-        >
-          <span fg={colors.yellow}>{fitCell("local", hereW)}</span>
-          <span fg={isSel ? colors.selectedText : colors.yellow}>
-            {fitCell(item.skill.name, nameW)}
-          </span>
-          <span fg={colors.muted}>{fitCell("-", 5)}</span>
-          <span fg={colors.yellow}>{fitCell("project", 9)}</span>
-          <span fg={colors.muted}>{fitCell("", 4)}</span>
-          <span fg={item.skill.claude ? colors.text : colors.muted}>
-            {fitCell(item.skill.claude ? "yes" : "-", Math.max(1, listW - nameW - hereW - 19))}
-          </span>
-        </TextLine>
-      );
-    }
-    const row = item.row;
-    const isSel = itemIndex === selItem;
-    const fg = isSel ? colors.selectedText : colors.text;
-    const bg = isSel ? colors.selectedBg : undefined;
-    const here = row.projectLink
-      ? row.projectSkill
-        ? row.projectLink.mode === "symlink" ? "link" : "copy"
-        : "miss"
-      : row.projectSkill ? "local" : "";
-    const hereColor = here === "miss" ? colors.red : here === "local" ? colors.yellow : colors.accent;
+  const header = (
+    <TextLine fg={colors.text} bg={colors.headerBg}>
+      <span fg={colors.accent}>{" slinky "}</span>
+      <span fg={colors.muted}>
+        {`${enabledCount}/${catalog.rows.length} enabled · profile: ${catalog.state.activeProfile ?? "-"} · ${projectName} · ${hereCount} here`}
+      </span>
+      {currentName ? <span fg={colors.text}>{`  ${currentGroup?.label} / ${currentName}`}</span> : null}
+    </TextLine>
+  );
+
+  const authorRows = groups.slice(authorWin, authorWin + authorViewport).map((group, index) => {
+    const itemIndex = authorWin + index;
+    const selected = itemIndex === authorIndex;
+    const count = group.skills.length;
+    const status = group.enabledCount === null ? `${count}` : `${group.enabledCount}/${count}`;
     return (
-      <TextLine key={row.name} fg={fg} bg={bg}>
-        <span fg={here ? hereColor : colors.muted}>{fitCell(here, hereW)}</span>
-        <span fg={isSel ? colors.selectedText : here ? hereColor : colors.text}>
-          {fitCell(row.name, nameW)}
-        </span>
-        <span fg={row.enabled ? colors.green : colors.muted}>{fitCell(row.enabled ? "on" : "off", 5)}</span>
-        <span fg={liveColor[row.live]}>{fitCell(liveLabel[row.live], 9)}</span>
-        <span fg={upstreamCell(row).fg}>{fitCell(upstreamCell(row).label, 4)}</span>
-        <span fg={row.claude ? colors.text : colors.muted}>
-          {fitCell(row.claude ? "yes" : "-", Math.max(1, listW - nameW - hereW - 19))}
-        </span>
+      <TextLine
+        key={group.label}
+        fg={selected && panel === "authors" ? colors.selectedText : colors.text}
+        bg={selected ? colors.selectedBg : undefined}
+      >
+        <span fg={selected ? colors.accent : colors.muted}>{selected ? " › " : "   "}</span>
+        <span>{fitCell(group.label, authorLabelW)}</span>
+        <span fg={colors.muted}>{fitCell(status, 5, "right")}</span>
       </TextLine>
     );
   });
 
-  const matchCount = items.filter((item) => item.kind !== "header").length;
+  const skillRows = (currentGroup?.skills ?? [])
+    .slice(skillWin, skillWin + skillViewport)
+    .map((item, index) => {
+      const itemIndex = skillWin + index;
+      const selected = itemIndex === skillIndex;
+      const fg = selected && panel === "skills" ? colors.selectedText : colors.text;
+      const bg = selected ? colors.selectedBg : undefined;
+      if (item.kind === "project-skill") {
+        return (
+          <TextLine
+            key={`p:${item.skill.name}`}
+            fg={fg}
+            bg={bg}
+          >
+            <span fg={selected ? colors.accent : colors.muted}>{selected ? " › " : "   "}</span>
+            <span>{fitCell(item.skill.name, skillLabelW)}</span>
+            <span fg={colors.yellow}>{fitCell("project", 9, "right")}</span>
+          </TextLine>
+        );
+      }
+      const row = item.row;
+      return (
+        <TextLine key={row.name} fg={fg} bg={bg}>
+          <span fg={selected ? colors.accent : colors.muted}>{selected ? " › " : "   "}</span>
+          <span>{fitCell(row.name, skillLabelW)}</span>
+          <span fg={row.enabled ? colors.green : colors.muted}>{fitCell(row.enabled ? "on" : "off", 5, "right")}</span>
+          <span fg={liveColor[row.live]}>{fitCell(liveLabel[row.live], 7, "right")}</span>
+          <span fg={upstreamCell(row).fg}>{fitCell(upstreamCell(row).label, 3, "right")}</span>
+        </TextLine>
+      );
+    });
+
   const filterBar =
     filterMode || filterText ? (
       <TextLine fg={colors.text}>
@@ -665,51 +704,16 @@ export function App() {
 
   const footer = flash ? (
     <TextLine fg={flash.error ? colors.red : colors.green}>{` ${flash.text}`}</TextLine>
-  ) : preview ? (
-    <TextLine>
-      <span>{" "}</span>
-      <Hint keys="j/k" label="move" />
-      <Hint keys="J/K" label="scroll" />
-      <Hint keys="[/]" label="file" />
-      <Hint keys="tab" label="close preview" />
-      {current ? <Hint keys="space" label="toggle" /> : null}
-      <Hint keys="enter" label="detail" />
-      <Hint keys="?" label="help" />
-      <Hint keys="q" label="quit" />
-    </TextLine>
-  ) : currentProjectSkill ? (
-    <TextLine>
-      <span>{" "}</span>
-      <Hint keys="j/k" label="move" />
-      <Hint keys="h" label="fold" />
-      <Hint keys="tab" label="preview" />
-      <Hint keys="enter" label="detail" />
-      <Hint keys="/" label="filter" />
-      <Hint keys="?" label="help" />
-      <Hint keys="q" label="quit" />
-    </TextLine>
-  ) : currentHeader ? (
-    <TextLine>
-      <span>{" "}</span>
-      <Hint keys="j/k" label="move" />
-      <Hint keys="h/enter" label="fold" />
-      {currentHeader.rows ? <Hint keys="space" label="toggle author" /> : null}
-      <Hint keys="p" label="profiles" />
-      <Hint keys="/" label="filter" />
-      <Hint keys="?" label="help" />
-      <Hint keys="q" label="quit" />
-    </TextLine>
   ) : (
     <TextLine>
       <span>{" "}</span>
-      <Hint keys="j/k" label="move" />
-      <Hint keys="h" label="fold" />
-      <Hint keys="tab" label="preview" />
-      <Hint keys="space" label="toggle" />
-      <Hint keys="enter" label="detail" />
-      <Hint keys="l" label="link" />
-      <Hint keys="d" label="diff" />
-      <Hint keys="p" label="profiles" />
+      <Hint keys="h/l" label="pane" />
+      <Hint keys="tab" label="next" />
+      <Hint keys="j/k" label={panel === "content" ? "scroll" : "move"} />
+      <Hint keys="x" label={expanded ? "restore" : "expand"} />
+      {previewData && panel !== "authors" ? <Hint keys="[/]" label="file" /> : null}
+      {panel === "authors" || panel === "skills" ? <Hint keys="space" label="toggle" /> : null}
+      <Hint keys="i" label="details" />
       <Hint keys="/" label="filter" />
       <Hint keys="?" label="help" />
       <Hint keys="q" label="quit" />
@@ -720,14 +724,47 @@ export function App() {
     <box width="100%" height="100%" flexDirection="column">
       {header}
       {filterBar}
-      {columns}
-      <box flexGrow={1} flexDirection="row">
-        <box flexDirection="column" width={preview ? listW : "100%"}>
-          {listRows}
-          {matchCount === 0 ? <TextLine fg={colors.muted}>{"  no skills match"}</TextLine> : null}
-        </box>
-        {preview ? (
-          <PreviewPanel data={previewData} skill={currentName} scroll={previewScroll} height={viewport} />
+      <box flexGrow={1} flexDirection="row" backgroundColor={colors.panelBg}>
+        {showAuthors ? (
+          <box
+            width={authorsWidth}
+            flexDirection="column"
+            border
+            borderStyle="single"
+            borderColor={panel === "authors" ? colors.accent : colors.modalBorder}
+            title={` authors ${groups.length ? `${authorIndex + 1}/${groups.length}` : ""} `}
+            titleColor={panel === "authors" ? colors.accent : colors.muted}
+          >
+            {authorRows}
+            {groups.length === 0 ? <TextLine fg={colors.muted}>{"  no authors"}</TextLine> : null}
+          </box>
+        ) : null}
+        {showSkills ? (
+          <box
+            width={skillsWidth}
+            flexDirection="column"
+            border
+            borderStyle="single"
+            borderColor={panel === "skills" ? colors.accent : colors.modalBorder}
+            title={` skills · ${currentGroup?.label ?? "-"} `}
+            titleColor={panel === "skills" ? colors.accent : colors.muted}
+          >
+            {skillRows}
+            {matchCount === 0 ? <TextLine fg={colors.muted}>{"  no skills match"}</TextLine> : null}
+          </box>
+        ) : null}
+        {showContent ? (
+          <PreviewPanel
+            data={previewData}
+            skill={currentName}
+            panel={panel}
+            scrollRef={previewScroll}
+            restoreScroll={previewRestore}
+            syntaxStyle={syntaxStyle}
+            fileTreeWidth={fileTreeW}
+            fileTreeMode={tiny ? panel === "files" ? "only" : "hidden" : "split"}
+            height={viewport}
+          />
         ) : null}
       </box>
       {footer}
@@ -754,38 +791,129 @@ export function App() {
 function PreviewPanel({
   data,
   skill,
-  scroll,
+  panel,
+  scrollRef,
+  restoreScroll,
+  syntaxStyle,
+  fileTreeWidth,
+  fileTreeMode,
   height,
 }: {
-  data: { files: string[]; idx: number; file: string; lines: string[] } | null;
+  data: { files: string[]; idx: number; file: string; content: string } | null;
   skill: string | undefined;
-  scroll: number;
+  panel: Panel;
+  scrollRef: { current: ScrollBoxRenderable | null };
+  restoreScroll: number;
+  syntaxStyle: ReturnType<typeof createMarkdownSyntax>;
+  fileTreeWidth: number;
+  fileTreeMode: "split" | "hidden" | "only";
   height: number;
 }) {
-  const inner = Math.max(1, height - 2);
+  const treeOnly = fileTreeMode === "only";
+
+  useEffect(() => {
+    if (treeOnly || restoreScroll === 0) return;
+    const restore = () => scrollRef.current?.scrollTo(restoreScroll);
+    restore();
+    const timer = setTimeout(restore, 0);
+    return () => clearTimeout(timer);
+  }, [data?.file, restoreScroll, scrollRef, treeOnly]);
+
   if (!data || !skill) {
     return (
-      <box border borderStyle="single" borderColor={colors.modalBorder} flexGrow={1} paddingLeft={1}>
-        <text fg={colors.muted}>{"select a skill to preview"}</text>
+      <box border borderStyle="single" borderColor={colors.modalBorder} flexGrow={1} paddingLeft={2}>
+        <text fg={colors.muted}>{"Select a skill to read its documentation."}</text>
       </box>
     );
   }
-  const total = data.lines.length;
-  const end = Math.min(total, scroll + inner);
-  const pos = total > inner ? ` ${scroll + 1}-${end}/${total}` : "";
+  const treeRows = fileTreeRows(data.files);
+  const treeIndex = Math.max(0, treeRows.findIndex((row) => row.kind === "file" && row.path === data.file));
+  const treeViewport = Math.max(1, height - 4);
+  const treeWin = windowOf(0, treeIndex, treeRows.length, treeViewport);
+  const extension = extname(data.file).slice(1).toLowerCase();
+  const markdown = extension === "md" || extension === "mdx";
+  const content = markdown ? markdownBody(data.file, data.content) : data.content;
   return (
     <box
       border
       borderStyle="single"
-      borderColor={colors.modalBorder}
+      borderColor={panel === "content" || panel === "files" ? colors.accent : colors.modalBorder}
       flexGrow={1}
       flexDirection="column"
-      paddingLeft={1}
-      title={` ${skill}: ${data.file} (${data.idx + 1}/${data.files.length})${pos} `}
+      title={
+        treeOnly
+          ? ` files · ${skill} `
+          : fileTreeMode === "hidden"
+            ? ` document · ${data.file} `
+            : ` document · ${skill} / ${data.file} `
+      }
+      titleColor={panel === "content" || panel === "files" ? colors.accent : colors.muted}
+      backgroundColor={colors.panelBg}
     >
-      {data.lines.slice(scroll, scroll + inner).map((line, i) => (
-        <TextLine key={scroll + i} fg={colors.text}>{line.length > 0 ? line : " "}</TextLine>
-      ))}
+      <box flexGrow={1} flexDirection="row">
+        {!treeOnly ? (
+          <scrollbox
+            ref={scrollRef}
+            flexGrow={1}
+            paddingLeft={1}
+            viewportOptions={{ paddingRight: 1 }}
+            verticalScrollbarOptions={{
+              visible: true,
+              trackOptions: { backgroundColor: colors.panelBg, foregroundColor: colors.modalBorder },
+            }}
+          >
+            {markdown ? (
+              <markdown
+                width="100%"
+                content={content}
+                syntaxStyle={syntaxStyle}
+                streaming
+                internalBlockMode="top-level"
+                tableOptions={{ style: "grid", widthMode: "full", wrapMode: "word" }}
+                conceal
+                fg={colors.text}
+                bg={colors.panelBg}
+              />
+            ) : (
+              <code
+                width="100%"
+                content={content}
+                filetype={extension || "text"}
+                syntaxStyle={syntaxStyle}
+                wrapMode="none"
+                drawUnstyledText
+              />
+            )}
+          </scrollbox>
+        ) : null}
+        {fileTreeMode !== "hidden" ? (
+          <box
+            width={treeOnly ? "100%" : fileTreeWidth}
+            flexDirection="column"
+            border={treeOnly ? [] : ["left"]}
+            borderStyle="single"
+            borderColor={panel === "files" ? colors.accent : colors.modalBorder}
+            paddingLeft={1}
+          >
+            <TextLine fg={panel === "files" ? colors.accent : colors.muted}>
+              {` FILES  ${data.idx + 1}/${data.files.length}`}
+            </TextLine>
+            {treeRows.slice(treeWin, treeWin + treeViewport).map((row) => {
+              const selected = row.kind === "file" && row.path === data.file;
+              const prefix = row.kind === "folder" ? "▾ " : selected ? "› " : "  ";
+              return (
+                <TextLine
+                  key={`${row.kind}:${row.path}`}
+                  fg={row.kind === "folder" ? colors.accent : selected ? colors.selectedText : colors.text}
+                  bg={selected ? colors.selectedBg : undefined}
+                >
+                  {`${"  ".repeat(row.depth)}${prefix}${row.label}`}
+                </TextLine>
+              );
+            })}
+          </box>
+        ) : null}
+      </box>
     </box>
   );
 }
@@ -794,17 +922,21 @@ function PreviewPanel({
 
 function HelpModal({ cols }: { cols: number }) {
   const lines: Array<[string, string]> = [
-    ["j/k, arrows", "move selection"],
-    ["gg / G", "first / last"],
+    ["h/l, left/right", "focus the previous or next panel"],
+    ["tab", "focus the next panel, wrapping at the end"],
+    ["j/k, up/down", "move or scroll within the focused panel"],
+    ["0 / $", "focus the first / last panel"],
+    ["gg / G", "first / last item or document boundary"],
     ["ctrl-d / ctrl-u", "half-page down / up"],
-    ["h / left", "fold group (on a header: toggle fold)"],
-    ["tab / v", "toggle preview panel (SKILL.md + related files)"],
-    ["J / K", "scroll preview"],
-    ["[ / ]", "previous / next file in preview"],
-    ["space", "toggle skill; on an author header, toggle the entire group"],
-    ["u", "check upstream for updates (UP column: ^ update, \u00d7 gone)"],
-    ["enter", "skill detail"],
-    ["l", "link skill into a project (copy or symlink)"],
+    ["x", "expand or restore the focused primary panel"],
+    ["v", "expand or restore the document panel"],
+    ["J / K, PgUp/PgDn", "scroll the document from any panel"],
+    ["[ / ]", "previous / next related file"],
+    ["enter", "enter the next panel; from document, show details"],
+    ["i", "show skill details"],
+    ["space", "toggle a skill or every skill by the focused author"],
+    ["u", "check vendor skills for upstream updates"],
+    ["L", "link skill into a project (copy or symlink)"],
     ["d", "diff live global copy vs repo baseline"],
     ["p", "profile picker (exact-set apply)"],
     ["/", "filter by name (esc clears)"],
@@ -812,7 +944,7 @@ function HelpModal({ cols }: { cols: number }) {
     ["q / ctrl-c", "quit"],
   ];
   return (
-    <Modal title="help" width={64} cols={cols}>
+    <Modal title="help" width={76} cols={cols}>
       {lines.map(([keys, label]) => (
         <TextLine key={keys}>
           <span fg={colors.accent}>{fitCell(keys, 18)}</span>
@@ -918,7 +1050,7 @@ function ProjectSkillModal({
       {field("stores", stores)}
       {field("source", projectSkillPath(catalog.project, skill), colors.accent)}
       {field("catalog", "not managed by Slinky", colors.yellow)}
-      <TextLine fg={colors.muted}>{"esc to close · tab from the list to preview files"}</TextLine>
+      <TextLine fg={colors.muted}>{"esc to close · use the document panel to review files"}</TextLine>
     </Modal>
   );
 }

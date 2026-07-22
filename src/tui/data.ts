@@ -152,13 +152,11 @@ function filesAt(root: string): string[] {
   }
 }
 
-function readFileLines(root: string, rel: string): string[] {
+function readFileContent(root: string, rel: string): string {
   try {
-    return readFileSync(join(root, rel), "utf8")
-      .replaceAll("\t", "  ")
-      .split("\n");
+    return readFileSync(join(root, rel), "utf8");
   } catch {
-    return ["(unreadable file)"];
+    return "(unreadable file)";
   }
 }
 
@@ -187,8 +185,8 @@ export function skillFiles(meta: Skill): string[] {
   return filesAt(join(REPO, meta.path));
 }
 
-export function readSkillFile(meta: Skill, rel: string): string[] {
-  return readFileLines(join(REPO, meta.path), rel);
+export function readSkillFile(meta: Skill, rel: string): string {
+  return readFileContent(join(REPO, meta.path), rel);
 }
 
 export function skillDescription(meta: Skill): string {
@@ -207,8 +205,8 @@ export function readProjectSkillFile(
   project: string,
   skill: ProjectSkill,
   rel: string,
-): string[] {
-  return readFileLines(projectSkillPath(project, skill), rel);
+): string {
+  return readFileContent(projectSkillPath(project, skill), rel);
 }
 
 export function projectSkillDescription(project: string, skill: ProjectSkill): string {

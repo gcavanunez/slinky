@@ -63,6 +63,8 @@ Open the terminal UI:
 slinky
 ```
 
+The TUI is arranged as `authors | skills | document`, with a related-file tree on the document's right edge. Use `h/j/k/l` or the arrow keys to focus and navigate panels, `gg`/`G` to jump to boundaries, and `x` to expand the focused primary panel to the full terminal.
+
 Or inspect the catalog from the CLI:
 
 ```bash

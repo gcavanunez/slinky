@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { fitCell, printable, windowOf } from "./util.ts";
+import { fileTreeRows, fitCell, markdownBody, printable, windowOf } from "./util.ts";
 
 describe("fitCell", () => {
   test("pads to width", () => {
@@ -33,6 +33,9 @@ describe("printable", () => {
   test("single char", () => {
     expect(printable({ name: "a", sequence: "a", ctrl: false, meta: false })).toBe("a");
   });
+  test("shifted char preserves case", () => {
+    expect(printable({ name: "x", sequence: "X", ctrl: false, meta: false })).toBe("X");
+  });
   test("space keyword", () => {
     expect(printable({ name: "space", sequence: " ", ctrl: false, meta: false })).toBe(" ");
   });
@@ -44,5 +47,28 @@ describe("printable", () => {
   });
   test("paste via sequence", () => {
     expect(printable({ name: "", sequence: "/home/x", ctrl: false, meta: false })).toBe("/home/x");
+  });
+});
+
+describe("fileTreeRows", () => {
+  test("expands shared folders once", () => {
+    expect(fileTreeRows(["SKILL.md", "references/auth.md", "references/setup.md"])).toEqual([
+      { kind: "file", path: "SKILL.md", label: "SKILL.md", depth: 0 },
+      { kind: "folder", path: "references", label: "references", depth: 0 },
+      { kind: "file", path: "references/auth.md", label: "auth.md", depth: 1 },
+      { kind: "file", path: "references/setup.md", label: "setup.md", depth: 1 },
+    ]);
+  });
+});
+
+describe("markdownBody", () => {
+  test("removes SKILL.md frontmatter from the rendered body", () => {
+    expect(markdownBody("SKILL.md", "---\nname: test\ndescription: Test.\n---\n\n# Test\n")).toBe("\n# Test\n");
+  });
+
+  test("preserves related Markdown and body horizontal rules", () => {
+    const content = "# Notes\n\n---\n\nMore\n";
+    expect(markdownBody("references/notes.md", content)).toBe(content);
+    expect(markdownBody("SKILL.md", content)).toBe(content);
   });
 });

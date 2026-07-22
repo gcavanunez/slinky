@@ -70,7 +70,7 @@ describe("discoverProjectSkills", () => {
       join(root, ".agents", "skills", "agents-only", "SKILL.md"),
       "---\nname: agents-only\ndescription: Project-only fixture.\n---\n\n# Fixture\n",
     );
-    writeFileSync(join(root, ".agents", "skills", "agents-only", "notes.md"), "notes\n");
+    writeFileSync(join(root, ".agents", "skills", "agents-only", "notes.md"), "\tnotes\n");
 
     const skills = discoverProjectSkills(root);
     expect(skills).toEqual([
@@ -85,7 +85,7 @@ describe("discoverProjectSkills", () => {
       join(root, ".agents", "skills", "agents-only"),
     );
     expect(projectSkillFiles(root, agentsOnly)).toEqual(["SKILL.md", "notes.md"]);
-    expect(readProjectSkillFile(root, agentsOnly, "notes.md")).toEqual(["notes", ""]);
+    expect(readProjectSkillFile(root, agentsOnly, "notes.md")).toBe("\tnotes\n");
     expect(projectSkillDescription(root, agentsOnly)).toBe("Project-only fixture.");
   });
 });

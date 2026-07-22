@@ -23,11 +23,46 @@ export function windowOf(offset: number, selected: number, total: number, viewpo
 /** Extract printable text from a key event (single chars; "space" -> " "). */
 export function printable(key: Pick<KeyEvent, "name" | "sequence" | "ctrl" | "meta">): string {
   if (key.ctrl || key.meta) return "";
-  if (key.name === "space") return " ";
-  if (key.name && key.name.length === 1) return key.name;
   if (key.sequence && key.sequence.length >= 1 && !key.sequence.startsWith("\u001b")) {
-    // paste or shifted chars arrive via sequence
+    // Shifted characters and paste preserve their exact casing through sequence.
     return [...key.sequence].filter((ch) => ch >= " " && ch !== "\u007f").join("");
   }
+  if (key.name === "space") return " ";
+  if (key.name && key.name.length === 1) return key.name;
   return "";
+}
+
+export interface FileTreeRow {
+  kind: "folder" | "file";
+  path: string;
+  label: string;
+  depth: number;
+}
+
+/** Expand relative file paths into a compact, always-open file tree. */
+export function fileTreeRows(files: ReadonlyArray<string>): FileTreeRow[] {
+  const rows: FileTreeRow[] = [];
+  const seenFolders = new Set<string>();
+  for (const file of files) {
+    const parts = file.split("/");
+    for (let index = 0; index < parts.length - 1; index++) {
+      const path = parts.slice(0, index + 1).join("/");
+      if (seenFolders.has(path)) continue;
+      seenFolders.add(path);
+      rows.push({ kind: "folder", path, label: parts[index] ?? path, depth: index });
+    }
+    rows.push({
+      kind: "file",
+      path: file,
+      label: parts.at(-1) ?? file,
+      depth: Math.max(0, parts.length - 1),
+    });
+  }
+  return rows;
+}
+
+/** Hide skill metadata from the rendered document while preserving the source file itself. */
+export function markdownBody(file: string, content: string): string {
+  if (file !== "SKILL.md") return content;
+  return content.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "");
 }
