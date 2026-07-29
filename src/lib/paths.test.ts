@@ -36,18 +36,11 @@ describe("skills host discovery", () => {
     const elsewhere = join(root, "project");
     mkdirSync(join(home, ".config", "slinky"), { recursive: true });
     mkdirSync(elsewhere);
-    writeFileSync(
-      join(home, ".config", "slinky", "config.json"),
-      `${JSON.stringify({ repo: "/old/shape" })}\n`,
-    );
+    writeFileSync(join(home, ".config", "slinky", "config.json"), `${JSON.stringify({ repo: "/old/shape" })}\n`);
 
     const source = join(import.meta.dir, "paths.ts");
     const result = Bun.spawnSync(
-      [
-        process.execPath,
-        "-e",
-        `import { repoResolutionError } from ${JSON.stringify(source)}; console.log(repoResolutionError?._tag, repoResolutionError?.operation);`,
-      ],
+      [process.execPath, "-e", `import { repoResolutionError } from ${JSON.stringify(source)}; console.log(repoResolutionError?._tag, repoResolutionError?.operation);`],
       { cwd: elsewhere, env: { ...process.env, HOME: home, SLINKY_REPO: "" } },
     );
 
@@ -63,14 +56,10 @@ describe("skills host discovery", () => {
 
     const source = join(import.meta.dir, "paths.ts");
     const missing = join(root, "missing-host");
-    const result = Bun.spawnSync(
-      [
-        process.execPath,
-        "-e",
-        `import { REPO, repoResolutionError } from ${JSON.stringify(source)}; console.log(REPO, repoResolutionError?._tag);`,
-      ],
-      { cwd: elsewhere, env: { ...process.env, SLINKY_REPO: missing } },
-    );
+    const result = Bun.spawnSync([process.execPath, "-e", `import { REPO, repoResolutionError } from ${JSON.stringify(source)}; console.log(REPO, repoResolutionError?._tag);`], {
+      cwd: elsewhere,
+      env: { ...process.env, SLINKY_REPO: missing },
+    });
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout.toString().trim()).toBe("ConfigFileError");

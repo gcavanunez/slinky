@@ -1,0 +1,7 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "rules": {
+    "require-yield": "off",
+    "no-underscore-dangle": "off"
+  }
+}

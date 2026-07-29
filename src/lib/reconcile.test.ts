@@ -1,12 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { resolve } from "node:path";
 import * as Schema from "effect/Schema";
-import {
-  Manifest,
-  State,
-  version,
-  withManifestSkill,
-} from "./manifest.ts";
+import { Manifest, State, version, withManifestSkill } from "./manifest.ts";
 import type { Observation } from "./reconcile.ts";
 import { planSync } from "./reconcile.ts";
 import { CLAUDE_SKILLS, claudeRelTarget } from "./paths.ts";
@@ -190,21 +185,12 @@ describe("planSync", () => {
   });
 
   test("prototype-like skill names observe as missing", () => {
-    const withConstructor = withManifestSkill(
-      manifest(),
-      "constructor",
-      {
-        origin: "local",
-        path: "skills/constructor",
-        contentHash: "3".repeat(64),
-      },
-    );
-    const plan = planSync(
-      withConstructor,
-      state({ mine: false, theirs: false, constructor: true }),
-      { agents: {}, claude: {} },
-      { repo: REPO },
-    );
+    const withConstructor = withManifestSkill(manifest(), "constructor", {
+      origin: "local",
+      path: "skills/constructor",
+      contentHash: "3".repeat(64),
+    });
+    const plan = planSync(withConstructor, state({ mine: false, theirs: false, constructor: true }), { agents: {}, claude: {} }, { repo: REPO });
     expect(plan.actions).toContainEqual({
       type: "ensure-agents-symlink",
       skill: "constructor",

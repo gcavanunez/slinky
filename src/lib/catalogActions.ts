@@ -1,13 +1,5 @@
 import type { ProjectLink, State } from "../domain/model.ts";
-import {
-  getProfile,
-  getSkill,
-  loadManifest,
-  loadState,
-  saveState,
-  withProfile,
-  withSkillEnabled,
-} from "./manifest.ts";
+import { getProfile, getSkill, loadManifest, loadState, saveState, withProfile, withSkillEnabled } from "./manifest.ts";
 import { applyUnlink, linkSkill, prepareUnlink, unlinkSkill } from "./linker.ts";
 import type { LinkOptions } from "./linker.ts";
 import { apply, observe, planSync } from "./reconcile.ts";
@@ -23,11 +15,7 @@ export interface MutationOptions {
   readonly force?: boolean;
 }
 
-function changeState(
-  manifest: ReturnType<typeof loadManifest>,
-  next: State,
-  options: MutationOptions,
-): ActionResult {
+function changeState(manifest: ReturnType<typeof loadManifest>, next: State, options: MutationOptions): ActionResult {
   const plan = planSync(manifest, next, observe(), { force: options.force });
   if (options.dryRun) {
     return {
@@ -46,20 +34,13 @@ function changeState(
   };
 }
 
-export function setSkillsEnabled(
-  names: ReadonlyArray<string>,
-  enabled: boolean,
-  options: MutationOptions = {},
-): ActionResult {
+export function setSkillsEnabled(names: ReadonlyArray<string>, enabled: boolean, options: MutationOptions = {}): ActionResult {
   const manifest = loadManifest();
   const state = loadState(manifest);
   for (const name of names) {
     if (!getSkill(manifest, name)) throw new Error(`unknown skill: ${name}`);
   }
-  const next = names.reduce(
-    (current, name) => withSkillEnabled(current, name, enabled),
-    state,
-  );
+  const next = names.reduce((current, name) => withSkillEnabled(current, name, enabled), state);
   return changeState(manifest, next, options);
 }
 

@@ -1,40 +1,36 @@
 import { cpSync, existsSync, lstatSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join, posix } from "node:path";
 import * as Schema from "effect/Schema";
-import {
-  Skill,
-  SkillLockDecodeError,
-  nowUtc,
-  withManifestSkill,
-} from "../domain/model.ts";
+import { Skill, SkillLockDecodeError, nowUtc, withManifestSkill } from "../domain/model.ts";
 import type { Manifest } from "../domain/model.ts";
 import { contentHash } from "./hash.ts";
 import { AGENTS_SKILLS, CLAUDE_SKILLS, OPENCODE_SKILLS, REPO, SKILL_LOCK } from "./paths.ts";
 
 const HttpUrl = Schema.NonEmptyString.check(
-  Schema.makeFilter((value) => {
-    try {
-      const url = new URL(value);
-      return url.protocol === "http:" || url.protocol === "https:";
-    } catch {
-      return false;
-    }
-  }, { expected: "an HTTP or HTTPS URL" }),
+  Schema.makeFilter(
+    (value) => {
+      try {
+        const url = new URL(value);
+        return url.protocol === "http:" || url.protocol === "https:";
+      } catch {
+        return false;
+      }
+    },
+    { expected: "an HTTP or HTTPS URL" },
+  ),
 );
 const RepositoryRelativePath = Schema.NonEmptyString.check(
-  Schema.makeFilter((value) => {
-    if (value.includes("\\") || value.includes("\0") || posix.isAbsolute(value)) return false;
-    if (value === "." || posix.normalize(value) !== value) return false;
-    return !value.split("/").includes("..");
-  }, { expected: "a normalized repository-relative path" }),
+  Schema.makeFilter(
+    (value) => {
+      if (value.includes("\\") || value.includes("\0") || posix.isAbsolute(value)) return false;
+      if (value === "." || posix.normalize(value) !== value) return false;
+      return !value.split("/").includes("..");
+    },
+    { expected: "a normalized repository-relative path" },
+  ),
 );
-const UpstreamTreeHash = Schema.String.check(
-  Schema.isPattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
-);
-const AdoptionDestination = Schema.Union([
-  Schema.String.check(Schema.isPattern(/^skills\/[^/]+$/)),
-  Schema.String.check(Schema.isPattern(/^vendor\/[^/]+\/[^/]+$/)),
-]);
+const UpstreamTreeHash = Schema.String.check(Schema.isPattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/));
+const AdoptionDestination = Schema.Union([Schema.String.check(Schema.isPattern(/^skills\/[^/]+$/)), Schema.String.check(Schema.isPattern(/^vendor\/[^/]+\/[^/]+$/))]);
 const decodeAdoptionDestination = Schema.decodeUnknownSync(AdoptionDestination);
 const decodeSkill = Schema.decodeUnknownSync(Skill);
 
@@ -70,8 +66,7 @@ export interface SkillLockSnapshot {
 }
 
 const detail = (error: unknown): string => (error instanceof Error ? error.message : String(error));
-const isMissing = (error: unknown): boolean =>
-  error instanceof Error && "code" in error && error.code === "ENOENT";
+const isMissing = (error: unknown): boolean => error instanceof Error && "code" in error && error.code === "ENOENT";
 
 export function decodeSkillLock(input: unknown): Readonly<Record<string, LockMeta>> {
   return Schema.decodeUnknownSync(SkillLockFile)(input).skills;
@@ -82,9 +77,7 @@ export function readSkillLock(): SkillLockSnapshot {
   try {
     raw = readFileSync(SKILL_LOCK, "utf8");
   } catch (error) {
-    return isMissing(error)
-      ? { skills: {} }
-      : { skills: {}, warning: new SkillLockDecodeError(SKILL_LOCK, "read", detail(error)) };
+    return isMissing(error) ? { skills: {} } : { skills: {}, warning: new SkillLockDecodeError(SKILL_LOCK, "read", detail(error)) };
   }
 
   let input: unknown;
@@ -113,11 +106,11 @@ export function upstreamFromLock(lock: LockMeta | undefined): VendorUpstream {
   }
   const tracking =
     lock.skillPath && lock.skillFolderHash
-      ? {
+      ? ({
           kind: "tree",
           path: lock.skillPath,
           hash: lock.skillFolderHash,
-        } as const
+        } as const)
       : ({ kind: "untracked" } as const);
   return {
     kind: "github",
@@ -190,22 +183,12 @@ export interface Adoption {
 /** Repo-relative destination for an adopted skill. */
 export function adoptDestination(candidate: ForeignSkill, opts: AdoptOptions): string {
   if (opts.local) return decodeAdoptionDestination(posix.join("skills", candidate.name));
-  const owner =
-    opts.owner ??
-      (candidate.lock
-        ? candidate.lock.sourceType === "github"
-          ? candidate.lock.source.split("/")[0]!
-          : candidate.lock.source
-        : "_unknown");
+  const owner = opts.owner ?? (candidate.lock ? (candidate.lock.sourceType === "github" ? candidate.lock.source.split("/")[0]! : candidate.lock.source) : "_unknown");
   return decodeAdoptionDestination(posix.join("vendor", owner, candidate.name));
 }
 
 /** Copy a foreign skill into the repo and return an updated manifest. */
-export function adoptSkill(
-  manifest: Manifest,
-  candidate: ForeignSkill,
-  opts: AdoptOptions = {},
-): Adoption {
+export function adoptSkill(manifest: Manifest, candidate: ForeignSkill, opts: AdoptOptions = {}): Adoption {
   const rel = adoptDestination(candidate, opts);
   const dest = join(REPO, rel);
   if (existsSync(dest)) throw new Error(`destination already exists: ${rel}`);

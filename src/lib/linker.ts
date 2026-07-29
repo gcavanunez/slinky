@@ -1,14 +1,7 @@
 import { cpSync, existsSync, lstatSync, mkdirSync, readlinkSync, rmSync, symlinkSync } from "node:fs";
 import { dirname, join, posix, resolve } from "node:path";
 import * as Schema from "effect/Schema";
-import {
-  ProjectLink,
-  formatUtc,
-  getSkill,
-  nowUtc,
-  withProjectLink,
-  withoutProjectLink,
-} from "../domain/model.ts";
+import { ProjectLink, formatUtc, getSkill, nowUtc, withProjectLink, withoutProjectLink } from "../domain/model.ts";
 import type { Manifest, State } from "../domain/model.ts";
 import { updateExcludeFile } from "./exclude.ts";
 import { contentHash } from "./hash.ts";
@@ -48,11 +41,7 @@ export function findLink(state: State, skill: string, project: string): ProjectL
   return state.projectLinks.find((link) => link.skill === skill && resolve(link.project) === resolved);
 }
 
-export function linkSkill(
-  manifest: Manifest,
-  state: State,
-  opts: LinkOptions,
-): { readonly state: State; readonly link: ProjectLink } {
+export function linkSkill(manifest: Manifest, state: State, opts: LinkOptions): { readonly state: State; readonly link: ProjectLink } {
   const meta = getSkill(manifest, opts.skill);
   if (!meta) throw new Error(`unknown skill: ${opts.skill}`);
   const project = resolve(opts.project);
@@ -100,10 +89,7 @@ export function linkSkill(
       excludedTargets,
       linkedAt: formatUtc(nowUtc()),
     };
-    const linkInput =
-      opts.mode === "copy"
-        ? { ...common, mode: "copy", snapshotHash: contentHash(source) }
-        : { ...common, mode: "symlink" };
+    const linkInput = opts.mode === "copy" ? { ...common, mode: "copy", snapshotHash: contentHash(source) } : { ...common, mode: "symlink" };
     const link = decodeProjectLink(linkInput);
 
     return { state: withProjectLink(state, link), link };
@@ -141,14 +127,10 @@ export function prepareUnlink(
     if (link.mode === "copy") {
       const stat = lstatSync(canonical);
       if (!stat.isDirectory() || contentHash(canonical) !== link.snapshotHash) {
-        throw new Error(
-          `${skill} copy in ${project} was modified since linking; use --force to remove anyway`,
-        );
+        throw new Error(`${skill} copy in ${project} was modified since linking; use --force to remove anyway`);
       }
     } else if (!symlinkPointsTo(canonical, join(REPO, meta.path))) {
-      throw new Error(
-        `${skill} symlink in ${project} was replaced or retargeted; use --force to remove anyway`,
-      );
+      throw new Error(`${skill} symlink in ${project} was replaced or retargeted; use --force to remove anyway`);
     }
   }
 
@@ -178,9 +160,7 @@ export function applyUnlink(link: ProjectLink): ReadonlyArray<string> {
         link.excludedTargets.map((target) => `/${target}/`),
       );
     } catch (error) {
-      warnings.push(
-        `could not clean .git/info/exclude in ${link.project}: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      warnings.push(`could not clean .git/info/exclude in ${link.project}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
   return warnings;

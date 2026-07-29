@@ -27,10 +27,7 @@ function host(): string {
 
 function run(root: string, body: string) {
   const source = join(import.meta.dir, "manifest.ts");
-  return Bun.spawnSync(
-    [process.execPath, "-e", `import * as Store from ${JSON.stringify(source)}; ${body}`],
-    { env: { ...process.env, SLINKY_REPO: root } },
-  );
+  return Bun.spawnSync([process.execPath, "-e", `import * as Store from ${JSON.stringify(source)}; ${body}`], { env: { ...process.env, SLINKY_REPO: root } });
 }
 
 describe("manifest persistence", () => {
@@ -47,14 +44,8 @@ describe("manifest persistence", () => {
 
   test("rejects excess manifest properties", () => {
     const root = host();
-    writeFileSync(
-      join(root, "skills.manifest.json"),
-      `${JSON.stringify({ ...manifest(), generatedAt: "2026-07-13T12:00:00.000Z" })}\n`,
-    );
-    const result = run(
-      root,
-      `try { Store.loadManifest(); } catch (error) { console.log(error._tag, error.operation); process.exit(7); }`,
-    );
+    writeFileSync(join(root, "skills.manifest.json"), `${JSON.stringify({ ...manifest(), generatedAt: "2026-07-13T12:00:00.000Z" })}\n`);
+    const result = run(root, `try { Store.loadManifest(); } catch (error) { console.log(error._tag, error.operation); process.exit(7); }`);
 
     expect(result.exitCode).toBe(7);
     expect(result.stdout.toString().trim()).toBe("ManifestFileError decode");

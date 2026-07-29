@@ -36,19 +36,13 @@ export function excludeFilePath(project: string): string | null {
   return join(gitPath, "info", "exclude");
 }
 
-export function updateExcludeFile(
-  project: string,
-  op: "add" | "remove",
-  lines: string[],
-): string[] {
+export function updateExcludeFile(project: string, op: "add" | "remove", lines: string[]): string[] {
   const file = excludeFilePath(project);
   if (!file) return [];
   mkdirSync(join(project, ".git", "info"), { recursive: true });
   const existing = existsSync(file) ? readFileSync(file, "utf8") : "";
   const present = new Set(existing.split("\n").map((line) => line.trim()));
-  const affected = lines.filter((line) =>
-    op === "add" ? !present.has(line.trim()) : present.has(line.trim()),
-  );
+  const affected = lines.filter((line) => (op === "add" ? !present.has(line.trim()) : present.has(line.trim())));
   const next = op === "add" ? addExcludeLines(existing, lines) : removeExcludeLines(existing, lines);
   if (next !== existing) writeFileSync(file, next);
   return affected;

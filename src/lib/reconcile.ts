@@ -1,14 +1,4 @@
-import {
-  cpSync,
-  existsSync,
-  lstatSync,
-  mkdirSync,
-  readdirSync,
-  readlinkSync,
-  realpathSync,
-  rmSync,
-  symlinkSync,
-} from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { isSkillEnabled } from "../domain/model.ts";
 import { contentHash } from "./hash.ts";
@@ -75,12 +65,7 @@ export function observe(): Observation {
  * - any enabled skill:    ~/.claude/skills/<n> is a symlink -> ../../.agents/skills/<n>
  * - disabled skill:       absent from both dirs (repo retains the content)
  */
-export function planSync(
-  manifest: Manifest,
-  state: State,
-  obs: Observation,
-  opts: { force?: boolean; repo?: string } = {},
-): Plan {
+export function planSync(manifest: Manifest, state: State, obs: Observation, opts: { force?: boolean; repo?: string } = {}): Plan {
   const repo = opts.repo ?? REPO;
   const force = opts.force ?? false;
   const actions: Action[] = [];
@@ -88,12 +73,8 @@ export function planSync(
 
   for (const [name, meta] of Object.entries(manifest.skills)) {
     const enabled = isSkillEnabled(state, name);
-    const live: LiveEntry = Object.hasOwn(obs.agents, name)
-      ? obs.agents[name]!
-      : { kind: "missing" };
-    const claude: LiveEntry = Object.hasOwn(obs.claude, name)
-      ? obs.claude[name]!
-      : { kind: "missing" };
+    const live: LiveEntry = Object.hasOwn(obs.agents, name) ? obs.agents[name]! : { kind: "missing" };
+    const claude: LiveEntry = Object.hasOwn(obs.claude, name) ? obs.claude[name]! : { kind: "missing" };
     const repoPath = resolve(repo, meta.path);
     const claudeTarget = resolve(CLAUDE_SKILLS, claudeRelTarget(name));
 

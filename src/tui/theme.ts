@@ -28,7 +28,10 @@ export function createMarkdownSyntax(): SyntaxStyle {
     { scope: ["type", "class", "module", "type.builtin"], style: { foreground: colors.cyan } },
     { scope: ["variable", "variable.parameter", "property", "field"], style: { foreground: colors.text } },
     { scope: ["operator", "keyword.operator", "punctuation", "punctuation.bracket", "punctuation.delimiter"], style: { foreground: colors.muted } },
-    { scope: ["markup.heading", "markup.heading.2", "markup.heading.3", "markup.heading.4", "markup.heading.5", "markup.heading.6"], style: { foreground: colors.accent, bold: true } },
+    {
+      scope: ["markup.heading", "markup.heading.2", "markup.heading.3", "markup.heading.4", "markup.heading.5", "markup.heading.6"],
+      style: { foreground: colors.accent, bold: true },
+    },
     { scope: ["markup.heading.1"], style: { foreground: colors.accent, bold: true, underline: true } },
     { scope: ["markup.bold", "markup.strong"], style: { foreground: colors.text, bold: true } },
     { scope: ["markup.italic", "markup.quote"], style: { foreground: colors.muted, italic: true } },

@@ -130,11 +130,7 @@ export function detectChanges(manifest: Manifest, state: State, names?: string[]
 
 /** True when the baseline (vendor/, skills/, manifest) has uncommitted changes. */
 export function baselineDirty(): boolean {
-  const res = spawnSync(
-    "git",
-    ["status", "--porcelain", "--", "vendor", "skills", "skills.manifest.json"],
-    { cwd: REPO, encoding: "utf8" },
-  );
+  const res = spawnSync("git", ["status", "--porcelain", "--", "vendor", "skills", "skills.manifest.json"], { cwd: REPO, encoding: "utf8" });
   if (res.error) throw new Error(`git status failed: ${res.error.message}`);
   if (res.status !== 0) {
     throw new Error(`git status failed (${res.status ?? "unknown"}): ${(res.stderr ?? "").trim()}`);

@@ -4,14 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as Schema from "effect/Schema";
 import { State, version } from "../lib/manifest.ts";
-import {
-  discoverProjectSkills,
-  projectForCwd,
-  projectSkillDescription,
-  projectSkillFiles,
-  projectSkillPath,
-  readProjectSkillFile,
-} from "./data.ts";
+import { discoverProjectSkills, projectForCwd, projectSkillDescription, projectSkillFiles, projectSkillPath, readProjectSkillFile } from "./data.ts";
 
 const roots: string[] = [];
 
@@ -47,9 +40,7 @@ const state = Schema.decodeUnknownSync(State)({
 
 describe("projectForCwd", () => {
   test("uses the nearest linked project ancestor", () => {
-    expect(projectForCwd(state, "/workspace/repo/packages/app/src")).toBe(
-      "/workspace/repo/packages/app",
-    );
+    expect(projectForCwd(state, "/workspace/repo/packages/app/src")).toBe("/workspace/repo/packages/app");
     expect(projectForCwd(state, "/workspace/repo/other")).toBe("/workspace/repo");
   });
 
@@ -66,10 +57,7 @@ describe("discoverProjectSkills", () => {
     mkdirSync(join(root, ".agents", "skills", "shared"), { recursive: true });
     mkdirSync(join(root, ".claude", "skills", "claude-only"), { recursive: true });
     mkdirSync(join(root, ".claude", "skills", "shared"), { recursive: true });
-    writeFileSync(
-      join(root, ".agents", "skills", "agents-only", "SKILL.md"),
-      "---\nname: agents-only\ndescription: Project-only fixture.\n---\n\n# Fixture\n",
-    );
+    writeFileSync(join(root, ".agents", "skills", "agents-only", "SKILL.md"), "---\nname: agents-only\ndescription: Project-only fixture.\n---\n\n# Fixture\n");
     writeFileSync(join(root, ".agents", "skills", "agents-only", "notes.md"), "\tnotes\n");
 
     const skills = discoverProjectSkills(root);
@@ -81,9 +69,7 @@ describe("discoverProjectSkills", () => {
 
     const agentsOnly = skills[0];
     if (!agentsOnly) throw new Error("expected agents-only fixture");
-    expect(projectSkillPath(root, agentsOnly)).toBe(
-      join(root, ".agents", "skills", "agents-only"),
-    );
+    expect(projectSkillPath(root, agentsOnly)).toBe(join(root, ".agents", "skills", "agents-only"));
     expect(projectSkillFiles(root, agentsOnly)).toEqual(["SKILL.md", "notes.md"]);
     expect(readProjectSkillFile(root, agentsOnly, "notes.md")).toBe("\tnotes\n");
     expect(projectSkillDescription(root, agentsOnly)).toBe("Project-only fixture.");

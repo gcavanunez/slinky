@@ -7,50 +7,45 @@ export const version = 1;
 const SkillName = Schema.NonEmptyString;
 const ProfileName = Schema.NonEmptyString;
 const ContentHash = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));
-const UpstreamTreeHash = Schema.String.check(
-  Schema.isPattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
-);
+const UpstreamTreeHash = Schema.String.check(Schema.isPattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/));
 const PortableRelativePath = Schema.NonEmptyString.check(
-  Schema.makeFilter((value) => {
-    if (value.includes("\\") || value.includes("\0") || posix.isAbsolute(value)) return false;
-    if (value === "." || posix.normalize(value) !== value) return false;
-    return !value.split("/").includes("..");
-  }, { expected: "a normalized portable relative path" }),
+  Schema.makeFilter(
+    (value) => {
+      if (value.includes("\\") || value.includes("\0") || posix.isAbsolute(value)) return false;
+      if (value === "." || posix.normalize(value) !== value) return false;
+      return !value.split("/").includes("..");
+    },
+    { expected: "a normalized portable relative path" },
+  ),
 );
 const LocalSkillPath = PortableRelativePath.check(Schema.isPattern(/^skills\/.+$/));
-const VendorSkillPath = PortableRelativePath.check(
-  Schema.isPattern(/^vendor\/[^/]+\/[^/]+$/),
-);
-const ProjectPath = Schema.NonEmptyString.check(
-  Schema.makeFilter(
-    (value) => isAbsolute(value) && normalize(value) === value,
-    { expected: "a normalized absolute project path" },
-  ),
-);
-const HostPath = Schema.NonEmptyString.check(
-  Schema.makeFilter(
-    (value) => isAbsolute(value) && normalize(value) === value,
-    { expected: "a normalized absolute skills host path" },
-  ),
-);
+const VendorSkillPath = PortableRelativePath.check(Schema.isPattern(/^vendor\/[^/]+\/[^/]+$/));
+const ProjectPath = Schema.NonEmptyString.check(Schema.makeFilter((value) => isAbsolute(value) && normalize(value) === value, { expected: "a normalized absolute project path" }));
+const HostPath = Schema.NonEmptyString.check(Schema.makeFilter((value) => isAbsolute(value) && normalize(value) === value, { expected: "a normalized absolute skills host path" }));
 const RepositorySlug = Schema.NonEmptyString.check(
-  Schema.makeFilter((value) => {
-    const [owner, repository, extra] = value.split("/");
-    if (!owner || !repository || extra !== undefined || repository === "." || repository === "..") {
-      return false;
-    }
-    return /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(owner) && /^[A-Za-z0-9._-]+$/.test(repository);
-  }, { expected: "a GitHub repository in owner/name form" }),
+  Schema.makeFilter(
+    (value) => {
+      const [owner, repository, extra] = value.split("/");
+      if (!owner || !repository || extra !== undefined || repository === "." || repository === "..") {
+        return false;
+      }
+      return /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(owner) && /^[A-Za-z0-9._-]+$/.test(repository);
+    },
+    { expected: "a GitHub repository in owner/name form" },
+  ),
 );
 const HttpUrl = Schema.NonEmptyString.check(
-  Schema.makeFilter((value) => {
-    try {
-      const url = new URL(value);
-      return url.protocol === "http:" || url.protocol === "https:";
-    } catch {
-      return false;
-    }
-  }, { expected: "an HTTP or HTTPS URL" }),
+  Schema.makeFilter(
+    (value) => {
+      try {
+        const url = new URL(value);
+        return url.protocol === "http:" || url.protocol === "https:";
+      } catch {
+        return false;
+      }
+    },
+    { expected: "an HTTP or HTTPS URL" },
+  ),
 );
 const CanonicalUtc = Schema.DateTimeUtcFromString;
 
@@ -274,10 +269,7 @@ export function withProjectLink(state: State, link: ProjectLink): State {
   return decodeState({
     ...state,
     projectLinks: [...state.projectLinks, link],
-    recentProjects: [
-      link.project,
-      ...state.recentProjects.filter((project) => project !== link.project),
-    ].slice(0, 10),
+    recentProjects: [link.project, ...state.recentProjects.filter((project) => project !== link.project)].slice(0, 10),
   });
 }
 
@@ -315,16 +307,17 @@ export function validateState(manifest: Manifest, state: State): ReadonlyArray<s
 
 const FileOperation = Schema.Literals(["read", "parse", "decode", "encode", "write", "rename"]);
 
-export class ManifestFileError extends Schema.TaggedErrorClass<ManifestFileError>()(
-  "ManifestFileError",
-  {
-    path: Schema.String,
-    operation: FileOperation,
-    detail: Schema.String,
-    message: Schema.String,
-  },
-) {
-  constructor(readonly path: string, readonly operation: typeof FileOperation.Type, readonly detail: string) {
+export class ManifestFileError extends Schema.TaggedErrorClass<ManifestFileError>()("ManifestFileError", {
+  path: Schema.String,
+  operation: FileOperation,
+  detail: Schema.String,
+  message: Schema.String,
+}) {
+  constructor(
+    readonly path: string,
+    readonly operation: typeof FileOperation.Type,
+    readonly detail: string,
+  ) {
     super({ path, operation, detail, message: `${operation} ${path}: ${detail}` });
   }
 }
@@ -335,7 +328,11 @@ export class StateFileError extends Schema.TaggedErrorClass<StateFileError>()("S
   detail: Schema.String,
   message: Schema.String,
 }) {
-  constructor(readonly path: string, readonly operation: typeof FileOperation.Type, readonly detail: string) {
+  constructor(
+    readonly path: string,
+    readonly operation: typeof FileOperation.Type,
+    readonly detail: string,
+  ) {
     super({ path, operation, detail, message: `${operation} ${path}: ${detail}` });
   }
 }
@@ -346,21 +343,26 @@ export class ConfigFileError extends Schema.TaggedErrorClass<ConfigFileError>()(
   detail: Schema.String,
   message: Schema.String,
 }) {
-  constructor(readonly path: string, readonly operation: typeof FileOperation.Type, readonly detail: string) {
+  constructor(
+    readonly path: string,
+    readonly operation: typeof FileOperation.Type,
+    readonly detail: string,
+  ) {
     super({ path, operation, detail, message: `${operation} ${path}: ${detail}` });
   }
 }
 
-export class SkillLockDecodeError extends Schema.TaggedErrorClass<SkillLockDecodeError>()(
-  "SkillLockDecodeError",
-  {
-    path: Schema.String,
-    operation: FileOperation,
-    detail: Schema.String,
-    message: Schema.String,
-  },
-) {
-  constructor(readonly path: string, readonly operation: typeof FileOperation.Type, readonly detail: string) {
+export class SkillLockDecodeError extends Schema.TaggedErrorClass<SkillLockDecodeError>()("SkillLockDecodeError", {
+  path: Schema.String,
+  operation: FileOperation,
+  detail: Schema.String,
+  message: Schema.String,
+}) {
+  constructor(
+    readonly path: string,
+    readonly operation: typeof FileOperation.Type,
+    readonly detail: string,
+  ) {
     super({ path, operation, detail, message: `${operation} ${path}: ${detail}` });
   }
 }

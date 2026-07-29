@@ -34,8 +34,7 @@ export function diffDirs(a: string, b: string): DirDiff {
   return { added, removed, modified, unchanged };
 }
 
-export const isClean = (d: DirDiff) =>
-  d.added.length === 0 && d.removed.length === 0 && d.modified.length === 0;
+export const isClean = (d: DirDiff) => d.added.length === 0 && d.removed.length === 0 && d.modified.length === 0;
 
 /** Render a unified diff via the system `diff -ruN`. */
 export function unifiedDiff(a: string, b: string): string {

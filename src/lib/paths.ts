@@ -3,11 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as Schema from "effect/Schema";
-import {
-  ConfigFileError,
-  SlinkyConfig,
-  version,
-} from "../domain/model.ts";
+import { ConfigFileError, SlinkyConfig, version } from "../domain/model.ts";
 
 export const HOME = homedir();
 
@@ -44,8 +40,7 @@ interface RepoResolution {
 }
 
 const detail = (error: unknown): string => (error instanceof Error ? error.message : String(error));
-const isMissing = (error: unknown): boolean =>
-  error instanceof Error && "code" in error && error.code === "ENOENT";
+const isMissing = (error: unknown): boolean => error instanceof Error && "code" in error && error.code === "ENOENT";
 
 function resolveRepo(): RepoResolution {
   const env = process.env["SLINKY_REPO"];
@@ -55,11 +50,7 @@ function resolveRepo(): RepoResolution {
       ? { repo }
       : {
           repo: null,
-          error: new ConfigFileError(
-            "$SLINKY_REPO",
-            "decode",
-            `configured host has no skills.manifest.json: ${repo}`,
-          ),
+          error: new ConfigFileError("$SLINKY_REPO", "decode", `configured host has no skills.manifest.json: ${repo}`),
         };
   }
 
@@ -81,11 +72,7 @@ function resolveRepo(): RepoResolution {
       if (!isRepoDir(config.host)) {
         return {
           repo: null,
-          error: new ConfigFileError(
-            SLINKY_CONFIG,
-            "decode",
-            `configured host has no skills.manifest.json: ${config.host}`,
-          ),
+          error: new ConfigFileError(SLINKY_CONFIG, "decode", `configured host has no skills.manifest.json: ${config.host}`),
         };
       }
       return { repo: config.host };

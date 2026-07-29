@@ -10,9 +10,7 @@ export const BACKUP_DIR = join(HOME, ".local", "state", "my-agent-skills-backups
  * touch anything. Returns the archive path, or null when nothing exists yet.
  */
 export function backupGlobalDirs(): string | null {
-  const targets = [AGENTS_SKILLS, CLAUDE_SKILLS, OPENCODE_SKILLS]
-    .filter((d) => existsSync(d))
-    .map((d) => relative(HOME, d));
+  const targets = [AGENTS_SKILLS, CLAUDE_SKILLS, OPENCODE_SKILLS].filter((d) => existsSync(d)).map((d) => relative(HOME, d));
   if (targets.length === 0) return null;
 
   mkdirSync(BACKUP_DIR, { recursive: true });

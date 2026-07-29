@@ -104,7 +104,7 @@ describe("unlink safety", () => {
     mkdirSync(join(project, ".agents", "skills"), { recursive: true });
     symlinkSync(resolve(REPO, "skills", "foo"), target);
 
-    const { manifest, state, link } = fixtures(project);
+    const { manifest, state } = fixtures(project);
 
     const prepared = prepareUnlink(manifest, state, "foo", project);
     expect(linkExists(target)).toBe(true);

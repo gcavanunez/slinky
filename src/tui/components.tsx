@@ -5,19 +5,15 @@ import { colors } from "./theme.ts";
 export function TextLine(props: { fg?: string; bg?: string; children?: ReactNode }) {
   return (
     <box height={1}>
-      <text wrapMode="none" truncate fg={props.fg ?? colors.text} bg={props.bg}>{props.children}</text>
+      <text wrapMode="none" truncate fg={props.fg ?? colors.text} bg={props.bg}>
+        {props.children}
+      </text>
     </box>
   );
 }
 
 /** Centered overlay panel. */
-export function Modal(props: {
-  title: string;
-  width: number;
-  cols: number;
-  top?: number;
-  children?: ReactNode;
-}) {
+export function Modal(props: { title: string; width: number; cols: number; top?: number; children?: ReactNode }) {
   const width = Math.min(props.width, props.cols - 4);
   const left = Math.max(0, Math.floor((props.cols - width) / 2));
   return (

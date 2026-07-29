@@ -4,11 +4,7 @@ import { homedir } from "node:os";
 import { contentHash, walkFiles } from "../lib/hash.ts";
 import { diffDirs } from "../lib/diff.ts";
 import type { DirDiff } from "../lib/diff.ts";
-import {
-  isSkillEnabled,
-  loadManifest,
-  loadState,
-} from "../lib/manifest.ts";
+import { isSkillEnabled, loadManifest, loadState } from "../lib/manifest.ts";
 import type { Manifest, ProjectLink, Skill, State } from "../lib/manifest.ts";
 import { AGENTS_SKILLS, REPO } from "../lib/paths.ts";
 import { observe } from "../lib/reconcile.ts";
@@ -48,15 +44,14 @@ export interface ProjectSkill {
 export function projectForCwd(state: State, cwd: string = process.cwd()): string {
   const current = resolve(cwd);
   const projects = new Set(state.projectLinks.map((link) => resolve(link.project)));
-  return [...projects]
-    .filter((project) => {
-      const child = relative(project, current);
-      return (
-        child === "" ||
-        (child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child))
-      );
-    })
-    .sort((a, b) => b.length - a.length)[0] ?? current;
+  return (
+    [...projects]
+      .filter((project) => {
+        const child = relative(project, current);
+        return child === "" || (child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child));
+      })
+      .sort((a, b) => b.length - a.length)[0] ?? current
+  );
 }
 
 /** Discover skills physically present in a project's agent stores. */
@@ -96,9 +91,7 @@ export function loadCatalog(): Catalog {
     } else {
       live = liveKind === "dir" ? "checking" : "missing";
     }
-    const projectLink = state.projectLinks.find(
-      (link) => link.skill === name && resolve(link.project) === project,
-    ) ?? null;
+    const projectLink = state.projectLinks.find((link) => link.skill === name && resolve(link.project) === project) ?? null;
     return {
       name,
       origin: meta.origin,
@@ -122,10 +115,7 @@ export function verifyRow(row: CatalogRow): CatalogRow {
   return { ...row, live: ok ? "ok" : "drift" };
 }
 
-export type DiffResult =
-  | { kind: "local" }
-  | { kind: "not-installed" }
-  | { kind: "diff"; diff: DirDiff };
+export type DiffResult = { kind: "local" } | { kind: "not-installed" } | { kind: "diff"; diff: DirDiff };
 
 export function diffSkill(row: CatalogRow): DiffResult {
   if (row.origin === "local") return { kind: "local" };
@@ -144,9 +134,7 @@ export function expandHome(path: string): string {
 
 function filesAt(root: string): string[] {
   try {
-    return walkFiles(root).sort((a, b) =>
-      a === "SKILL.md" ? -1 : b === "SKILL.md" ? 1 : a < b ? -1 : 1,
-    );
+    return walkFiles(root).sort((a, b) => (a === "SKILL.md" ? -1 : b === "SKILL.md" ? 1 : a < b ? -1 : 1));
   } catch {
     return [];
   }
@@ -172,7 +160,11 @@ function descriptionAt(root: string): string {
     if (value === ">" || value === "|" || value === ">-" || value === "|-") {
       // block scalar: take the first indented line
       const after = fm.slice(fm.indexOf(dm[0]) + dm[0].length);
-      value = after.split("\n").find((l) => l.trim().length > 0)?.trim() ?? "";
+      value =
+        after
+          .split("\n")
+          .find((l) => l.trim().length > 0)
+          ?.trim() ?? "";
     }
     return value.replace(/^["']|["']$/g, "");
   } catch {
@@ -201,11 +193,7 @@ export function projectSkillFiles(project: string, skill: ProjectSkill): string[
   return filesAt(projectSkillPath(project, skill));
 }
 
-export function readProjectSkillFile(
-  project: string,
-  skill: ProjectSkill,
-  rel: string,
-): string {
+export function readProjectSkillFile(project: string, skill: ProjectSkill, rel: string): string {
   return readFileContent(projectSkillPath(project, skill), rel);
 }
 

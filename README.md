@@ -14,8 +14,10 @@ Humans can use the terminal UI directly, but the happy path also works well thro
 ## Install
 
 ```bash
-bun add --global @gcavanunez/slinky
+npm install --global @gcavanunez/slinky
 ```
+
+The npm package installs the standalone binary for the current platform; Bun is not required at runtime. Prebuilt archives for macOS and glibc-based Linux on ARM64 and x64 are also attached to each [GitHub release](https://github.com/gcavanunez/slinky/releases) for installations that do not use npm.
 
 Install the agent skill too:
 
@@ -23,7 +25,7 @@ Install the agent skill too:
 npx skills add gcavanunez/slinky --skill slinky --global --yes
 ```
 
-Slinky requires Bun 1.3 or newer, Git, `tar`, `diff`, Node.js/`npx`, and network access for upstream checks and updates.
+Slinky requires Git, `tar`, `diff`, Node.js/`npx`, and network access for upstream checks and updates. Bun 1.3 or newer is required only for source development.
 
 ## Getting Started
 
@@ -237,6 +239,8 @@ npx skills add . --skill slinky --global --yes
 bun test
 bun run typecheck
 bun run build:bin
+bun run build:standalone
+bun run package:smoke
 ```
 
-The standalone executable is written to `dist/slinky`.
+The local standalone executable is written to `dist/slinky`. The release build writes the current platform's archive, checksum, and staged executable under `dist/release/`.

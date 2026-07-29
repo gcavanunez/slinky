@@ -1,15 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import {
-  chmodSync,
-  existsSync,
-  lstatSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -53,27 +43,24 @@ function fixture(disabledSkills: ReadonlyArray<string> = []): Fixture {
   );
   writeFileSync(
     statePath,
-    `${JSON.stringify({
-      version,
-      disabledSkills,
-      activeProfile: null,
-      projectLinks: [],
-      recentProjects: [],
-    }, null, 2)}\n`,
+    `${JSON.stringify(
+      {
+        version,
+        disabledSkills,
+        activeProfile: null,
+        projectLinks: [],
+        recentProjects: [],
+      },
+      null,
+      2,
+    )}\n`,
   );
   return { root, host, home, statePath };
 }
 
 function run(f: Fixture, body: string) {
   const source = join(import.meta.dir, "catalogActions.ts");
-  return Bun.spawnSync(
-    [
-      process.execPath,
-      "-e",
-      `import * as Actions from ${JSON.stringify(source)}; ${body}`,
-    ],
-    { env: { ...process.env, HOME: f.home, SLINKY_REPO: f.host } },
-  );
+  return Bun.spawnSync([process.execPath, "-e", `import * as Actions from ${JSON.stringify(source)}; ${body}`], { env: { ...process.env, HOME: f.home, SLINKY_REPO: f.host } });
 }
 
 function pathExists(path: string): boolean {
@@ -89,10 +76,7 @@ function installGlobal(f: Fixture, name: string): void {
   mkdirSync(join(f.home, ".agents", "skills"), { recursive: true });
   mkdirSync(join(f.home, ".claude", "skills"), { recursive: true });
   symlinkSync(join(f.host, "skills", name), join(f.home, ".agents", "skills", name));
-  symlinkSync(
-    join("..", "..", ".agents", "skills", name),
-    join(f.home, ".claude", "skills", name),
-  );
+  symlinkSync(join("..", "..", ".agents", "skills", name), join(f.home, ".claude", "skills", name));
 }
 
 function state(f: Fixture): {
@@ -109,20 +93,11 @@ describe("catalog actions", () => {
     for (const name of ["foo", "bar", "baz"]) installGlobal(f, name);
     rmSync(join(f.home, ".claude", "skills", "baz"));
 
-    const result = run(
-      f,
-      `console.log(JSON.stringify(Actions.setSkillsEnabled(["foo", "bar"], false)));`,
-    );
+    const result = run(f, `console.log(JSON.stringify(Actions.setSkillsEnabled(["foo", "bar"], false)));`);
 
     expect(result.exitCode).toBe(0);
     expect(JSON.parse(result.stdout.toString())).toEqual({
-      messages: [
-        "removed ~/.claude/skills/foo",
-        "removed ~/.claude/skills/bar",
-        "removed ~/.agents/skills/foo",
-        "removed ~/.agents/skills/bar",
-        "linked ~/.claude/skills/baz",
-      ],
+      messages: ["removed ~/.claude/skills/foo", "removed ~/.claude/skills/bar", "removed ~/.agents/skills/foo", "removed ~/.agents/skills/bar", "linked ~/.claude/skills/baz"],
       warnings: [],
       dryRun: false,
     });
@@ -137,10 +112,7 @@ describe("catalog actions", () => {
     const f = fixture(["foo", "bar"]);
     installGlobal(f, "baz");
 
-    const result = run(
-      f,
-      `console.log(JSON.stringify(Actions.setSkillsEnabled(["foo", "bar"], true)));`,
-    );
+    const result = run(f, `console.log(JSON.stringify(Actions.setSkillsEnabled(["foo", "bar"], true)));`);
 
     expect(result.exitCode).toBe(0);
     expect(state(f).disabledSkills).toEqual([]);
@@ -155,10 +127,7 @@ describe("catalog actions", () => {
     installGlobal(f, "foo");
     const before = readFileSync(f.statePath);
 
-    const result = run(
-      f,
-      `try { Actions.setSkillsEnabled(["foo", "missing"], false); } catch (error) { console.error(error.message); process.exit(7); }`,
-    );
+    const result = run(f, `try { Actions.setSkillsEnabled(["foo", "missing"], false); } catch (error) { console.error(error.message); process.exit(7); }`);
 
     expect(result.exitCode).toBe(7);
     expect(result.stderr.toString()).toContain("unknown skill: missing");
@@ -215,10 +184,7 @@ describe("catalog actions", () => {
     const project = join(f.root, "project");
     mkdirSync(join(project, ".claude"), { recursive: true });
 
-    const result = run(
-      f,
-      `console.log(JSON.stringify(Actions.linkProjectSkill({ skill: "foo", project: ${JSON.stringify(project)}, mode: "symlink", gitExclude: false })));`,
-    );
+    const result = run(f, `console.log(JSON.stringify(Actions.linkProjectSkill({ skill: "foo", project: ${JSON.stringify(project)}, mode: "symlink", gitExclude: false })));`);
 
     expect(result.exitCode).toBe(0);
     const persisted = state(f);
@@ -236,15 +202,9 @@ describe("catalog actions", () => {
     const f = fixture();
     const project = join(f.root, "project");
     mkdirSync(join(project, ".claude"), { recursive: true });
-    expect(run(
-      f,
-      `Actions.linkProjectSkill({ skill: "foo", project: ${JSON.stringify(project)}, mode: "symlink", gitExclude: false });`,
-    ).exitCode).toBe(0);
+    expect(run(f, `Actions.linkProjectSkill({ skill: "foo", project: ${JSON.stringify(project)}, mode: "symlink", gitExclude: false });`).exitCode).toBe(0);
 
-    const result = run(
-      f,
-      `console.log(JSON.stringify(Actions.unlinkProjectSkill("foo", ${JSON.stringify(project)})));`,
-    );
+    const result = run(f, `console.log(JSON.stringify(Actions.unlinkProjectSkill("foo", ${JSON.stringify(project)})));`);
 
     expect(result.exitCode).toBe(0);
     expect(state(f).projectLinks).toEqual([]);

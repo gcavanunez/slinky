@@ -1,14 +1,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import * as Schema from "effect/Schema";
-import {
-  emptyState,
-  Manifest,
-  ManifestFileError,
-  State,
-  StateFileError,
-  validateState,
-} from "../domain/model.ts";
+import { emptyState, Manifest, ManifestFileError, State, StateFileError, validateState } from "../domain/model.ts";
 import { MANIFEST_PATH, STATE_PATH } from "./paths.ts";
 
 export {
@@ -34,14 +27,9 @@ const strict = { errors: "all", onExcessProperty: "error" } as const;
 const missing = Symbol("missing-owned-file");
 
 const detail = (error: unknown): string => (error instanceof Error ? error.message : String(error));
-const isMissing = (error: unknown): boolean =>
-  error instanceof Error && "code" in error && error.code === "ENOENT";
+const isMissing = (error: unknown): boolean => error instanceof Error && "code" in error && error.code === "ENOENT";
 
-function readOwnedJson(
-  path: string,
-  ErrorClass: typeof ManifestFileError | typeof StateFileError,
-  missingIsEmpty = false,
-): unknown | typeof missing {
+function readOwnedJson(path: string, ErrorClass: typeof ManifestFileError | typeof StateFileError, missingIsEmpty = false): unknown | typeof missing {
   let raw: string;
   try {
     raw = readFileSync(path, "utf8");
@@ -56,11 +44,7 @@ function readOwnedJson(
   }
 }
 
-function writeOwnedJson(
-  path: string,
-  value: unknown,
-  ErrorClass: typeof ManifestFileError | typeof StateFileError,
-): void {
+function writeOwnedJson(path: string, value: unknown, ErrorClass: typeof ManifestFileError | typeof StateFileError): void {
   const tmp = `${path}.${process.pid}.tmp`;
   try {
     mkdirSync(dirname(path), { recursive: true });
@@ -122,9 +106,5 @@ export function saveState(state: State): void {
   } catch (error) {
     throw new StateFileError(STATE_PATH, "encode", detail(error));
   }
-  writeOwnedJson(
-    STATE_PATH,
-    { ...encoded, disabledSkills: [...encoded.disabledSkills].sort() },
-    StateFileError,
-  );
+  writeOwnedJson(STATE_PATH, { ...encoded, disabledSkills: [...encoded.disabledSkills].sort() }, StateFileError);
 }

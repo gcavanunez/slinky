@@ -8,7 +8,7 @@ description: >
   vendor, restore, adopt, or link coding-agent skills through Slinky. Prefer
   Slinky commands over editing its machine state or global skill directories
   by hand.
-compatibility: Requires the slinky CLI, Bun 1.3+, Git, tar, diff, Node.js/npx, and network access for upstream operations.
+compatibility: Requires the slinky CLI, Git, tar, diff, Node.js/npx, and network access for upstream operations.
 ---
 
 # Slinky
@@ -23,7 +23,7 @@ Confirm the CLI is available:
 slinky help
 ```
 
-Install the CLI with `bun add --global @gcavanunez/slinky`, then install this skill with `npx skills add gcavanunez/slinky --skill slinky --global --yes`. The repository README has separate source-checkout instructions for contributors.
+Install the CLI with `npm install --global @gcavanunez/slinky`, then install this skill with `npx skills add gcavanunez/slinky --skill slinky --global --yes`. The repository README has separate source-checkout instructions for contributors.
 
 Point it at an existing skills host:
 

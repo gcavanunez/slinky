@@ -30,13 +30,17 @@ function fixture(disabledSkills: ReadonlyArray<string> = []) {
   const statePath = join(host, ".local", "state.json");
   writeFileSync(
     statePath,
-    `${JSON.stringify({
-      version: 1,
-      disabledSkills,
-      activeProfile: null,
-      projectLinks: [],
-      recentProjects: [],
-    }, null, 2)}\n`,
+    `${JSON.stringify(
+      {
+        version: 1,
+        disabledSkills,
+        activeProfile: null,
+        projectLinks: [],
+        recentProjects: [],
+      },
+      null,
+      2,
+    )}\n`,
   );
   return { root, host, home, statePath };
 }
@@ -64,10 +68,7 @@ describe("CLI options", () => {
   test("rejects a misspelled dry-run option instead of syncing", () => {
     const host = mkdtempSync(join(tmpdir(), "slinky-cli-"));
     roots.push(host);
-    writeFileSync(
-      join(host, "skills.manifest.json"),
-      `${JSON.stringify({ version: 1, skills: {}, profiles: {} })}\n`,
-    );
+    writeFileSync(join(host, "skills.manifest.json"), `${JSON.stringify({ version: 1, skills: {}, profiles: {} })}\n`);
 
     const cli = join(import.meta.dir, "cli.ts");
     const result = Bun.spawnSync([process.execPath, cli, "sync", "--dryrun"], {
@@ -153,13 +154,7 @@ describe("CLI catalog actions", () => {
     const project = join(f.root, "project");
     mkdirSync(join(project, ".claude"), { recursive: true });
 
-    const link = runCli(f.host, f.home, [
-      "link",
-      "foo",
-      project,
-      "--symlink",
-      "--no-exclude",
-    ]);
+    const link = runCli(f.host, f.home, ["link", "foo", project, "--symlink", "--no-exclude"]);
     expect(link.exitCode).toBe(0);
     expect(link.stdout.toString()).toContain(`linked \u001b[1mfoo\u001b[0m (symlink) into ${project}`);
     expect(stateAt(f.statePath).projectLinks).toHaveLength(1);

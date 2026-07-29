@@ -1,17 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import * as Schema from "effect/Schema";
-import {
-  Manifest,
-  ProjectLink,
-  State,
-  getSkill,
-  validateState,
-  withManifestSkill,
-  withProfile,
-  withProjectLink,
-  withSkillEnabled,
-  withoutProjectLink,
-} from "./model.ts";
+import { Manifest, ProjectLink, State, getSkill, validateState, withManifestSkill, withProfile, withProjectLink, withSkillEnabled, withoutProjectLink } from "./model.ts";
 
 const strict = { errors: "all", onExcessProperty: "error" } as const;
 const HASH = "a".repeat(64);
@@ -55,9 +44,7 @@ describe("domain schemas", () => {
 
     const encoded = Schema.encodeSync(Manifest)(manifest, strict);
     const vendor = Object.values(encoded.skills).find((skill) => skill.origin === "vendor");
-    expect(vendor?.origin === "vendor" ? vendor.vendoredAt : null).toBe(
-      "2026-07-13T12:00:00.000Z",
-    );
+    expect(vendor?.origin === "vendor" ? vendor.vendoredAt : null).toBe("2026-07-13T12:00:00.000Z");
   });
 
   test("rejects the superseded manifest shape", () => {
@@ -229,14 +216,8 @@ describe("domain schemas", () => {
 
   test("rejects profile drift and prototype-like phantom references", () => {
     const manifest = Schema.decodeUnknownSync(Manifest)(manifestInput(), strict);
-    const drifted = Schema.decodeUnknownSync(State)(
-      { ...stateInput(), activeProfile: "work", disabledSkills: [] },
-      strict,
-    );
-    const phantom = Schema.decodeUnknownSync(State)(
-      { ...stateInput(), disabledSkills: ["constructor"] },
-      strict,
-    );
+    const drifted = Schema.decodeUnknownSync(State)({ ...stateInput(), activeProfile: "work", disabledSkills: [] }, strict);
+    const phantom = Schema.decodeUnknownSync(State)({ ...stateInput(), disabledSkills: ["constructor"] }, strict);
 
     expect(validateState(manifest, drifted)).not.toEqual([]);
     expect(validateState(manifest, phantom)).not.toEqual([]);
