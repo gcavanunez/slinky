@@ -78,7 +78,6 @@ export function App() {
   const { width: cols, height: rowsAvail } = useTerminalDimensions();
 
   const [catalog, setCatalog] = useState<Catalog>(() => loadCatalog());
-  const [nonce, setNonce] = useState(0);
   const [selectedAuthor, setSelectedAuthor] = useState(0);
   const [selectedSkill, setSelectedSkill] = useState(0);
   const [panel, setPanel] = useState<Panel>("skills");
@@ -90,14 +89,11 @@ export function App() {
   const [profileIndex, setProfileIndex] = useState(0);
   const [diffResult, setDiffResult] = useState<DiffResult | null>(null);
   const [linkFlow, setLinkFlow] = useState<LinkFlow | null>(null);
-  const [previewFile, setPreviewFile] = useState(0);
-  const [previewRestore, setPreviewRestore] = useState(0);
+  const [previewState, setPreviewState] = useState<{ skill: string | null; file: number; restore: number }>({ skill: null, file: 0, restore: 0 });
 
   const quitting = useRef(false);
   const pendingG = useRef(0);
   const previewScroll = useRef<ScrollBoxRenderable | null>(null);
-  const rowsRef = useRef(catalog.rows);
-  rowsRef.current = catalog.rows;
   const syntaxStyle = useMemo(() => createMarkdownSyntax(), []);
 
   useEffect(() => () => syntaxStyle.destroy(), [syntaxStyle]);
@@ -147,20 +143,9 @@ export function App() {
   const currentProjectSkill: ProjectSkill | undefined = currentItem?.kind === "project-skill" ? currentItem.skill : undefined;
   const profileNames = Object.keys(catalog.manifest.profiles);
 
-  useEffect(() => {
-    setSelectedAuthor((index) => clamp(index, 0, Math.max(0, groups.length - 1)));
-  }, [groups.length]);
-
-  useEffect(() => {
-    setSelectedSkill((index) => clamp(index, 0, Math.max(0, (currentGroup?.skills.length ?? 1) - 1)));
-  }, [currentGroup?.skills.length]);
-
   const currentName = current?.name ?? currentProjectSkill?.name;
-  useEffect(() => {
-    setPreviewFile(0);
-    setPreviewRestore(0);
-    previewScroll.current?.scrollTo(0);
-  }, [currentName]);
+  const previewFile = previewState.skill === currentName ? previewState.file : 0;
+  const previewRestore = previewState.skill === currentName ? previewState.restore : 0;
 
   const previewData = useMemo(() => {
     if (!current && !currentProjectSkill) return null;
@@ -173,36 +158,25 @@ export function App() {
   }, [current, currentProjectSkill, catalog.project, previewFile]);
 
   useEffect(() => {
-    setPreviewRestore(0);
     previewScroll.current?.scrollTo(0);
-  }, [previewData?.file]);
+  }, [currentName, previewData?.file]);
 
   // Incrementally hash-verify vendor rows after (re)load.
   useEffect(() => {
-    let cancelled = false;
-    const tick = () => {
-      if (cancelled) return;
-      const idx = rowsRef.current.findIndex((r) => r.live === "checking");
-      if (idx < 0) return;
-      const row = rowsRef.current[idx];
-      if (!row) return;
+    const row = catalog.rows.find((candidate) => candidate.live === "checking");
+    if (!row) return;
+    const timer = setTimeout(() => {
       const verified = verifyRow(row);
-      setCatalog((prev) => ({
-        ...prev,
-        rows: prev.rows.map((r) => (r.name === verified.name ? verified : r)),
+      setCatalog((previous) => ({
+        ...previous,
+        rows: previous.rows.map((candidate) => (candidate.name === verified.name && candidate.live === "checking" ? verified : candidate)),
       }));
-      setTimeout(tick, 0);
-    };
-    const t = setTimeout(tick, 10);
-    return () => {
-      cancelled = true;
-      clearTimeout(t);
-    };
-  }, [nonce]);
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [catalog.rows]);
 
   const refresh = () => {
     setCatalog(loadCatalog());
-    setNonce((n) => n + 1);
   };
 
   const notify = (text: string, error = false) => {
@@ -374,7 +348,7 @@ export function App() {
     const panelOrder: Panel[] = previewData ? ["authors", "skills", "content", "files"] : ["authors", "skills", "content"];
     const focusPanel = (next: Panel) => {
       if (panel === "content" && next !== "content") {
-        setPreviewRestore(previewScroll.current?.scrollTop ?? 0);
+        setPreviewState({ skill: currentName ?? null, file: previewFile, restore: previewScroll.current?.scrollTop ?? 0 });
       }
       setPanel(next);
       setExpanded(null);
@@ -384,13 +358,13 @@ export function App() {
       focusPanel(panelOrder[clamp(index + delta, 0, panelOrder.length - 1)] ?? panel);
     };
     const moveAuthor = (delta: number) => {
-      setSelectedAuthor((index) => clamp(index + delta, 0, Math.max(0, groups.length - 1)));
+      setSelectedAuthor(clamp(authorIndex + delta, 0, Math.max(0, groups.length - 1)));
       setSelectedSkill(0);
     };
-    const moveSkill = (delta: number) => setSelectedSkill((index) => clamp(index + delta, 0, Math.max(0, (currentGroup?.skills.length ?? 1) - 1)));
+    const moveSkill = (delta: number) => setSelectedSkill(clamp(skillIndex + delta, 0, Math.max(0, (currentGroup?.skills.length ?? 1) - 1)));
     const moveFile = (delta: number) => {
       if (!previewData) return;
-      setPreviewFile((index) => clamp(index + delta, 0, previewData.files.length - 1));
+      setPreviewState({ skill: currentName ?? null, file: clamp(previewFile + delta, 0, previewData.files.length - 1), restore: 0 });
     };
     const focusedPrimary: PrimaryPanel = panel === "files" ? "content" : panel;
 
@@ -450,7 +424,7 @@ export function App() {
       if (now - pendingG.current < 500) {
         if (panel === "authors") setSelectedAuthor(0);
         else if (panel === "skills") setSelectedSkill(0);
-        else if (panel === "files") setPreviewFile(0);
+        else if (panel === "files") setPreviewState({ skill: currentName ?? null, file: 0, restore: 0 });
         else previewScroll.current?.scrollTo(0);
         pendingG.current = 0;
       } else {
@@ -461,7 +435,7 @@ export function App() {
     if (key.name === "g" && key.shift) {
       if (panel === "authors") setSelectedAuthor(Math.max(0, groups.length - 1));
       else if (panel === "skills") setSelectedSkill(Math.max(0, (currentGroup?.skills.length ?? 1) - 1));
-      else if (panel === "files") setPreviewFile(Math.max(0, (previewData?.files.length ?? 1) - 1));
+      else if (panel === "files") setPreviewState({ skill: currentName ?? null, file: Math.max(0, (previewData?.files.length ?? 1) - 1), restore: 0 });
       else previewScroll.current?.scrollTo(previewScroll.current.scrollHeight);
       return;
     }

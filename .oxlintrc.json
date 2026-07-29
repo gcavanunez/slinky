@@ -1,7 +1,28 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["eslint", "typescript", "unicorn", "oxc", "react"],
+  "jsPlugins": [
+    {
+      "name": "react-doctor",
+      "specifier": "oxlint-plugin-react-doctor"
+    }
+  ],
+  "settings": {
+    "react": {
+      "version": "19.2"
+    }
+  },
   "rules": {
     "require-yield": "off",
-    "no-underscore-dangle": "off"
+    "no-underscore-dangle": "off",
+    "react-doctor/no-derived-state": "error",
+    "typescript/consistent-type-imports": [
+      "error",
+      {
+        "prefer": "type-imports",
+        "fixStyle": "separate-type-imports",
+        "disallowTypeAnnotations": true
+      }
+    ]
   }
 }

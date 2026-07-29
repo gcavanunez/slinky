@@ -9,9 +9,9 @@ import type { Manifest, ProjectLink, Skill, State } from "../lib/manifest.ts";
 import { AGENTS_SKILLS, REPO } from "../lib/paths.ts";
 import { observe } from "../lib/reconcile.ts";
 import type { LiveKind } from "../lib/reconcile.ts";
+import type { UpstreamState } from "../lib/update.ts";
 
 export type LiveStatus = "ok" | "drift" | "missing" | "off" | "stale" | "checking";
-export type { UpstreamState } from "../lib/update.ts";
 
 export interface CatalogRow {
   name: string;
@@ -23,7 +23,7 @@ export interface CatalogRow {
   projectLink: ProjectLink | null;
   projectSkill: ProjectSkill | null;
   meta: Skill;
-  upstream?: import("../lib/update.ts").UpstreamState;
+  upstream?: UpstreamState;
 }
 
 export interface Catalog {
