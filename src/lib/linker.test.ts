@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import * as Schema from "effect/Schema";
+import { Schema } from "effect";
 import { Manifest, ProjectLink, State, version } from "./manifest.ts";
 import { applyUnlink, checkLink, linkSkill, prepareUnlink, unlinkSkill } from "./linker.ts";
 import { REPO } from "./paths.ts";

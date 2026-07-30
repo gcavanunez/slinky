@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import * as Schema from "effect/Schema";
+import { Schema } from "effect";
 import { emptyState, Manifest, ManifestFileError, State, StateFileError, validateState } from "../domain/model.ts";
 import { MANIFEST_PATH, STATE_PATH } from "./paths.ts";
 

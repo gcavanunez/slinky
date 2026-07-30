@@ -46,14 +46,10 @@
     "prepublishOnly": "printf '%s\n' 'Publish dist/npm/main, not the source checkout.' && exit 1"
   },
   "dependencies": {
-    "@effect/platform-node": "4.0.0-beta.64",
     "@opentui/core": "^0.4.3",
     "@opentui/react": "^0.4.3",
-    "effect": "4.0.0-beta.64",
+    "effect": "4.0.0-beta.102",
     "react": "^19.2.7"
-  },
-  "overrides": {
-    "@effect/platform-node-shared": "4.0.0-beta.64"
   },
   "devDependencies": {
     "@types/bun": "latest",
@@ -61,6 +57,6 @@
     "oxfmt": "0.56.0",
     "oxlint": "1.71.0",
     "oxlint-plugin-react-doctor": "^0.9.2",
-    "typescript": "^5.7.0"
+    "typescript": "7.0.2"
   }
 }

@@ -1,6 +1,6 @@
 import { cpSync, existsSync, lstatSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join, posix } from "node:path";
-import * as Schema from "effect/Schema";
+import { Schema } from "effect";
 import { Skill, SkillLockDecodeError, nowUtc, withManifestSkill } from "../domain/model.ts";
 import type { Manifest } from "../domain/model.ts";
 import { contentHash } from "./hash.ts";

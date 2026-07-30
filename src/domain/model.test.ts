@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import * as Schema from "effect/Schema";
+import { Schema } from "effect";
 import { Manifest, ProjectLink, State, getSkill, validateState, withManifestSkill, withProfile, withProjectLink, withSkillEnabled, withoutProjectLink } from "./model.ts";
 
 const strict = { errors: "all", onExcessProperty: "error" } as const;

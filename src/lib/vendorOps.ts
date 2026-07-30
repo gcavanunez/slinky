@@ -1,6 +1,6 @@
 import { cpSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import * as Schema from "effect/Schema";
+import { Schema } from "effect";
 import { Skill, getSkill, nowUtc, withManifestSkill } from "../domain/model.ts";
 import type { Manifest, SkillLockDecodeError } from "../domain/model.ts";
 import { readSkillLock, upstreamFromLock } from "./adopt.ts";

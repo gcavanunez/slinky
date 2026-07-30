@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import * as Schema from "effect/Schema";
+import { Schema } from "effect";
 import { ConfigFileError, SlinkyConfig, version } from "../domain/model.ts";
 
 export const HOME = homedir();

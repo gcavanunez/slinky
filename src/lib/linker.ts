@@ -1,6 +1,6 @@
 import { cpSync, existsSync, lstatSync, mkdirSync, readlinkSync, rmSync, symlinkSync } from "node:fs";
 import { dirname, join, posix, resolve } from "node:path";
-import * as Schema from "effect/Schema";
+import { Schema } from "effect";
 import { ProjectLink, formatUtc, getSkill, nowUtc, withProjectLink, withoutProjectLink } from "../domain/model.ts";
 import type { Manifest, State } from "../domain/model.ts";
 import { updateExcludeFile } from "./exclude.ts";

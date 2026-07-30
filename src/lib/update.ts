@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join, posix } from "node:path";
-import * as Schema from "effect/Schema";
+import { Schema } from "effect";
 import { isSkillEnabled } from "../domain/model.ts";
 import { contentHash } from "./hash.ts";
 import type { Manifest, State } from "./manifest.ts";

@@ -1,6 +1,5 @@
 import { isAbsolute, normalize, posix } from "node:path";
-import * as DateTime from "effect/DateTime";
-import * as Schema from "effect/Schema";
+import { DateTime, Schema } from "effect";
 
 export const version = 1;
 

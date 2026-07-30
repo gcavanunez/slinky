@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { resolve } from "node:path";
-import * as Schema from "effect/Schema";
+import { Schema } from "effect";
 import { Manifest, State, version, withManifestSkill } from "./manifest.ts";
 import type { Observation } from "./reconcile.ts";
 import { planSync } from "./reconcile.ts";
