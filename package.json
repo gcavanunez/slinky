@@ -46,6 +46,7 @@
     "prepublishOnly": "printf '%s\n' 'Publish dist/npm/main, not the source checkout.' && exit 1"
   },
   "dependencies": {
+    "@effect/platform-bun": "4.0.0-beta.102",
     "@opentui/core": "^0.4.3",
     "@opentui/react": "^0.4.3",
     "effect": "4.0.0-beta.102",

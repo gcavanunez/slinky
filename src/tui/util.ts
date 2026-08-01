@@ -32,6 +32,11 @@ export function printable(key: Pick<KeyEvent, "name" | "sequence" | "ctrl" | "me
   return "";
 }
 
+/** Decode bracketed paste bytes for a single-line text field. */
+export function singleLinePaste(bytes: Uint8Array): string {
+  return new TextDecoder().decode(bytes).replace(/[\r\n]+/g, " ");
+}
+
 export interface FileTreeRow {
   kind: "folder" | "file";
   path: string;
@@ -65,4 +70,33 @@ export function fileTreeRows(files: ReadonlyArray<string>): FileTreeRow[] {
 export function markdownBody(file: string, content: string): string {
   if (file !== "SKILL.md") return content;
   return content.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "");
+}
+
+/** Zero-based line indices whose text contains `query` (case-insensitive). */
+export function searchMatchLines(lines: ReadonlyArray<string>, query: string): number[] {
+  const q = query.toLowerCase();
+  if (!q) return [];
+  const out: number[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if ((lines[i] ?? "").toLowerCase().includes(q)) out.push(i);
+  }
+  return out;
+}
+
+/** Zero-based line indices of ATX headings, skipping fenced code blocks. */
+export function markdownHeadingLines(lines: ReadonlyArray<string>): number[] {
+  const out: number[] = [];
+  let fence: "`" | "~" | null = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    const fenceMatch = /^\s{0,3}(`{3,}|~{3,})/.exec(line);
+    if (fenceMatch) {
+      const marker = fenceMatch[1]?.startsWith("`") ? "`" : "~";
+      if (fence === null) fence = marker;
+      else if (fence === marker) fence = null;
+      continue;
+    }
+    if (fence === null && /^#{1,6}\s/.test(line)) out.push(i);
+  }
+  return out;
 }

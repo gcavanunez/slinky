@@ -1,11 +1,30 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { Schema } from "effect";
+import { Cause, Effect, Exit, Layer, Schema } from "effect";
 import { Manifest, ProjectLink, State, version } from "./manifest.ts";
 import { applyUnlink, checkLink, linkSkill, prepareUnlink, unlinkSkill } from "./linker.ts";
-import { REPO } from "./paths.ts";
+import { HostRepo } from "./paths.ts";
+
+const REPO = "/repo";
+const hostLayer = Layer.succeed(
+  HostRepo,
+  HostRepo.of({
+    repo: REPO,
+    manifestPath: join(REPO, "skills.manifest.json"),
+    statePath: join(REPO, ".local", "state.json"),
+  }),
+);
+
+const run = <A, E>(effect: Effect.Effect<A, E, HostRepo>): A => Effect.runSync(effect.pipe(Effect.provide(hostLayer)));
+
+const failureMessage = <A, E>(effect: Effect.Effect<A, E, HostRepo>): string => {
+  const exit = Effect.runSyncExit(effect.pipe(Effect.provide(hostLayer)));
+  if (Exit.isSuccess(exit)) throw new Error("expected failure");
+  const error = Cause.squash(exit.cause);
+  return error instanceof Error ? error.message : String(error);
+};
 
 const roots: string[] = [];
 const linkExists = (path: string): boolean => {
@@ -67,18 +86,49 @@ describe("link construction", () => {
       recentProjects: [],
     });
 
-    const result = linkSkill(manifest, state, {
-      skill: "foo",
-      project,
-      mode: "symlink",
-      gitExclude: false,
-      claude: false,
-    });
+    const result = run(
+      linkSkill(manifest, state, {
+        skill: "foo",
+        project,
+        mode: "symlink",
+        gitExclude: false,
+        claude: false,
+      }),
+    );
     const encoded = Schema.encodeSync(ProjectLink)(result.link);
 
     expect(result.state.projectLinks).toEqual([result.link]);
     expect(encoded.linkedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
     expect(linkExists(join(project, ".agents", "skills", "foo"))).toBe(true);
+  });
+
+  test("Git excludes a managed symlink target", () => {
+    const project = mkdtempSync(join(tmpdir(), "slinky-link-"));
+    roots.push(project);
+    expect(Bun.spawnSync(["git", "init", "-q", project]).exitCode).toBe(0);
+    const { manifest } = fixtures(project);
+    const state = Schema.decodeUnknownSync(State)({
+      version,
+      disabledSkills: [],
+      activeProfile: null,
+      projectLinks: [],
+      recentProjects: [],
+    });
+
+    run(
+      linkSkill(manifest, state, {
+        skill: "foo",
+        project,
+        mode: "symlink",
+        gitExclude: true,
+        claude: false,
+      }),
+    );
+
+    const exclude = readFileSync(join(project, ".git", "info", "exclude"), "utf8");
+    expect(exclude).toContain("/.agents/skills/foo\n");
+    expect(exclude).not.toContain("/.agents/skills/foo/\n");
+    expect(Bun.spawnSync(["git", "-C", project, "check-ignore", ".agents/skills/foo"]).exitCode).toBe(0);
   });
 });
 
@@ -92,8 +142,8 @@ describe("unlink safety", () => {
 
     const { manifest, state, link } = fixtures(project);
 
-    expect(checkLink(manifest, link)).toBe("drifted-local");
-    expect(() => unlinkSkill(manifest, state, "foo", project)).toThrow("replaced or retargeted");
+    expect(checkLink(manifest, link, REPO)).toBe("drifted-local");
+    expect(failureMessage(unlinkSkill(manifest, state, "foo", project))).toContain("replaced or retargeted");
     expect(existsSync(join(target, "user-file.txt"))).toBe(true);
   });
 
@@ -106,7 +156,7 @@ describe("unlink safety", () => {
 
     const { manifest, state } = fixtures(project);
 
-    const prepared = prepareUnlink(manifest, state, "foo", project);
+    const prepared = run(prepareUnlink(manifest, state, "foo", project));
     expect(linkExists(target)).toBe(true);
     expect(prepared.state.projectLinks).toEqual([]);
 

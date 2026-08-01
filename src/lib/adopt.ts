@@ -1,35 +1,24 @@
-import { cpSync, existsSync, lstatSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, readFileSync, rmSync } from "node:fs";
 import { join, posix } from "node:path";
-import { Schema } from "effect";
-import { Skill, SkillLockDecodeError, nowUtc, withManifestSkill } from "../domain/model.ts";
+import { Effect, Schema } from "effect";
+import {
+  errorDetail,
+  formatUtc,
+  HttpUrl,
+  isMissingFile,
+  nowUtc,
+  OperationFailed,
+  PortableRelativePath,
+  Skill,
+  SkillLockDecodeError,
+  UpstreamTreeHash,
+  withManifestSkill,
+} from "../domain/model.ts";
 import type { Manifest } from "../domain/model.ts";
+import { readdirIfExists } from "./fs.ts";
 import { contentHash } from "./hash.ts";
-import { AGENTS_SKILLS, CLAUDE_SKILLS, OPENCODE_SKILLS, REPO, SKILL_LOCK } from "./paths.ts";
+import { HostRepo, Paths } from "./paths.ts";
 
-const HttpUrl = Schema.NonEmptyString.check(
-  Schema.makeFilter(
-    (value) => {
-      try {
-        const url = new URL(value);
-        return url.protocol === "http:" || url.protocol === "https:";
-      } catch {
-        return false;
-      }
-    },
-    { expected: "an HTTP or HTTPS URL" },
-  ),
-);
-const RepositoryRelativePath = Schema.NonEmptyString.check(
-  Schema.makeFilter(
-    (value) => {
-      if (value.includes("\\") || value.includes("\0") || posix.isAbsolute(value)) return false;
-      if (value === "." || posix.normalize(value) !== value) return false;
-      return !value.split("/").includes("..");
-    },
-    { expected: "a normalized repository-relative path" },
-  ),
-);
-const UpstreamTreeHash = Schema.String.check(Schema.isPattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/));
 const AdoptionDestination = Schema.Union([Schema.String.check(Schema.isPattern(/^skills\/[^/]+$/)), Schema.String.check(Schema.isPattern(/^vendor\/[^/]+\/[^/]+$/))]);
 const decodeAdoptionDestination = Schema.decodeUnknownSync(AdoptionDestination);
 const decodeSkill = Schema.decodeUnknownSync(Skill);
@@ -42,7 +31,7 @@ const LockMetaBase = {
 const GitHubLockMetaSchema = Schema.Struct({
   ...LockMetaBase,
   sourceType: Schema.Literal("github"),
-  skillPath: Schema.optionalKey(RepositoryRelativePath),
+  skillPath: Schema.optionalKey(PortableRelativePath),
   skillFolderHash: Schema.optionalKey(UpstreamTreeHash),
 });
 
@@ -65,34 +54,37 @@ export interface SkillLockSnapshot {
   readonly warning?: SkillLockDecodeError;
 }
 
-const detail = (error: unknown): string => (error instanceof Error ? error.message : String(error));
-const isMissing = (error: unknown): boolean => error instanceof Error && "code" in error && error.code === "ENOENT";
-
 export function decodeSkillLock(input: unknown): Readonly<Record<string, LockMeta>> {
   return Schema.decodeUnknownSync(SkillLockFile)(input).skills;
 }
 
-export function readSkillLock(): SkillLockSnapshot {
+function readSkillLockSync(skillLock: string): SkillLockSnapshot {
   let raw: string;
   try {
-    raw = readFileSync(SKILL_LOCK, "utf8");
+    raw = readFileSync(skillLock, "utf8");
   } catch (error) {
-    return isMissing(error) ? { skills: {} } : { skills: {}, warning: new SkillLockDecodeError(SKILL_LOCK, "read", detail(error)) };
+    return isMissingFile(error) ? { skills: {} } : { skills: {}, warning: new SkillLockDecodeError(skillLock, "read", errorDetail(error)) };
   }
 
   let input: unknown;
   try {
     input = JSON.parse(raw);
   } catch (error) {
-    return { skills: {}, warning: new SkillLockDecodeError(SKILL_LOCK, "parse", detail(error)) };
+    return { skills: {}, warning: new SkillLockDecodeError(skillLock, "parse", errorDetail(error)) };
   }
 
   try {
     return { skills: decodeSkillLock(input) };
   } catch (error) {
-    return { skills: {}, warning: new SkillLockDecodeError(SKILL_LOCK, "decode", detail(error)) };
+    return { skills: {}, warning: new SkillLockDecodeError(skillLock, "decode", errorDetail(error)) };
   }
 }
+
+/** Read the skills.sh lock file; decode problems degrade to a warning. */
+export const readSkillLock = Effect.fn("Adopt.readSkillLock")(function* () {
+  const paths = yield* Paths;
+  return readSkillLockSync(paths.skillLock);
+});
 
 type VendorUpstream = Extract<Skill, { readonly origin: "vendor" }>["upstream"];
 
@@ -134,23 +126,59 @@ export interface ForeignScan {
   readonly warning?: SkillLockDecodeError;
 }
 
+export interface UnindexedSkill {
+  readonly name: string;
+  readonly origin: "local" | "vendor" | "agent";
+  readonly path: string;
+  readonly dir: string;
+}
+
+/** Find host skill directories that are absent from the manifest. */
+export function findUnindexedSkills(manifest: Manifest, repo: string): UnindexedSkill[] {
+  const indexed = new Set(Object.values(manifest.skills).map((skill) => skill.path));
+  const out: UnindexedSkill[] = [];
+  const add = (origin: UnindexedSkill["origin"], path: string, name: string, isIndexed = indexed.has(path)): void => {
+    const dir = join(repo, path);
+    if (!isIndexed && existsSync(join(dir, "SKILL.md"))) out.push({ name, origin, path, dir });
+  };
+
+  for (const entry of readdirIfExists(join(repo, "skills"))) {
+    if (entry.isDirectory()) add("local", posix.join("skills", entry.name), entry.name);
+  }
+
+  for (const owner of readdirIfExists(join(repo, "vendor"))) {
+    if (!owner.isDirectory()) continue;
+    for (const entry of readdirIfExists(join(repo, "vendor", owner.name))) {
+      if (entry.isDirectory()) add("vendor", posix.join("vendor", owner.name, entry.name), entry.name);
+    }
+  }
+
+  for (const entry of readdirIfExists(join(repo, ".agents", "skills"))) {
+    if (entry.isDirectory()) {
+      add("agent", posix.join(".agents", "skills", entry.name), entry.name, Object.hasOwn(manifest.skills, entry.name));
+    }
+  }
+
+  return out.sort((a, b) => a.path.localeCompare(b.path));
+}
+
 /**
  * Find skills present on this host but absent from the repo manifest.
  * Scans the canonical store first, then per-agent dirs; only real directories
  * containing a SKILL.md count (symlinks are managed entries or user business).
  */
-export function findForeign(manifest: Manifest): ForeignScan {
-  const lock = readSkillLock();
+export const findForeign = Effect.fn("Adopt.findForeign")(function* (manifest: Manifest) {
+  const paths = yield* Paths;
+  const lock = readSkillLockSync(paths.skillLock);
   const seen = new Set<string>();
   const out: ForeignSkill[] = [];
   const locations: Array<[ForeignSkill["location"], string]> = [
-    ["agents", AGENTS_SKILLS],
-    ["claude", CLAUDE_SKILLS],
-    ["opencode", OPENCODE_SKILLS],
+    ["agents", paths.agentsSkills],
+    ["claude", paths.claudeSkills],
+    ["opencode", paths.opencodeSkills],
   ];
   for (const [location, base] of locations) {
-    if (!existsSync(base)) continue;
-    for (const name of readdirSync(base)) {
+    for (const { name } of readdirIfExists(base)) {
       if (Object.hasOwn(manifest.skills, name) || seen.has(name)) continue;
       const dir = join(base, name);
       if (lstatSync(dir).isSymbolicLink() || !lstatSync(dir).isDirectory()) continue;
@@ -160,11 +188,12 @@ export function findForeign(manifest: Manifest): ForeignScan {
       out.push({ name, location, dir, ...(meta ? { lock: meta } : {}) });
     }
   }
-  return {
+  const scan: ForeignScan = {
     candidates: out.sort((a, b) => a.name.localeCompare(b.name)),
     ...(lock.warning ? { warning: lock.warning } : {}),
   };
-}
+  return scan;
+});
 
 export interface AdoptOptions {
   /** Adopt as a locally-authored skill into skills/ instead of vendor/. */
@@ -188,10 +217,13 @@ export function adoptDestination(candidate: ForeignSkill, opts: AdoptOptions): s
 }
 
 /** Copy a foreign skill into the repo and return an updated manifest. */
-export function adoptSkill(manifest: Manifest, candidate: ForeignSkill, opts: AdoptOptions = {}): Adoption {
+export const adoptSkill = Effect.fn("Adopt.adoptSkill")(function* (manifest: Manifest, candidate: ForeignSkill, opts: AdoptOptions = {}) {
+  const { repo } = yield* HostRepo;
   const rel = adoptDestination(candidate, opts);
-  const dest = join(REPO, rel);
-  if (existsSync(dest)) throw new Error(`destination already exists: ${rel}`);
+  const dest = join(repo, rel);
+  if (existsSync(dest)) {
+    return yield* Effect.fail(new OperationFailed({ message: `destination already exists: ${rel}` }));
+  }
 
   const meta = decodeSkill(
     opts.local
@@ -201,25 +233,21 @@ export function adoptSkill(manifest: Manifest, candidate: ForeignSkill, opts: Ad
           path: rel,
           contentHash: contentHash(candidate.dir),
           upstream: upstreamFromLock(candidate.lock),
-          vendoredAt: nowUtc(),
+          vendoredAt: formatUtc(nowUtc()),
         },
   );
 
-  try {
+  return yield* Effect.sync(() => {
     cpSync(candidate.dir, dest, { recursive: true });
-
     const keepLiveDir = candidate.location === "agents" && !opts.local;
     return {
       manifest: withManifestSkill(manifest, candidate.name, meta),
       meta,
       destination: dest,
       sourceToRemove: keepLiveDir ? null : candidate.dir,
-    };
-  } catch (error) {
-    rmSync(dest, { recursive: true, force: true });
-    throw error;
-  }
-}
+    } satisfies Adoption;
+  }).pipe(Effect.onError(() => Effect.sync(() => rmSync(dest, { recursive: true, force: true }))));
+});
 
 export function rollbackAdoption(adoption: Adoption): void {
   rmSync(adoption.destination, { recursive: true, force: true });

@@ -1,12 +1,16 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
+import { Effect } from "effect";
+import { readdirIfExists } from "../lib/fs.ts";
 import { contentHash, walkFiles } from "../lib/hash.ts";
 import { diffDirs } from "../lib/diff.ts";
+import { findUnindexedSkills } from "../lib/adopt.ts";
+import type { UnindexedSkill } from "../lib/adopt.ts";
 import type { DirDiff } from "../lib/diff.ts";
-import { isSkillEnabled, loadManifest, loadState } from "../lib/manifest.ts";
+import { isSkillEnabled, ManifestStore } from "../lib/manifest.ts";
 import type { Manifest, ProjectLink, Skill, State } from "../lib/manifest.ts";
-import { AGENTS_SKILLS, REPO } from "../lib/paths.ts";
+import { HostRepo, Paths } from "../lib/paths.ts";
 import { observe } from "../lib/reconcile.ts";
 import type { LiveKind } from "../lib/reconcile.ts";
 import type { UpstreamState } from "../lib/update.ts";
@@ -31,13 +35,32 @@ export interface Catalog {
   state: State;
   project: string;
   projectSkills: ProjectSkill[];
+  unindexedSkills: UnindexedSkill[];
   rows: CatalogRow[];
+  /** Host context snapshot so render helpers stay synchronous. */
+  repo: string;
+  agentsSkills: string;
 }
 
 export interface ProjectSkill {
   name: string;
   agents: boolean;
   claude: boolean;
+}
+
+export type ProjectPlacement = "none" | "link-hidden" | "link-tracked" | "copy-hidden" | "copy-tracked" | "missing" | "unmanaged";
+
+export function projectPlacement(row: Pick<CatalogRow, "name" | "projectLink" | "projectSkill">): ProjectPlacement {
+  if (!row.projectLink) return row.projectSkill ? "unmanaged" : "none";
+  if (!row.projectSkill) return "missing";
+  const hidden = row.projectLink.excludedTargets.includes(`.agents/skills/${row.name}`);
+  if (row.projectLink.mode === "symlink") return hidden ? "link-hidden" : "link-tracked";
+  return hidden ? "copy-hidden" : "copy-tracked";
+}
+
+/** Whether an agent can currently discover this skill globally or in the active project. */
+export function isSkillAvailableHere(row: Pick<CatalogRow, "liveKind" | "projectSkill">): boolean {
+  return row.liveKind === "symlink" || row.liveKind === "dir" || row.projectSkill !== null;
 }
 
 /** Resolve cwd to the nearest recorded project, falling back to cwd itself. */
@@ -61,24 +84,26 @@ export function discoverProjectSkills(project: string): ProjectSkill[] {
     [join(project, ".agents", "skills"), "agents"],
     [join(project, ".claude", "skills"), "claude"],
   ] as const) {
-    try {
-      for (const entry of readdirSync(store, { withFileTypes: true })) {
-        if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-        const skill = found.get(entry.name) ?? { name: entry.name, agents: false, claude: false };
-        found.set(entry.name, { ...skill, [field]: true });
-      }
-    } catch {}
+    for (const entry of readdirIfExists(store)) {
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+      const skill = found.get(entry.name) ?? { name: entry.name, agents: false, claude: false };
+      found.set(entry.name, { ...skill, [field]: true });
+    }
   }
   return [...found.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
 /** Fast load: no content hashing; vendor dirs report "checking" until verified. */
-export function loadCatalog(): Catalog {
-  const manifest = loadManifest();
-  const state = loadState(manifest);
-  const obs = observe();
+export const loadCatalog = Effect.fn("Tui.loadCatalog")(function* () {
+  const store = yield* ManifestStore;
+  const paths = yield* Paths;
+  const { repo } = yield* HostRepo;
+  const manifest = yield* store.loadManifest();
+  const state = yield* store.loadState(manifest);
+  const obs = yield* observe();
   const project = projectForCwd(state);
   const projectSkills = discoverProjectSkills(project);
+  const unindexedSkills = findUnindexedSkills(manifest, repo);
   const projectSkillsByName = new Map(projectSkills.map((skill) => [skill.name, skill]));
   const rows: CatalogRow[] = Object.entries(manifest.skills).map(([name, meta]) => {
     const enabled = isSkillEnabled(state, name);
@@ -104,24 +129,24 @@ export function loadCatalog(): Catalog {
       meta,
     };
   });
-  return { manifest, state, project, projectSkills, rows };
-}
+  return { manifest, state, project, projectSkills, unindexedSkills, rows, repo, agentsSkills: paths.agentsSkills } satisfies Catalog;
+});
 
 /** Hash-verify one vendor row (the slow part, run incrementally). */
-export function verifyRow(row: CatalogRow): CatalogRow {
+export function verifyRow(agentsSkills: string, row: CatalogRow): CatalogRow {
   if (row.live !== "checking") return row;
-  const live = join(AGENTS_SKILLS, row.name);
+  const live = join(agentsSkills, row.name);
   const ok = existsSync(live) && contentHash(live) === row.meta.contentHash;
   return { ...row, live: ok ? "ok" : "drift" };
 }
 
 export type DiffResult = { kind: "local" } | { kind: "not-installed" } | { kind: "diff"; diff: DirDiff };
 
-export function diffSkill(row: CatalogRow): DiffResult {
+export function diffSkill(catalog: Pick<Catalog, "repo" | "agentsSkills">, row: CatalogRow): DiffResult {
   if (row.origin === "local") return { kind: "local" };
-  const live = join(AGENTS_SKILLS, row.name);
+  const live = join(catalog.agentsSkills, row.name);
   if (!existsSync(live)) return { kind: "not-installed" };
-  return { kind: "diff", diff: diffDirs(join(REPO, row.meta.path), live) };
+  return { kind: "diff", diff: diffDirs(join(catalog.repo, row.meta.path), live) };
 }
 
 export function linksForSkill(state: State, name: string): ReadonlyArray<ProjectLink> {
@@ -173,16 +198,28 @@ function descriptionAt(root: string): string {
 }
 
 /** Files inside a skill's host folder, SKILL.md first. */
-export function skillFiles(meta: Skill): string[] {
-  return filesAt(join(REPO, meta.path));
+export function skillFiles(repo: string, meta: Skill): string[] {
+  return filesAt(join(repo, meta.path));
 }
 
-export function readSkillFile(meta: Skill, rel: string): string {
-  return readFileContent(join(REPO, meta.path), rel);
+export function readSkillFile(repo: string, meta: Skill, rel: string): string {
+  return readFileContent(join(repo, meta.path), rel);
 }
 
-export function skillDescription(meta: Skill): string {
-  return descriptionAt(join(REPO, meta.path));
+export function unindexedSkillFiles(skill: UnindexedSkill): string[] {
+  return filesAt(skill.dir);
+}
+
+export function readUnindexedSkillFile(skill: UnindexedSkill, rel: string): string {
+  return readFileContent(skill.dir, rel);
+}
+
+export function unindexedSkillDescription(skill: UnindexedSkill): string {
+  return descriptionAt(skill.dir);
+}
+
+export function skillDescription(repo: string, meta: Skill): string {
+  return descriptionAt(join(repo, meta.path));
 }
 
 export function projectSkillPath(project: string, skill: ProjectSkill): string {

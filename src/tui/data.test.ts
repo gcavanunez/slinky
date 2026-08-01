@@ -4,7 +4,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Schema } from "effect";
 import { State, version } from "../lib/manifest.ts";
-import { discoverProjectSkills, projectForCwd, projectSkillDescription, projectSkillFiles, projectSkillPath, readProjectSkillFile } from "./data.ts";
+import {
+  discoverProjectSkills,
+  isSkillAvailableHere,
+  projectForCwd,
+  projectPlacement,
+  projectSkillDescription,
+  projectSkillFiles,
+  projectSkillPath,
+  readProjectSkillFile,
+} from "./data.ts";
+import type { CatalogRow } from "./data.ts";
 
 const roots: string[] = [];
 
@@ -73,5 +83,42 @@ describe("discoverProjectSkills", () => {
     expect(projectSkillFiles(root, agentsOnly)).toEqual(["SKILL.md", "notes.md"]);
     expect(readProjectSkillFile(root, agentsOnly, "notes.md")).toBe("\tnotes\n");
     expect(projectSkillDescription(root, agentsOnly)).toBe("Project-only fixture.");
+  });
+});
+
+describe("projectPlacement", () => {
+  const row = {
+    name: "foo",
+    projectSkill: { name: "foo", agents: true, claude: false },
+    projectLink: state.projectLinks[0] ?? null,
+  } satisfies Pick<CatalogRow, "name" | "projectLink" | "projectSkill">;
+
+  test("distinguishes hidden and tracked project symlinks", () => {
+    expect(projectPlacement(row)).toBe("link-tracked");
+    expect(
+      projectPlacement({
+        ...row,
+        projectLink: row.projectLink ? { ...row.projectLink, excludedTargets: [".agents/skills/foo"] } : null,
+      }),
+    ).toBe("link-hidden");
+  });
+
+  test("surfaces missing and unmanaged placements", () => {
+    expect(projectPlacement({ ...row, projectSkill: null })).toBe("missing");
+    expect(projectPlacement({ ...row, projectLink: null })).toBe("unmanaged");
+  });
+});
+
+describe("isSkillAvailableHere", () => {
+  test("accepts global directories, global symlinks, and project placements", () => {
+    expect(isSkillAvailableHere({ liveKind: "dir", projectSkill: null })).toBe(true);
+    expect(isSkillAvailableHere({ liveKind: "symlink", projectSkill: null })).toBe(true);
+    expect(isSkillAvailableHere({ liveKind: "missing", projectSkill: { name: "foo", agents: true, claude: false } })).toBe(true);
+  });
+
+  test("rejects missing, broken, and invalid global entries", () => {
+    expect(isSkillAvailableHere({ liveKind: "missing", projectSkill: null })).toBe(false);
+    expect(isSkillAvailableHere({ liveKind: "broken-symlink", projectSkill: null })).toBe(false);
+    expect(isSkillAvailableHere({ liveKind: "file", projectSkill: null })).toBe(false);
   });
 });

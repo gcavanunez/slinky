@@ -4,7 +4,9 @@ import { Schema } from "effect";
 import { Manifest, State, version, withManifestSkill } from "./manifest.ts";
 import type { Observation } from "./reconcile.ts";
 import { planSync } from "./reconcile.ts";
-import { CLAUDE_SKILLS, claudeRelTarget } from "./paths.ts";
+import { claudeRelTarget } from "./paths.ts";
+
+const CLAUDE_SKILLS = "/home/user/.claude/skills";
 
 const REPO = "/repo";
 const MINE_HASH = "1".repeat(64);
@@ -48,7 +50,7 @@ const empty: Observation = { agents: {}, claude: {} };
 
 describe("planSync", () => {
   test("enabled skills get created from scratch", () => {
-    const plan = planSync(manifest(), state({ mine: true, theirs: true }), empty, { repo: REPO });
+    const plan = planSync(manifest(), state({ mine: true, theirs: true }), empty, { repo: REPO, claudeSkills: CLAUDE_SKILLS });
     expect(plan.warnings).toEqual([]);
     expect(plan.actions).toEqual([
       { type: "ensure-agents-symlink", skill: "mine", target: `${REPO}/skills/mine` },
@@ -69,7 +71,7 @@ describe("planSync", () => {
         theirs: { kind: "symlink", resolved: claudeTarget("theirs") },
       },
     };
-    const plan = planSync(manifest(), state({ mine: true, theirs: true }), obs, { repo: REPO });
+    const plan = planSync(manifest(), state({ mine: true, theirs: true }), obs, { repo: REPO, claudeSkills: CLAUDE_SKILLS });
     expect(plan.actions).toEqual([]);
     expect(plan.warnings).toEqual([]);
   });
@@ -85,7 +87,7 @@ describe("planSync", () => {
         theirs: { kind: "symlink", resolved: "/home/x/.agents/skills/theirs" },
       },
     };
-    const plan = planSync(manifest(), state({ mine: false, theirs: false }), obs, { repo: REPO });
+    const plan = planSync(manifest(), state({ mine: false, theirs: false }), obs, { repo: REPO, claudeSkills: CLAUDE_SKILLS });
     expect(plan.actions).toEqual([
       { type: "remove-claude", skill: "mine" },
       { type: "remove-claude", skill: "theirs" },
@@ -99,7 +101,7 @@ describe("planSync", () => {
       agents: { mine: { kind: "symlink", resolved: "/elsewhere/mine" } },
       claude: { mine: { kind: "symlink", resolved: claudeTarget("mine") } },
     };
-    const plan = planSync(manifest(), state({ mine: true, theirs: false }), obs, { repo: REPO });
+    const plan = planSync(manifest(), state({ mine: true, theirs: false }), obs, { repo: REPO, claudeSkills: CLAUDE_SKILLS });
     expect(plan.actions).toContainEqual({
       type: "ensure-agents-symlink",
       skill: "mine",
@@ -112,12 +114,13 @@ describe("planSync", () => {
       agents: { mine: { kind: "dir" } },
       claude: { mine: { kind: "symlink", resolved: claudeTarget("mine") } },
     };
-    const plan = planSync(manifest(), state({ mine: true, theirs: false }), obs, { repo: REPO });
+    const plan = planSync(manifest(), state({ mine: true, theirs: false }), obs, { repo: REPO, claudeSkills: CLAUDE_SKILLS });
     expect(plan.actions.filter((a) => a.skill === "mine")).toEqual([]);
     expect(plan.warnings.some((w) => w.startsWith("mine:"))).toBe(true);
 
     const forced = planSync(manifest(), state({ mine: true, theirs: false }), obs, {
       repo: REPO,
+      claudeSkills: CLAUDE_SKILLS,
       force: true,
     });
     expect(forced.actions).toContainEqual({
@@ -137,7 +140,7 @@ describe("planSync", () => {
       agents: { theirs: { kind: "symlink", resolved: `${REPO}/vendor/acme/theirs` } },
       claude: { theirs: { kind: "symlink", resolved: claudeTarget("theirs") } },
     };
-    const plan = planSync(manifest(), state({ mine: false, theirs: true }), obs, { repo: REPO });
+    const plan = planSync(manifest(), state({ mine: false, theirs: true }), obs, { repo: REPO, claudeSkills: CLAUDE_SKILLS });
     expect(plan.actions).toContainEqual({ type: "remove-agents", skill: "theirs" });
     expect(plan.actions).toContainEqual({
       type: "restore-agents-dir",
@@ -148,7 +151,7 @@ describe("planSync", () => {
 
   test("foreign entries produce warnings only", () => {
     const obs: Observation = { agents: { stranger: { kind: "dir" } }, claude: {} };
-    const plan = planSync(manifest(), state({ mine: false, theirs: false }), obs, { repo: REPO });
+    const plan = planSync(manifest(), state({ mine: false, theirs: false }), obs, { repo: REPO, claudeSkills: CLAUDE_SKILLS });
     expect(plan.actions.filter((a) => a.skill === "stranger")).toEqual([]);
     expect(plan.warnings.some((w) => w.startsWith("stranger:"))).toBe(true);
   });
@@ -158,7 +161,7 @@ describe("planSync", () => {
       agents: { mine: { kind: "symlink", resolved: `${REPO}/skills/mine` } },
       claude: { mine: { kind: "broken-symlink" } },
     };
-    const plan = planSync(manifest(), state({ mine: true, theirs: false }), obs, { repo: REPO });
+    const plan = planSync(manifest(), state({ mine: true, theirs: false }), obs, { repo: REPO, claudeSkills: CLAUDE_SKILLS });
     expect(plan.actions).toContainEqual({ type: "ensure-claude-symlink", skill: "mine" });
   });
 
@@ -167,18 +170,19 @@ describe("planSync", () => {
       agents: { mine: { kind: "symlink", resolved: `${REPO}/skills/mine` } },
       claude: { mine: { kind: "symlink", resolved: "/elsewhere/mine" } },
     };
-    const plan = planSync(manifest(), state({ mine: true, theirs: false }), obs, { repo: REPO });
+    const plan = planSync(manifest(), state({ mine: true, theirs: false }), obs, { repo: REPO, claudeSkills: CLAUDE_SKILLS });
     expect(plan.actions).toContainEqual({ type: "ensure-claude-symlink", skill: "mine" });
   });
 
   test("disabling does not remove an unowned real claude directory without force", () => {
     const obs: Observation = { agents: {}, claude: { mine: { kind: "dir" } } };
-    const plan = planSync(manifest(), state({ mine: false, theirs: false }), obs, { repo: REPO });
+    const plan = planSync(manifest(), state({ mine: false, theirs: false }), obs, { repo: REPO, claudeSkills: CLAUDE_SKILLS });
     expect(plan.actions).not.toContainEqual({ type: "remove-claude", skill: "mine" });
     expect(plan.warnings.some((warning) => warning.includes("not removing without --force"))).toBe(true);
 
     const forced = planSync(manifest(), state({ mine: false, theirs: false }), obs, {
       repo: REPO,
+      claudeSkills: CLAUDE_SKILLS,
       force: true,
     });
     expect(forced.actions).toContainEqual({ type: "remove-claude", skill: "mine" });
@@ -190,7 +194,7 @@ describe("planSync", () => {
       path: "skills/constructor",
       contentHash: "3".repeat(64),
     });
-    const plan = planSync(withConstructor, state({ mine: false, theirs: false, constructor: true }), { agents: {}, claude: {} }, { repo: REPO });
+    const plan = planSync(withConstructor, state({ mine: false, theirs: false, constructor: true }), { agents: {}, claude: {} }, { repo: REPO, claudeSkills: CLAUDE_SKILLS });
     expect(plan.actions).toContainEqual({
       type: "ensure-agents-symlink",
       skill: "constructor",

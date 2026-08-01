@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { fileTreeRows, fitCell, markdownBody, printable, windowOf } from "./util.ts";
+import { fileTreeRows, fitCell, markdownBody, markdownHeadingLines, printable, searchMatchLines, singleLinePaste, windowOf } from "./util.ts";
 
 describe("fitCell", () => {
   test("pads to width", () => {
@@ -50,6 +50,12 @@ describe("printable", () => {
   });
 });
 
+describe("singleLinePaste", () => {
+  test("decodes paste bytes and replaces line breaks", () => {
+    expect(singleLinePaste(new TextEncoder().encode("skills add acme/skills\r\n--skill effect\n"))).toBe("skills add acme/skills --skill effect ");
+  });
+});
+
 describe("fileTreeRows", () => {
   test("expands shared folders once", () => {
     expect(fileTreeRows(["SKILL.md", "references/auth.md", "references/setup.md"])).toEqual([
@@ -58,6 +64,30 @@ describe("fileTreeRows", () => {
       { kind: "file", path: "references/auth.md", label: "auth.md", depth: 1 },
       { kind: "file", path: "references/setup.md", label: "setup.md", depth: 1 },
     ]);
+  });
+});
+
+describe("searchMatchLines", () => {
+  test("matches case-insensitively", () => {
+    expect(searchMatchLines(["Alpha", "beta", "ALPHA beta"], "alpha")).toEqual([0, 2]);
+  });
+  test("empty query matches nothing", () => {
+    expect(searchMatchLines(["a", "b"], "")).toEqual([]);
+  });
+  test("no hits", () => {
+    expect(searchMatchLines(["a", "b"], "zzz")).toEqual([]);
+  });
+});
+
+describe("markdownHeadingLines", () => {
+  test("finds ATX headings at every level", () => {
+    expect(markdownHeadingLines(["# One", "text", "## Two", "###### Six", "####### not a heading", "#nospace"])).toEqual([0, 2, 3]);
+  });
+  test("skips headings inside fenced code blocks", () => {
+    expect(markdownHeadingLines(["# Real", "```bash", "# comment", "```", "## After"])).toEqual([0, 4]);
+  });
+  test("tilde fences do not close backtick fences", () => {
+    expect(markdownHeadingLines(["```", "~~~", "# hidden", "```", "# shown"])).toEqual([4]);
   });
 });
 

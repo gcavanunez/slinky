@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -45,10 +45,10 @@ function fixture(disabledSkills: ReadonlyArray<string> = []) {
   return { root, host, home, statePath };
 }
 
-function runCli(host: string, home: string, args: ReadonlyArray<string>) {
+function runCli(host: string, home: string, args: ReadonlyArray<string>, env: Record<string, string | undefined> = {}) {
   const cli = join(import.meta.dir, "cli.ts");
   return Bun.spawnSync([process.execPath, cli, ...args], {
-    env: { ...process.env, HOME: home, SLINKY_REPO: host },
+    env: { ...process.env, HOME: home, SLINKY_REPO: host, ...env },
   });
 }
 
@@ -76,7 +76,7 @@ describe("CLI options", () => {
     });
 
     expect(result.exitCode).toBe(1);
-    expect(result.stderr.toString()).toContain("unknown option for sync: --dryrun");
+    expect(result.stderr.toString()).toContain("Unrecognized flag: --dryrun");
   });
 
   test("rehashes an edited local skill", () => {
@@ -115,6 +115,74 @@ describe("CLI options", () => {
 });
 
 describe("CLI catalog actions", () => {
+  test("installs, vendors, and indexes a skill through skills.sh", () => {
+    const f = fixture();
+    mkdirSync(join(f.host, "vendor", "kitlangton", "effect"), { recursive: true });
+    writeFileSync(join(f.host, "vendor", "kitlangton", "effect", "SKILL.md"), "# effect\n");
+    const bin = join(f.root, "bin");
+    mkdirSync(bin);
+    const npx = join(bin, "npx");
+    writeFileSync(
+      npx,
+      `#!/bin/sh
+printf '%s\\n' "$@" > "$HOME/npx-args"
+mkdir -p "$HOME/.agents/skills/effect"
+printf '%s\\n' '# effect' > "$HOME/.agents/skills/effect/SKILL.md"
+printf '%s\\n' '{"skills":{"effect":{"source":"kitlangton/skills","sourceType":"github","sourceUrl":"https://github.com/kitlangton/skills"}}}' > "$HOME/.agents/.skill-lock.json"
+`,
+    );
+    chmodSync(npx, 0o755);
+
+    const result = runCli(f.host, f.home, ["skills", "add", "kitlangton/skills", "--skill", "effect"], {
+      PATH: `${bin}:${process.env.PATH ?? ""}`,
+    });
+    const manifest = JSON.parse(readFileSync(join(f.host, "skills.manifest.json"), "utf8")) as {
+      skills: Record<
+        string,
+        {
+          origin: string;
+          path: string;
+          contentHash: string;
+          upstream?: { kind: string; repository?: string; url?: string; tracking?: { kind: string } };
+          vendoredAt?: string;
+        }
+      >;
+    };
+
+    if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+    expect(readFileSync(join(f.home, "npx-args"), "utf8").trim().split("\n")).toEqual(["-y", "skills", "add", "kitlangton/skills", "--skill", "effect", "--global", "--yes"]);
+    expect(manifest.skills.effect).toEqual({
+      origin: "vendor",
+      path: "vendor/kitlangton/effect",
+      contentHash: expect.any(String),
+      upstream: {
+        kind: "github",
+        repository: "kitlangton/skills",
+        url: "https://github.com/kitlangton/skills",
+        tracking: { kind: "untracked" },
+      },
+      vendoredAt: expect.any(String),
+    });
+    expect(readFileSync(join(f.host, "vendor", "kitlangton", "effect", "SKILL.md"), "utf8")).toBe("# effect\n");
+  });
+
+  test("status reports host skill directories missing from the manifest", () => {
+    const f = fixture();
+    for (const path of ["skills/draft", "vendor/acme/effect", ".agents/skills/manual"]) {
+      mkdirSync(join(f.host, path), { recursive: true });
+      writeFileSync(join(f.host, path, "SKILL.md"), `# ${path}\n`);
+    }
+
+    const result = runCli(f.host, f.home, ["status"]);
+    const output = result.stdout.toString();
+
+    expect(result.exitCode).toBe(0);
+    expect(output).toContain("unindexed skills in host:");
+    expect(output).toContain("skills/draft");
+    expect(output).toContain("vendor/acme/effect");
+    expect(output).toContain(".agents/skills/manual");
+  });
+
   test("enable and profile dry runs preserve state bytes and global stores", () => {
     const f = fixture(["foo"]);
     const before = readFileSync(f.statePath);

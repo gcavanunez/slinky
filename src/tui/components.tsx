@@ -1,10 +1,11 @@
 import type { ReactNode } from "react";
+import type { MouseEvent } from "@opentui/core";
 import { colors } from "./theme.ts";
 
 /** One terminal row: no wrapping, truncated, bg fills the line. */
-export function TextLine(props: { fg?: string; bg?: string; children?: ReactNode }) {
+export function TextLine(props: { fg?: string; bg?: string; onMouseDown?: (event: MouseEvent) => void; children?: ReactNode }) {
   return (
-    <box height={1}>
+    <box height={1} onMouseDown={props.onMouseDown}>
       <text wrapMode="none" truncate fg={props.fg ?? colors.text} bg={props.bg}>
         {props.children}
       </text>

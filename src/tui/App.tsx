@@ -1,36 +1,52 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { existsSync } from "node:fs";
 import { basename, extname } from "node:path";
-import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
+import { Match } from "effect";
+import { useKeyboard, usePaste, useRenderer, useTerminalDimensions } from "@opentui/react";
 import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core";
 import { applyProfile, linkProjectSkill, setSkillsEnabled } from "../lib/catalogActions.ts";
 import type { ActionResult } from "../lib/catalogActions.ts";
 import type { DirDiff } from "../lib/diff.ts";
 import { formatUtc, getProfile } from "../lib/manifest.ts";
-import { REPO } from "../lib/paths.ts";
+import { addSkillFromSource, parseSkillsAddSource } from "../lib/skillsAdd.ts";
+import { checkUpstream } from "../lib/update.ts";
+import type { UnindexedSkill } from "../lib/adopt.ts";
+import { runPromiseResult, runSync, runSyncResult } from "./runtime.ts";
 import { Hint, Modal, TextLine } from "./components.tsx";
 import { colors, createMarkdownSyntax } from "./theme.ts";
-import { clamp, fileTreeRows, fitCell, markdownBody, printable, windowOf } from "./util.ts";
+import { clamp, fileTreeRows, fitCell, markdownBody, markdownHeadingLines, printable, searchMatchLines, singleLinePaste, windowOf } from "./util.ts";
+import { scrollRowForLine } from "./docNav.ts";
+import type { DocRenderable } from "./docNav.ts";
 import {
   diffSkill,
   expandHome,
+  isSkillAvailableHere,
   linksForSkill,
   loadCatalog,
   projectSkillDescription,
   projectSkillFiles,
   projectSkillPath,
+  projectPlacement,
   readProjectSkillFile,
   readSkillFile,
+  readUnindexedSkillFile,
   skillDescription,
   skillFiles,
+  unindexedSkillDescription,
+  unindexedSkillFiles,
   verifyRow,
 } from "./data.ts";
-import type { Catalog, CatalogRow, DiffResult, LiveStatus, ProjectSkill } from "./data.ts";
+import type { Catalog, CatalogRow, DiffResult, LiveStatus, ProjectPlacement, ProjectSkill } from "./data.ts";
 
-type Mode = "list" | "help" | "detail" | "profiles" | "diff" | "link";
+type Mode = "list" | "help" | "detail" | "profiles" | "diff" | "link" | "index";
 type Panel = "authors" | "skills" | "content" | "files";
 type PrimaryPanel = Exclude<Panel, "files">;
-type SkillItem = { kind: "skill"; row: CatalogRow } | { kind: "project-skill"; skill: ProjectSkill };
+type CatalogView = "available" | "all";
+type SkillItem = { kind: "skill"; row: CatalogRow } | { kind: "project-skill"; skill: ProjectSkill } | { kind: "unindexed-skill"; skill: UnindexedSkill };
+
+function skillItemName(item: SkillItem): string {
+  return item.kind === "skill" ? item.row.name : item.skill.name;
+}
 
 interface AuthorGroup {
   label: string;
@@ -55,6 +71,12 @@ interface LinkFlow {
   error?: string;
 }
 
+interface IndexFlow {
+  input: string;
+  running: boolean;
+  error?: string;
+}
+
 const liveColor: Record<LiveStatus, string> = {
   ok: colors.green,
   drift: colors.yellow,
@@ -73,27 +95,42 @@ const liveLabel: Record<LiveStatus, string> = {
   checking: "\u2026",
 };
 
+const placementCell: Record<ProjectPlacement, { label: string; fg: string }> = {
+  none: { label: "-", fg: colors.muted },
+  "link-hidden": { label: "link·hid", fg: colors.accent },
+  "link-tracked": { label: "link·git", fg: colors.accent },
+  "copy-hidden": { label: "copy·hid", fg: colors.accent },
+  "copy-tracked": { label: "copy·git", fg: colors.accent },
+  missing: { label: "missing", fg: colors.red },
+  unmanaged: { label: "unmanaged", fg: colors.yellow },
+};
+
 export function App() {
   const renderer = useRenderer();
   const { width: cols, height: rowsAvail } = useTerminalDimensions();
 
-  const [catalog, setCatalog] = useState<Catalog>(() => loadCatalog());
+  const [catalog, setCatalog] = useState<Catalog>(() => runSync(loadCatalog()));
   const [selectedAuthor, setSelectedAuthor] = useState(0);
   const [selectedSkill, setSelectedSkill] = useState(0);
+  const [catalogView, setCatalogView] = useState<CatalogView>("available");
   const [panel, setPanel] = useState<Panel>("skills");
   const [expanded, setExpanded] = useState<PrimaryPanel | null>(null);
   const [mode, setMode] = useState<Mode>("list");
   const [filterMode, setFilterMode] = useState(false);
   const [filterText, setFilterText] = useState("");
+  const [docFind, setDocFind] = useState<{ typing: boolean; query: string }>({ typing: false, query: "" });
   const [flash, setFlash] = useState<{ text: string; error?: boolean } | null>(null);
   const [profileIndex, setProfileIndex] = useState(0);
   const [diffResult, setDiffResult] = useState<DiffResult | null>(null);
   const [linkFlow, setLinkFlow] = useState<LinkFlow | null>(null);
+  const [indexFlow, setIndexFlow] = useState<IndexFlow | null>(null);
   const [previewState, setPreviewState] = useState<{ skill: string | null; file: number; restore: number }>({ skill: null, file: 0, restore: 0 });
 
   const quitting = useRef(false);
   const pendingG = useRef(0);
   const previewScroll = useRef<ScrollBoxRenderable | null>(null);
+  const previewDoc = useRef<DocRenderable | null>(null);
+  const findPos = useRef(-1);
   const syntaxStyle = useMemo(() => createMarkdownSyntax(), []);
 
   useEffect(() => () => syntaxStyle.destroy(), [syntaxStyle]);
@@ -102,9 +139,36 @@ export function App() {
 
   const groups = useMemo<AuthorGroup[]>(() => {
     const out: AuthorGroup[] = [];
+    const unindexed = catalog.unindexedSkills.filter((skill) => !filterText || skill.name.includes(filterText.toLowerCase()));
+    const unindexedNames = new Set(catalog.unindexedSkills.map((skill) => skill.name));
     const projectOnly = catalog.projectSkills
-      .filter((skill) => !Object.hasOwn(catalog.manifest.skills, skill.name) && (!filterText || skill.name.includes(filterText.toLowerCase())))
+      .filter((skill) => !Object.hasOwn(catalog.manifest.skills, skill.name) && !unindexedNames.has(skill.name) && (!filterText || skill.name.includes(filterText.toLowerCase())))
       .sort((a, b) => Number(b.agents) - Number(a.agents) || a.name.localeCompare(b.name));
+    const projectNames = new Set(catalog.projectSkills.map((skill) => skill.name));
+    const availableRows = filtered.filter(isSkillAvailableHere);
+    const availableUnindexed = unindexed.filter((skill) => projectNames.has(skill.name));
+    const available: SkillItem[] = [
+      ...availableRows.map((row) => ({ kind: "skill" as const, row })),
+      ...availableUnindexed.map((skill) => ({ kind: "unindexed-skill" as const, skill })),
+      ...projectOnly.map((skill) => ({ kind: "project-skill" as const, skill })),
+    ].sort((a, b) => skillItemName(a).localeCompare(skillItemName(b)));
+    if (catalogView === "available") {
+      out.push({
+        label: "all available",
+        enabledCount: null,
+        rows: null,
+        skills: available,
+      });
+    }
+    const scopedUnindexed = catalogView === "available" ? availableUnindexed : unindexed;
+    if (scopedUnindexed.length > 0) {
+      out.push({
+        label: "unindexed",
+        enabledCount: null,
+        rows: null,
+        skills: scopedUnindexed.map((skill) => ({ kind: "unindexed-skill", skill })),
+      });
+    }
     if (projectOnly.length > 0) {
       out.push({
         label: "project only",
@@ -115,7 +179,7 @@ export function App() {
     }
 
     const byOwner = new Map<string, CatalogRow[]>();
-    for (const row of filtered) {
+    for (const row of catalogView === "available" ? availableRows : filtered) {
       const key = ownerOf(row);
       const bucket = byOwner.get(key);
       if (bucket) bucket.push(row);
@@ -132,51 +196,78 @@ export function App() {
       });
     }
     return out;
-  }, [catalog.manifest.skills, catalog.projectSkills, filtered, filterText]);
+  }, [catalog.manifest.skills, catalog.projectSkills, catalog.unindexedSkills, catalogView, filtered, filterText]);
 
-  const viewport = Math.max(3, rowsAvail - 3 - (filterMode || filterText ? 1 : 0));
+  const viewport = Math.max(3, rowsAvail - 4 - (filterMode || filterText ? 1 : 0) - (docFind.typing || docFind.query ? 1 : 0));
   const authorIndex = clamp(selectedAuthor, 0, Math.max(0, groups.length - 1));
   const currentGroup = groups[authorIndex];
   const skillIndex = clamp(selectedSkill, 0, Math.max(0, (currentGroup?.skills.length ?? 1) - 1));
   const currentItem = currentGroup?.skills[skillIndex];
   const current: CatalogRow | undefined = currentItem?.kind === "skill" ? currentItem.row : undefined;
   const currentProjectSkill: ProjectSkill | undefined = currentItem?.kind === "project-skill" ? currentItem.skill : undefined;
+  const currentUnindexedSkill: UnindexedSkill | undefined = currentItem?.kind === "unindexed-skill" ? currentItem.skill : undefined;
   const profileNames = Object.keys(catalog.manifest.profiles);
 
-  const currentName = current?.name ?? currentProjectSkill?.name;
+  const currentName = current?.name ?? currentProjectSkill?.name ?? currentUnindexedSkill?.name;
   const previewFile = previewState.skill === currentName ? previewState.file : 0;
   const previewRestore = previewState.skill === currentName ? previewState.restore : 0;
 
   const previewData = useMemo(() => {
-    if (!current && !currentProjectSkill) return null;
-    const files = current ? skillFiles(current.meta) : currentProjectSkill ? projectSkillFiles(catalog.project, currentProjectSkill) : [];
+    if (!current && !currentProjectSkill && !currentUnindexedSkill) return null;
+    const files = current
+      ? skillFiles(catalog.repo, current.meta)
+      : currentProjectSkill
+        ? projectSkillFiles(catalog.project, currentProjectSkill)
+        : currentUnindexedSkill
+          ? unindexedSkillFiles(currentUnindexedSkill)
+          : [];
     if (files.length === 0) return null;
     const idx = clamp(previewFile, 0, files.length - 1);
     const file = files[idx] ?? "SKILL.md";
-    const content = current ? readSkillFile(current.meta, file) : currentProjectSkill ? readProjectSkillFile(catalog.project, currentProjectSkill, file) : "";
+    const content = current
+      ? readSkillFile(catalog.repo, current.meta, file)
+      : currentProjectSkill
+        ? readProjectSkillFile(catalog.project, currentProjectSkill, file)
+        : currentUnindexedSkill
+          ? readUnindexedSkillFile(currentUnindexedSkill, file)
+          : "";
     return { files, idx, file, content };
-  }, [current, currentProjectSkill, catalog.project, previewFile]);
+  }, [current, currentProjectSkill, currentUnindexedSkill, catalog.project, catalog.repo, previewFile]);
+
+  const docLines = useMemo(() => {
+    if (!previewData) return null;
+    const extension = extname(previewData.file).slice(1).toLowerCase();
+    const markdown = extension === "md" || extension === "mdx";
+    const content = markdown ? markdownBody(previewData.file, previewData.content) : previewData.content;
+    return { markdown, lines: content.split("\n") };
+  }, [previewData]);
+  const docMatches = useMemo(() => (docLines && docFind.query ? searchMatchLines(docLines.lines, docFind.query) : []), [docLines, docFind.query]);
+  const docHeadings = useMemo(() => (docLines?.markdown ? markdownHeadingLines(docLines.lines) : []), [docLines]);
 
   useEffect(() => {
     previewScroll.current?.scrollTo(0);
   }, [currentName, previewData?.file]);
+
+  useEffect(() => {
+    findPos.current = -1;
+  }, [currentName, previewData?.file, docFind.query]);
 
   // Incrementally hash-verify vendor rows after (re)load.
   useEffect(() => {
     const row = catalog.rows.find((candidate) => candidate.live === "checking");
     if (!row) return;
     const timer = setTimeout(() => {
-      const verified = verifyRow(row);
+      const verified = verifyRow(catalog.agentsSkills, row);
       setCatalog((previous) => ({
         ...previous,
         rows: previous.rows.map((candidate) => (candidate.name === verified.name && candidate.live === "checking" ? verified : candidate)),
       }));
     }, 0);
     return () => clearTimeout(timer);
-  }, [catalog.rows]);
+  }, [catalog.rows, catalog.agentsSkills]);
 
   const refresh = () => {
-    setCatalog(loadCatalog());
+    setCatalog(runSync(loadCatalog()));
   };
 
   const notify = (text: string, error = false) => {
@@ -196,6 +287,38 @@ export function App() {
     if (quitting.current) return;
     quitting.current = true;
     renderer.destroy();
+  };
+
+  // ---- document navigation ----------------------------------------------
+
+  const docRowFor = (line: number): number | null => {
+    const scroll = previewScroll.current;
+    if (!scroll || !docLines) return null;
+    const doc = previewDoc.current;
+    const row = doc ? scrollRowForLine(doc, scroll, line, docLines.lines.length) : 0;
+    return clamp(row, 0, Math.max(0, scroll.scrollHeight - scroll.viewport.height));
+  };
+
+  const jumpMatch = (delta: 1 | -1) => {
+    if (!docFind.query) return notify("no document search yet \u2014 press / in the document pane", true);
+    if (docMatches.length === 0) return notify(`no matches for "${docFind.query}"`, true);
+    const len = docMatches.length;
+    const next = findPos.current === -1 ? (delta === 1 ? 0 : len - 1) : (findPos.current + delta + len) % len;
+    findPos.current = next;
+    const line = docMatches[next] ?? 0;
+    const row = docRowFor(line);
+    if (row !== null) previewScroll.current?.scrollTo(row);
+    notify(`match ${next + 1}/${len} \u00b7 line ${line + 1}`);
+  };
+
+  const jumpHeading = (delta: 1 | -1) => {
+    const scroll = previewScroll.current;
+    if (!scroll || !docLines) return;
+    if (docHeadings.length === 0) return notify(docLines.markdown ? "no headings in this document" : "headings only apply to markdown", true);
+    const rows = docHeadings.map((line) => docRowFor(line) ?? 0);
+    const top = scroll.scrollTop;
+    const target = delta === 1 ? rows.find((row) => row > top) : [...rows].reverse().find((row) => row < top);
+    if (target !== undefined) scroll.scrollTo(target);
   };
 
   // ---- keyboard ----------------------------------------------------------
@@ -224,9 +347,39 @@ export function App() {
     return true;
   };
 
+  const handleFind = (key: KeyEvent): boolean => {
+    if (!docFind.typing) return false;
+    if (key.name === "escape") {
+      setDocFind({ typing: false, query: "" });
+      return true;
+    }
+    if (key.name === "return" || key.name === "enter") {
+      setDocFind((f) => ({ ...f, typing: false }));
+      if (!docFind.query) return true;
+      if (docMatches.length === 0) {
+        notify(`no matches for "${docFind.query}"`, true);
+        return true;
+      }
+      findPos.current = 0;
+      const line = docMatches[0] ?? 0;
+      const row = docRowFor(line);
+      if (row !== null) previewScroll.current?.scrollTo(row);
+      notify(`match 1/${docMatches.length} \u00b7 line ${line + 1}`);
+      return true;
+    }
+    if (key.name === "backspace") {
+      setDocFind((f) => ({ ...f, query: f.query.slice(0, -1) }));
+      return true;
+    }
+    const p = printable(key);
+    if (p) setDocFind((f) => ({ ...f, query: f.query + p }));
+    return true;
+  };
+
   const handleOverlay = (key: KeyEvent): boolean => {
     if (mode === "list") return false;
     if (mode === "link" && linkFlow) return handleLink(key);
+    if (mode === "index" && indexFlow) return handleIndex(key);
     if (key.name === "escape" || key.name === "q") {
       setMode("list");
       return true;
@@ -243,7 +396,7 @@ export function App() {
       if (key.name === "return" || key.name === "enter") {
         const name = profileNames[profileIndex];
         if (name) {
-          reportAction(`profile ${name}`, applyProfile(name));
+          reportAction(`profile ${name}`, runSync(applyProfile(name)));
           refresh();
         }
         setMode("list");
@@ -258,6 +411,50 @@ export function App() {
   };
 
   const patchFlow = (fn: (prev: LinkFlow) => LinkFlow) => setLinkFlow((prev) => (prev ? fn(prev) : prev));
+
+  const patchIndexFlow = (fn: (prev: IndexFlow) => IndexFlow) => setIndexFlow((prev) => (prev ? fn(prev) : prev));
+
+  const handleIndex = (key: KeyEvent): boolean => {
+    if (!indexFlow || !currentUnindexedSkill) return true;
+    if (indexFlow.running) return true;
+    if (key.name === "escape") {
+      setIndexFlow(null);
+      setMode("list");
+      return true;
+    }
+    if (key.name === "backspace") {
+      patchIndexFlow((flow) => ({ ...flow, input: flow.input.slice(0, -1), error: undefined }));
+      return true;
+    }
+    if (key.name === "return" || key.name === "enter") {
+      let source: string;
+      try {
+        source = parseSkillsAddSource(indexFlow.input, currentUnindexedSkill.name);
+      } catch (error) {
+        patchIndexFlow((flow) => ({ ...flow, error: error instanceof Error ? error.message : String(error) }));
+        return true;
+      }
+      const skill = currentUnindexedSkill;
+      patchIndexFlow((flow) => ({ ...flow, running: true, error: undefined }));
+      setTimeout(() => {
+        const outcome = runSyncResult(addSkillFromSource(source, skill.name, { unindexedSkill: skill }));
+        if (outcome.ok) {
+          const result = outcome.value;
+          setIndexFlow(null);
+          setMode("list");
+          refresh();
+          if (result.warnings.length > 0) notify(`indexed ${skill.name}: ${result.warnings[0]}`, true);
+          else notify(`indexed ${skill.name} -> ${result.path}`);
+        } else {
+          patchIndexFlow((flow) => ({ ...flow, running: false, error: outcome.message }));
+        }
+      }, 0);
+      return true;
+    }
+    const value = printable(key);
+    if (value) patchIndexFlow((flow) => ({ ...flow, input: flow.input + value, error: undefined }));
+    return true;
+  };
 
   const handleLink = (key: KeyEvent): boolean => {
     if (!linkFlow || !current) return true;
@@ -324,18 +521,17 @@ export function App() {
       return true;
     }
     if (key.name === "return" || key.name === "enter") {
-      try {
+      const outcome = runSyncResult(
         linkProjectSkill({
           skill: current.name,
           project: linkFlow.input,
           mode: linkFlow.mode,
           gitExclude: linkFlow.exclude,
           claude: linkFlow.claude,
-        });
-        notify(`linked ${current.name} (${linkFlow.mode}) into ${linkFlow.input}`);
-      } catch (err) {
-        notify(err instanceof Error ? err.message : String(err), true);
-      }
+        }),
+      );
+      if (outcome.ok) notify(`linked ${current.name} (${linkFlow.mode}) into ${linkFlow.input}`);
+      else notify(outcome.message, true);
       setLinkFlow(null);
       setMode("list");
       refresh();
@@ -344,31 +540,45 @@ export function App() {
     return true;
   };
 
+  // ---- panel + selection navigation (shared by keyboard and mouse) -------
+
+  const focusPanel = (next: Panel) => {
+    if (panel === "content" && next !== "content") {
+      setPreviewState({ skill: currentName ?? null, file: previewFile, restore: previewScroll.current?.scrollTop ?? 0 });
+    }
+    setPanel(next);
+    setExpanded(null);
+  };
+  const moveAuthor = (delta: number) => {
+    setSelectedAuthor(clamp(authorIndex + delta, 0, Math.max(0, groups.length - 1)));
+    setSelectedSkill(0);
+  };
+  const moveSkill = (delta: number) => setSelectedSkill(clamp(skillIndex + delta, 0, Math.max(0, (currentGroup?.skills.length ?? 1) - 1)));
+  const moveFile = (delta: number) => {
+    if (!previewData) return;
+    setPreviewState({ skill: currentName ?? null, file: clamp(previewFile + delta, 0, previewData.files.length - 1), restore: 0 });
+  };
+  const selectFile = (index: number) => {
+    if (!previewData) return;
+    setPreviewState({ skill: currentName ?? null, file: clamp(index, 0, previewData.files.length - 1), restore: 0 });
+  };
+  const switchCatalogView = (view: CatalogView) => {
+    setCatalogView(view);
+    setSelectedAuthor(0);
+    setSelectedSkill(0);
+  };
+
   const handleList = (key: KeyEvent): void => {
     const panelOrder: Panel[] = previewData ? ["authors", "skills", "content", "files"] : ["authors", "skills", "content"];
-    const focusPanel = (next: Panel) => {
-      if (panel === "content" && next !== "content") {
-        setPreviewState({ skill: currentName ?? null, file: previewFile, restore: previewScroll.current?.scrollTop ?? 0 });
-      }
-      setPanel(next);
-      setExpanded(null);
-    };
     const movePanel = (delta: number) => {
       const index = Math.max(0, panelOrder.indexOf(panel));
       focusPanel(panelOrder[clamp(index + delta, 0, panelOrder.length - 1)] ?? panel);
     };
-    const moveAuthor = (delta: number) => {
-      setSelectedAuthor(clamp(authorIndex + delta, 0, Math.max(0, groups.length - 1)));
-      setSelectedSkill(0);
-    };
-    const moveSkill = (delta: number) => setSelectedSkill(clamp(skillIndex + delta, 0, Math.max(0, (currentGroup?.skills.length ?? 1) - 1)));
-    const moveFile = (delta: number) => {
-      if (!previewData) return;
-      setPreviewState({ skill: currentName ?? null, file: clamp(previewFile + delta, 0, previewData.files.length - 1), restore: 0 });
-    };
     const focusedPrimary: PrimaryPanel = panel === "files" ? "content" : panel;
 
     if (key.name === "q" || (key.ctrl && key.name === "c")) return quit();
+    if (key.name === "1") return switchCatalogView("available");
+    if (key.name === "2") return switchCatalogView("all");
     if (key.name === "tab") {
       const index = Math.max(0, panelOrder.indexOf(panel));
       focusPanel(panelOrder[(index + 1) % panelOrder.length] ?? "authors");
@@ -395,17 +605,28 @@ export function App() {
     }
     if (key.name === "escape") {
       if (expanded) setExpanded(null);
+      else if (docFind.query) setDocFind({ typing: false, query: "" });
       else if (filterText) setFilterText("");
       return;
     }
-    if (previewData && key.name === "]") return moveFile(1);
-    if (previewData && key.name === "[") return moveFile(-1);
+    if (key.name === "}" || (key.name === "]" && key.shift)) return jumpHeading(1);
+    if (key.name === "{" || (key.name === "[" && key.shift)) return jumpHeading(-1);
+    if (previewData && key.name === "]" && !key.shift) return moveFile(1);
+    if (previewData && key.name === "[" && !key.shift) return moveFile(-1);
     if ((key.name === "j" && key.shift) || key.name === "pagedown") {
       previewScroll.current?.scrollBy(key.name === "pagedown" ? viewport - 3 : 3);
       return;
     }
     if ((key.name === "k" && key.shift) || key.name === "pageup") {
       previewScroll.current?.scrollBy(key.name === "pageup" ? -(viewport - 3) : -3);
+      return;
+    }
+    if (key.ctrl && key.name === "e") {
+      previewScroll.current?.scrollBy(1);
+      return;
+    }
+    if (key.ctrl && key.name === "y") {
+      previewScroll.current?.scrollBy(-1);
       return;
     }
 
@@ -419,6 +640,8 @@ export function App() {
     if ((key.name === "k" && !key.shift) || key.name === "up") return moveFocused(-1);
     if (key.ctrl && key.name === "d") return moveFocused(Math.floor(viewport / 2));
     if (key.ctrl && key.name === "u") return moveFocused(-Math.floor(viewport / 2));
+    if (key.ctrl && key.name === "f") return moveFocused(Math.max(1, viewport - 2));
+    if (key.ctrl && key.name === "b") return moveFocused(-Math.max(1, viewport - 2));
     if (key.name === "g" && !key.shift) {
       const now = Date.now();
       if (now - pendingG.current < 500) {
@@ -440,10 +663,16 @@ export function App() {
       return;
     }
     if (key.name === "/") {
+      if (panel === "content" && previewData) {
+        setDocFind({ typing: true, query: "" });
+        return;
+      }
       setFilterMode(true);
       setFilterText("");
       return;
     }
+    if (key.name === "n" && !key.shift) return jumpMatch(1);
+    if (key.name === "n" && key.shift) return jumpMatch(-1);
     if (key.name === "r") {
       refresh();
       notify("refreshed");
@@ -453,23 +682,23 @@ export function App() {
     if (key.name === "u") {
       notify("checking upstream\u2026");
       void (async () => {
-        try {
-          const { checkUpstream } = await import("../lib/update.ts");
-          const statuses = await checkUpstream(loadCatalog().manifest);
-          const byName = new Map(statuses.map((s) => [s.name, s.state]));
-          setCatalog((prev) => ({
-            ...prev,
-            rows: prev.rows.map((r) => {
-              const state = byName.get(r.name);
-              return state ? { ...r, upstream: state } : r;
-            }),
-          }));
-          const updates = statuses.filter((s) => s.state === "update").length;
-          const gone = statuses.filter((s) => s.state === "gone").length;
-          notify(updates + gone === 0 ? "upstream: everything current" : `upstream: ${updates} update(s), ${gone} gone \u2014 run slinky update`);
-        } catch (err) {
-          notify(`upstream check failed: ${err instanceof Error ? err.message : err}`, true);
+        const outcome = await runPromiseResult(checkUpstream(runSync(loadCatalog()).manifest));
+        if (!outcome.ok) {
+          notify(`upstream check failed: ${outcome.message}`, true);
+          return;
         }
+        const statuses = outcome.value;
+        const byName = new Map(statuses.map((s) => [s.name, s.state]));
+        setCatalog((prev) => ({
+          ...prev,
+          rows: prev.rows.map((r) => {
+            const state = byName.get(r.name);
+            return state ? { ...r, upstream: state } : r;
+          }),
+        }));
+        const updates = statuses.filter((s) => s.state === "update").length;
+        const gone = statuses.filter((s) => s.state === "gone").length;
+        notify(updates + gone === 0 ? "upstream: everything current" : `upstream: ${updates} update(s), ${gone} gone \u2014 run slinky update`);
       })();
       return;
     }
@@ -482,15 +711,17 @@ export function App() {
     if (key.name === "return" || key.name === "enter") {
       if (panel === "authors") setPanel("skills");
       else if (panel === "skills" || panel === "files") setPanel("content");
-      else if (current || currentProjectSkill) setMode("detail");
+      else if (current || currentProjectSkill || currentUnindexedSkill) setMode("detail");
       return;
     }
     if (key.name === "space") {
       if (panel === "authors" && currentGroup?.rows) {
         const enable = !currentGroup.rows.some((row) => row.enabled);
-        const result = setSkillsEnabled(
-          currentGroup.rows.map((row) => row.name),
-          enable,
+        const result = runSync(
+          setSkillsEnabled(
+            currentGroup.rows.map((row) => row.name),
+            enable,
+          ),
         );
         reportAction(`${enable ? "enabled" : "disabled"} ${currentGroup.label}`, result);
         refresh();
@@ -498,21 +729,25 @@ export function App() {
       }
       if (panel !== "skills") return;
       if (!current) return;
-      const res = setSkillsEnabled([current.name], !current.enabled);
+      const res = runSync(setSkillsEnabled([current.name], !current.enabled));
       reportAction(`${current.enabled ? "disabled" : "enabled"} ${current.name}`, res);
       refresh();
       return;
     }
-    if (key.name === "i" && (current || currentProjectSkill)) return setMode("detail");
+    if (key.name === "i" && (current || currentProjectSkill || currentUnindexedSkill)) return setMode("detail");
+    if (key.name === "a" && currentUnindexedSkill) {
+      setIndexFlow({ input: "", running: false });
+      return setMode("index");
+    }
     if (!current) return;
     if (key.name === "d") {
-      setDiffResult(diffSkill(current));
+      setDiffResult(diffSkill(catalog, current));
       return setMode("diff");
     }
     if (key.name === "l" && key.shift) {
       // prefer the directory Slinky was launched from (unless it's the skills repo)
       const cwd = process.cwd();
-      const defaultProject = cwd !== REPO ? cwd : (catalog.state.recentProjects[0] ?? "");
+      const defaultProject = cwd !== catalog.repo ? cwd : (catalog.state.recentProjects[0] ?? "");
       setLinkFlow({
         step: "project",
         input: defaultProject,
@@ -528,24 +763,37 @@ export function App() {
   useKeyboard((key) => {
     if (key.eventType === "release" || (key.repeated === true && key.name === "g")) return;
     if (handleFilter(key)) return;
+    if (handleFind(key)) return;
     if (handleOverlay(key)) return;
     handleList(key);
+  });
+
+  usePaste((event) => {
+    if (mode !== "index" || !indexFlow || indexFlow.running) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const value = singleLinePaste(event.bytes);
+    if (value) patchIndexFlow((flow) => ({ ...flow, input: flow.input + value, error: undefined }));
   });
 
   // ---- render ------------------------------------------------------------
 
   const enabledCount = catalog.rows.filter((r) => r.enabled).length;
   const hereCount = catalog.projectSkills.length;
+  const availableCount = new Set([...catalog.rows.filter(isSkillAvailableHere).map((row) => row.name), ...catalog.projectSkills.map((skill) => skill.name)]).size;
+  const allCount = new Set([...catalog.rows.map((row) => row.name), ...catalog.unindexedSkills.map((skill) => skill.name), ...catalog.projectSkills.map((skill) => skill.name)])
+    .size;
   const projectName = basename(catalog.project) || catalog.project;
-  const matchCount = groups.reduce((count, group) => count + group.skills.length, 0);
+  const matchCount = new Set(groups.flatMap((group) => group.skills.map(skillItemName))).size;
   const narrow = cols < 96;
   const tiny = cols < 48;
+  const compactHeader = cols < 72;
   const focusedPrimary: PrimaryPanel = panel === "files" ? "content" : panel;
   const showAuthors = expanded ? expanded === "authors" : narrow ? focusedPrimary === "authors" : true;
   const showSkills = expanded ? expanded === "skills" : narrow ? focusedPrimary === "skills" : true;
   const showContent = expanded ? expanded === "content" : narrow ? focusedPrimary === "content" : true;
   const authorW = Math.max(18, Math.min(25, Math.floor(cols * 0.19)));
-  const skillW = Math.max(25, Math.min(36, Math.floor(cols * 0.27)));
+  const skillW = Math.max(33, Math.min(42, Math.floor(cols * 0.31)));
   const fileTreeW = Math.max(18, Math.min(28, Math.floor(cols * 0.21)));
   const authorViewport = Math.max(1, viewport - 2);
   const authorWin = windowOf(0, authorIndex, groups.length, authorViewport);
@@ -554,28 +802,85 @@ export function App() {
   const authorsWidth = expanded === "authors" || narrow ? cols : authorW;
   const skillsWidth = expanded === "skills" || narrow ? cols : skillW;
   const authorLabelW = Math.max(4, authorsWidth - 10);
-  const skillLabelW = Math.max(4, skillsWidth - 20);
+  const skillLabelW = Math.max(4, skillsWidth - 29);
 
-  const upstreamCell = (row: CatalogRow): { label: string; fg: string } => {
-    switch (row.upstream) {
-      case "update":
-        return { label: "^", fg: colors.yellow };
-      case "gone":
-        return { label: "×", fg: colors.red };
-      case "current":
-        return { label: "=", fg: colors.muted };
-      default:
-        return { label: "", fg: colors.muted };
-    }
-  };
+  const upstreamCell = (row: CatalogRow): { label: string; fg: string } =>
+    Match.value(row.upstream).pipe(
+      Match.when("update", () => ({ label: "^", fg: colors.yellow })),
+      Match.when("gone", () => ({ label: "×", fg: colors.red })),
+      Match.when("current", () => ({ label: "=", fg: colors.muted })),
+      Match.orElse(() => ({ label: "", fg: colors.muted })),
+    );
 
   const header = (
-    <TextLine fg={colors.text} bg={colors.headerBg}>
-      <span fg={colors.accent}>{" slinky "}</span>
-      <span fg={colors.muted}>{`${enabledCount}/${catalog.rows.length} enabled · profile: ${catalog.state.activeProfile ?? "-"} · ${projectName} · ${hereCount} here`}</span>
-      {currentName ? <span fg={colors.text}>{`  ${currentGroup?.label} / ${currentName}`}</span> : null}
-    </TextLine>
+    <box height={1} width="100%" flexDirection="row" justifyContent="space-between" backgroundColor={colors.headerBg}>
+      <text wrapMode="none" truncate>
+        <span fg={colors.accent}>{" slinky "}</span>
+        <span fg={colors.muted}>{compactHeader ? "· " : " project: "}</span>
+        <span fg={colors.text}>{projectName}</span>
+      </text>
+      {!compactHeader ? (
+        <text wrapMode="none" truncate>
+          <span fg={colors.muted}>{`global ${enabledCount}/${catalog.rows.length} · local ${hereCount}`}</span>
+          {catalog.unindexedSkills.length > 0 ? <span fg={colors.yellow}>{` · unindexed ${catalog.unindexedSkills.length}`}</span> : null}
+          <span> </span>
+        </text>
+      ) : null}
+    </box>
   );
+
+  const tabs = (
+    <box height={1} width="100%" flexDirection="row" justifyContent="space-between" backgroundColor={colors.panelBg}>
+      <box height={1} flexDirection="row">
+        <text
+          wrapMode="none"
+          truncate
+          fg={catalogView === "available" ? colors.selectedText : colors.muted}
+          bg={catalogView === "available" ? colors.selectedBg : undefined}
+          marginLeft={1}
+          onMouseDown={() => {
+            if (mode === "list") switchCatalogView("available");
+          }}
+        >{` 1 ${compactHeader ? "available" : "available here"} ${availableCount} `}</text>
+        <text
+          wrapMode="none"
+          truncate
+          fg={catalogView === "all" ? colors.selectedText : colors.muted}
+          bg={catalogView === "all" ? colors.selectedBg : undefined}
+          marginLeft={1}
+          onMouseDown={() => {
+            if (mode === "list") switchCatalogView("all");
+          }}
+        >{` 2 ${compactHeader ? "all" : "all skills"} ${allCount} `}</text>
+      </box>
+      {catalog.state.activeProfile && !tiny ? <text fg={colors.muted} wrapMode="none" truncate>{`profile: ${catalog.state.activeProfile} `}</text> : null}
+    </box>
+  );
+
+  // Mouse: click selects a row (and focuses its panel); wheel moves the selection.
+  const clickAuthorRow = (index: number) => (event: { stopPropagation: () => void }) => {
+    event.stopPropagation();
+    if (mode !== "list") return;
+    if (panel !== "authors") focusPanel("authors");
+    setSelectedAuthor(index);
+    setSelectedSkill(0);
+  };
+  const clickSkillRow = (index: number) => (event: { stopPropagation: () => void }) => {
+    event.stopPropagation();
+    if (mode !== "list") return;
+    if (panel !== "skills") focusPanel("skills");
+    setSelectedSkill(index);
+  };
+  const clickPanel = (target: Panel) => () => {
+    if (mode !== "list") return;
+    if (panel !== target) focusPanel(target);
+  };
+  const wheelList = (move: (delta: number) => void) => (event: { stopPropagation: () => void; scroll?: { direction: string } }) => {
+    event.stopPropagation();
+    if (mode !== "list") return;
+    if (event.scroll?.direction === "up") move(-1);
+    else if (event.scroll?.direction === "down") move(1);
+  };
 
   const authorRows = groups.slice(authorWin, authorWin + authorViewport).map((group, index) => {
     const itemIndex = authorWin + index;
@@ -583,7 +888,12 @@ export function App() {
     const count = group.skills.length;
     const status = group.enabledCount === null ? `${count}` : `${group.enabledCount}/${count}`;
     return (
-      <TextLine key={group.label} fg={selected && panel === "authors" ? colors.selectedText : colors.text} bg={selected ? colors.selectedBg : undefined}>
+      <TextLine
+        key={group.label}
+        fg={selected && panel === "authors" ? colors.selectedText : colors.text}
+        bg={selected ? colors.selectedBg : undefined}
+        onMouseDown={clickAuthorRow(itemIndex)}
+      >
         <span fg={selected ? colors.accent : colors.muted}>{selected ? " › " : "   "}</span>
         <span>{fitCell(group.label, authorLabelW)}</span>
         <span fg={colors.muted}>{fitCell(status, 5, "right")}</span>
@@ -596,22 +906,34 @@ export function App() {
     const selected = itemIndex === skillIndex;
     const fg = selected && panel === "skills" ? colors.selectedText : colors.text;
     const bg = selected ? colors.selectedBg : undefined;
+    const onMouseDown = clickSkillRow(itemIndex);
     if (item.kind === "project-skill") {
       return (
-        <TextLine key={`p:${item.skill.name}`} fg={fg} bg={bg}>
+        <TextLine key={`p:${item.skill.name}`} fg={fg} bg={bg} onMouseDown={onMouseDown}>
           <span fg={selected ? colors.accent : colors.muted}>{selected ? " › " : "   "}</span>
           <span>{fitCell(item.skill.name, skillLabelW)}</span>
           <span fg={colors.yellow}>{fitCell("project", 9, "right")}</span>
         </TextLine>
       );
     }
+    if (item.kind === "unindexed-skill") {
+      return (
+        <TextLine key={`u:${item.skill.path}`} fg={fg} bg={bg} onMouseDown={onMouseDown}>
+          <span fg={selected ? colors.accent : colors.muted}>{selected ? " › " : "   "}</span>
+          <span>{fitCell(item.skill.name, skillLabelW)}</span>
+          <span fg={colors.yellow}>{fitCell("unindexed", 12, "right")}</span>
+        </TextLine>
+      );
+    }
     const row = item.row;
+    const placement = placementCell[projectPlacement(row)];
     return (
-      <TextLine key={row.name} fg={fg} bg={bg}>
+      <TextLine key={row.name} fg={fg} bg={bg} onMouseDown={onMouseDown}>
         <span fg={selected ? colors.accent : colors.muted}>{selected ? " › " : "   "}</span>
         <span>{fitCell(row.name, skillLabelW)}</span>
         <span fg={row.enabled ? colors.green : colors.muted}>{fitCell(row.enabled ? "on" : "off", 5, "right")}</span>
         <span fg={liveColor[row.live]}>{fitCell(liveLabel[row.live], 7, "right")}</span>
+        <span fg={placement.fg}>{fitCell(placement.label, 9, "right")}</span>
         <span fg={upstreamCell(row).fg}>{fitCell(upstreamCell(row).label, 3, "right")}</span>
       </TextLine>
     );
@@ -627,6 +949,16 @@ export function App() {
       </TextLine>
     ) : null;
 
+  const findBar =
+    docFind.typing || docFind.query ? (
+      <TextLine fg={colors.text}>
+        <span fg={colors.accent}>{" doc /"}</span>
+        <span>{docFind.query}</span>
+        <span fg={colors.accent}>{docFind.typing ? "\u2588" : ""}</span>
+        <span fg={colors.muted}>{docFind.query ? `  (${docMatches.length} match${docMatches.length === 1 ? "" : "es"}${docFind.typing ? "" : " \u00b7 n/N to jump"})` : ""}</span>
+      </TextLine>
+    ) : null;
+
   const footer = flash ? (
     <TextLine fg={flash.error ? colors.red : colors.green}>{` ${flash.text}`}</TextLine>
   ) : (
@@ -637,9 +969,12 @@ export function App() {
       <Hint keys="j/k" label={panel === "content" ? "scroll" : "move"} />
       <Hint keys="x" label={expanded ? "restore" : "expand"} />
       {previewData && panel !== "authors" ? <Hint keys="[/]" label="file" /> : null}
-      {panel === "authors" || panel === "skills" ? <Hint keys="space" label="toggle" /> : null}
+      {(panel === "authors" && currentGroup?.rows) || (panel === "skills" && current) ? <Hint keys="space" label="toggle" /> : null}
+      {currentUnindexedSkill ? <Hint keys="a" label="index" /> : null}
       <Hint keys="i" label="details" />
-      <Hint keys="/" label="filter" />
+      <Hint keys="1/2" label="view" />
+      <Hint keys="/" label={panel === "content" ? "search" : "filter"} />
+      {docFind.query ? <Hint keys="n/N" label="match" /> : null}
       <Hint keys="?" label="help" />
       <Hint keys="q" label="quit" />
     </TextLine>
@@ -648,7 +983,9 @@ export function App() {
   return (
     <box width="100%" height="100%" flexDirection="column">
       {header}
+      {tabs}
       {filterBar}
+      {findBar}
       <box flexGrow={1} flexDirection="row" backgroundColor={colors.panelBg}>
         {showAuthors ? (
           <box
@@ -659,6 +996,8 @@ export function App() {
             borderColor={panel === "authors" ? colors.accent : colors.modalBorder}
             title={` authors ${groups.length ? `${authorIndex + 1}/${groups.length}` : ""} `}
             titleColor={panel === "authors" ? colors.accent : colors.muted}
+            onMouseDown={clickPanel("authors")}
+            onMouseScroll={wheelList(moveAuthor)}
           >
             {authorRows}
             {groups.length === 0 ? <TextLine fg={colors.muted}>{"  no authors"}</TextLine> : null}
@@ -673,6 +1012,8 @@ export function App() {
             borderColor={panel === "skills" ? colors.accent : colors.modalBorder}
             title={` skills · ${currentGroup?.label ?? "-"} `}
             titleColor={panel === "skills" ? colors.accent : colors.muted}
+            onMouseDown={clickPanel("skills")}
+            onMouseScroll={wheelList(moveSkill)}
           >
             {skillRows}
             {matchCount === 0 ? <TextLine fg={colors.muted}>{"  no skills match"}</TextLine> : null}
@@ -684,11 +1025,19 @@ export function App() {
             skill={currentName}
             panel={panel}
             scrollRef={previewScroll}
+            docRef={previewDoc}
             restoreScroll={previewRestore}
             syntaxStyle={syntaxStyle}
             fileTreeWidth={fileTreeW}
             fileTreeMode={tiny ? (panel === "files" ? "only" : "hidden") : "split"}
             height={viewport}
+            onFocusPanel={(target) => clickPanel(target)()}
+            onSelectFile={(index) => {
+              if (mode === "list") selectFile(index);
+            }}
+            onScrollFiles={(delta) => {
+              if (mode === "list") moveFile(delta);
+            }}
           />
         ) : null}
       </box>
@@ -696,9 +1045,11 @@ export function App() {
       {mode === "help" ? <HelpModal cols={cols} /> : null}
       {mode === "detail" && current ? <DetailModal cols={cols} row={current} catalog={catalog} /> : null}
       {mode === "detail" && currentProjectSkill ? <ProjectSkillModal cols={cols} skill={currentProjectSkill} catalog={catalog} /> : null}
+      {mode === "detail" && currentUnindexedSkill ? <UnindexedSkillModal cols={cols} skill={currentUnindexedSkill} /> : null}
       {mode === "profiles" ? <ProfilesModal cols={cols} catalog={catalog} names={profileNames} index={profileIndex} /> : null}
       {mode === "diff" && current && diffResult ? <DiffModal cols={cols} row={current} result={diffResult} /> : null}
       {mode === "link" && current && linkFlow ? <LinkModal cols={cols} row={current} flow={linkFlow} recents={catalog.state.recentProjects} /> : null}
+      {mode === "index" && currentUnindexedSkill && indexFlow ? <IndexSkillModal cols={cols} skill={currentUnindexedSkill} flow={indexFlow} /> : null}
     </box>
   );
 }
@@ -710,21 +1061,29 @@ function PreviewPanel({
   skill,
   panel,
   scrollRef,
+  docRef,
   restoreScroll,
   syntaxStyle,
   fileTreeWidth,
   fileTreeMode,
   height,
+  onFocusPanel,
+  onSelectFile,
+  onScrollFiles,
 }: {
   data: { files: string[]; idx: number; file: string; content: string } | null;
   skill: string | undefined;
   panel: Panel;
   scrollRef: { current: ScrollBoxRenderable | null };
+  docRef: { current: DocRenderable | null };
   restoreScroll: number;
   syntaxStyle: ReturnType<typeof createMarkdownSyntax>;
   fileTreeWidth: number;
   fileTreeMode: "split" | "hidden" | "only";
   height: number;
+  onFocusPanel: (panel: "content" | "files") => void;
+  onSelectFile: (index: number) => void;
+  onScrollFiles: (delta: number) => void;
 }) {
   const treeOnly = fileTreeMode === "only";
 
@@ -763,6 +1122,7 @@ function PreviewPanel({
       title={treeOnly ? ` files · ${skill} ` : fileTreeMode === "hidden" ? ` document · ${data.file} ` : ` document · ${skill} / ${data.file} `}
       titleColor={panel === "content" || panel === "files" ? colors.accent : colors.muted}
       backgroundColor={colors.panelBg}
+      onMouseDown={() => onFocusPanel("content")}
     >
       <box flexGrow={1} flexDirection="row">
         {!treeOnly ? (
@@ -778,6 +1138,9 @@ function PreviewPanel({
           >
             {markdown ? (
               <markdown
+                ref={(node) => {
+                  docRef.current = node;
+                }}
                 width="100%"
                 content={content}
                 syntaxStyle={syntaxStyle}
@@ -789,7 +1152,17 @@ function PreviewPanel({
                 bg={colors.panelBg}
               />
             ) : (
-              <code width="100%" content={content} filetype={extension || "text"} syntaxStyle={syntaxStyle} wrapMode="none" drawUnstyledText />
+              <code
+                ref={(node) => {
+                  docRef.current = node;
+                }}
+                width="100%"
+                content={content}
+                filetype={extension || "text"}
+                syntaxStyle={syntaxStyle}
+                wrapMode="none"
+                drawUnstyledText
+              />
             )}
           </scrollbox>
         ) : null}
@@ -801,16 +1174,31 @@ function PreviewPanel({
             borderStyle="single"
             borderColor={panel === "files" ? colors.accent : colors.modalBorder}
             paddingLeft={1}
+            onMouseDown={(event) => {
+              event.stopPropagation();
+              onFocusPanel("files");
+            }}
+            onMouseScroll={(event) => {
+              event.stopPropagation();
+              if (event.scroll?.direction === "up") onScrollFiles(-1);
+              else if (event.scroll?.direction === "down") onScrollFiles(1);
+            }}
           >
             <TextLine fg={panel === "files" ? colors.accent : colors.muted}>{` FILES  ${data.idx + 1}/${data.files.length}`}</TextLine>
             {treeRows.slice(treeWin, treeWin + treeViewport).map((row) => {
               const selected = row.kind === "file" && row.path === data.file;
               const prefix = row.kind === "folder" ? "▾ " : selected ? "› " : "  ";
+              const fileIndex = row.kind === "file" ? data.files.indexOf(row.path) : -1;
               return (
                 <TextLine
                   key={`${row.kind}:${row.path}`}
                   fg={row.kind === "folder" ? colors.accent : selected ? colors.selectedText : colors.text}
                   bg={selected ? colors.selectedBg : undefined}
+                  onMouseDown={(event) => {
+                    event.stopPropagation();
+                    onFocusPanel("files");
+                    if (fileIndex !== -1) onSelectFile(fileIndex);
+                  }}
                 >
                   {`${"  ".repeat(row.depth)}${prefix}${row.label}`}
                 </TextLine>
@@ -833,20 +1221,27 @@ function HelpModal({ cols }: { cols: number }) {
     ["0 / $", "focus the first / last panel"],
     ["gg / G", "first / last item or document boundary"],
     ["ctrl-d / ctrl-u", "half-page down / up"],
+    ["ctrl-f / ctrl-b", "full page down / up"],
+    ["ctrl-e / ctrl-y", "scroll the document one line from any panel"],
     ["x", "expand or restore the focused primary panel"],
     ["v", "expand or restore the document panel"],
     ["J / K, PgUp/PgDn", "scroll the document from any panel"],
     ["[ / ]", "previous / next related file"],
+    ["{ / }", "previous / next markdown heading in the document"],
+    ["n / N", "next / previous document search match"],
     ["enter", "enter the next panel; from document, show details"],
     ["i", "show skill details"],
+    ["1 / 2", "available here / all skills view"],
+    ["a", "index selected unindexed .agents skill"],
     ["space", "toggle a skill or every skill by the focused author"],
     ["u", "check vendor skills for upstream updates"],
     ["L", "link skill into a project (copy or symlink)"],
     ["d", "diff live global copy vs repo baseline"],
     ["p", "profile picker (exact-set apply)"],
-    ["/", "filter by name (esc clears)"],
+    ["/", "filter lists; in the document pane, search the document"],
     ["r", "reload catalog"],
     ["q / ctrl-c", "quit"],
+    ["mouse", "click rows/tabs/panels; wheel scrolls lists and document"],
   ];
   return (
     <Modal title="help" width={76} cols={cols}>
@@ -862,7 +1257,7 @@ function HelpModal({ cols }: { cols: number }) {
 }
 
 function DetailModal({ cols, row, catalog }: { cols: number; row: CatalogRow; catalog: Catalog }) {
-  const desc = skillDescription(row.meta);
+  const desc = skillDescription(catalog.repo, row.meta);
   const links = linksForSkill(catalog.state, row.name);
   const upstream = row.meta.origin === "vendor" ? row.meta.upstream : null;
   const source = upstream?.kind === "github" ? upstream.repository : upstream?.kind === "well-known" ? upstream.source : null;
@@ -890,7 +1285,11 @@ function DetailModal({ cols, row, catalog }: { cols: number; row: CatalogRow; ca
       {field("live", liveLabel[row.live], liveColor[row.live])}
       {field("claude", row.claude ? "linked" : "not linked")}
       {row.projectLink
-        ? field("here", `${row.projectSkill ? row.projectLink.mode : "missing"} · ${catalog.project}`, row.projectSkill ? colors.accent : colors.red)
+        ? field(
+            "here",
+            `${row.projectSkill ? `${row.projectLink.mode} · ${row.projectLink.excludedTargets.includes(`.agents/skills/${row.name}`) ? "hidden" : "tracked"}` : "missing"} · ${catalog.project}`,
+            row.projectSkill ? colors.accent : colors.red,
+          )
         : row.projectSkill
           ? field(
               "here",
@@ -939,6 +1338,49 @@ function ProjectSkillModal({ cols, skill, catalog }: { cols: number; skill: Proj
       {field("source", projectSkillPath(catalog.project, skill), colors.accent)}
       {field("catalog", "not managed by Slinky", colors.yellow)}
       <TextLine fg={colors.muted}>{"esc to close · use the document panel to review files"}</TextLine>
+    </Modal>
+  );
+}
+
+function UnindexedSkillModal({ cols, skill }: { cols: number; skill: UnindexedSkill }) {
+  const desc = unindexedSkillDescription(skill);
+  return (
+    <Modal title={`${skill.name} · unindexed`} width={76} cols={cols}>
+      {desc ? (
+        <box paddingBottom={1}>
+          <text fg={colors.text} wrapMode="word">
+            {desc}
+          </text>
+        </box>
+      ) : null}
+      <TextLine>
+        <span fg={colors.muted}>{fitCell("origin", 12)}</span>
+        <span fg={colors.text}>{skill.origin}</span>
+      </TextLine>
+      <TextLine>
+        <span fg={colors.muted}>{fitCell("path", 12)}</span>
+        <span fg={colors.accent}>{skill.path}</span>
+      </TextLine>
+      <TextLine fg={colors.yellow}>{"present in the host but absent from skills.manifest.json"}</TextLine>
+      <TextLine fg={colors.muted}>{"esc, then a to index with a skills.sh source"}</TextLine>
+    </Modal>
+  );
+}
+
+function IndexSkillModal({ cols, skill, flow }: { cols: number; skill: UnindexedSkill; flow: IndexFlow }) {
+  return (
+    <Modal title={`index ${skill.name}`} width={86} cols={cols}>
+      <TextLine fg={colors.muted}>{"skills.sh source or add command:"}</TextLine>
+      <TextLine>
+        <span fg={colors.accent}>{" > "}</span>
+        <span fg={colors.text}>{flow.input}</span>
+        <span fg={colors.accent}>{flow.running ? "" : "\u2588"}</span>
+      </TextLine>
+      <TextLine fg={colors.muted}>{`example: skills add kitlangton/skills --skill ${skill.name}`}</TextLine>
+      <TextLine fg={colors.muted}>{`source: ${skill.path}`}</TextLine>
+      {flow.running ? <TextLine fg={colors.yellow}>{"installing, indexing, and syncing..."}</TextLine> : null}
+      {flow.error ? <TextLine fg={colors.red}>{` ${flow.error}`}</TextLine> : null}
+      <TextLine fg={colors.muted}>{flow.running ? "please wait" : "enter index · esc cancel"}</TextLine>
     </Modal>
   );
 }

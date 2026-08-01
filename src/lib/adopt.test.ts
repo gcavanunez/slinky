@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { adoptDestination, decodeSkillLock, upstreamFromLock } from "./adopt.ts";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { adoptDestination, decodeSkillLock, findUnindexedSkills, upstreamFromLock } from "./adopt.ts";
 import type { ForeignSkill } from "./adopt.ts";
+import type { Manifest } from "./manifest.ts";
 
 const base: ForeignSkill = { name: "foo", location: "agents", dir: "/x/foo" };
 
@@ -78,5 +82,34 @@ describe("upstreamFromLock", () => {
 
   test("represents missing provenance explicitly", () => {
     expect(upstreamFromLock(undefined).kind).toBe("unknown");
+  });
+});
+
+describe("findUnindexedSkills", () => {
+  test("finds local, vendor, and host agent directories absent from the manifest", () => {
+    const repo = mkdtempSync(join(tmpdir(), "slinky-unindexed-"));
+    try {
+      for (const path of ["skills/indexed", "skills/draft", "vendor/acme/effect", ".agents/skills/manual", "vendor/acme/incomplete"]) {
+        mkdirSync(join(repo, path), { recursive: true });
+      }
+      for (const path of ["skills/indexed", "skills/draft", "vendor/acme/effect", ".agents/skills/manual"]) {
+        writeFileSync(join(repo, path, "SKILL.md"), `# ${path}\n`);
+      }
+      const manifest: Manifest = {
+        version: 1,
+        skills: {
+          indexed: { origin: "local", path: "skills/indexed", contentHash: "a".repeat(64) },
+        },
+        profiles: {},
+      };
+
+      expect(findUnindexedSkills(manifest, repo).map(({ name, origin, path }) => ({ name, origin, path }))).toEqual([
+        { name: "manual", origin: "agent", path: ".agents/skills/manual" },
+        { name: "draft", origin: "local", path: "skills/draft" },
+        { name: "effect", origin: "vendor", path: "vendor/acme/effect" },
+      ]);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
   });
 });

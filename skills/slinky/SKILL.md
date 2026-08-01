@@ -101,6 +101,16 @@ slinky rehash <local-skill...>
 slinky verify
 ```
 
+Install a new upstream skill through Slinky rather than invoking skills.sh directly:
+
+```bash
+slinky skills add <source> --skill <name>
+```
+
+This installs globally through skills.sh, preserves its lock metadata, adopts the skill into `vendor/`, updates the manifest, and reconciles enabled global stores. Review and commit the host changes afterward. If `slinky status` reports an unindexed directory under `skills/`, `vendor/`, or the host's `.agents/skills/`, inspect it before editing the manifest or moving its content.
+
+For an unindexed skill, select it in the TUI and press `a`. Enter the source alone or paste the matching `skills add <source> --skill <name>` command. Slinky indexes existing `skills/` and `vendor/` directories in place; it removes an old host-local `.agents` copy only when its content matches the global installation.
+
 ## Upstream Updates
 
 Check persisted upstream tree hashes without changing live skills:

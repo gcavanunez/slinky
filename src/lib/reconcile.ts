@@ -1,9 +1,10 @@
 import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { Effect, Match } from "effect";
 import { isSkillEnabled } from "../domain/model.ts";
 import { contentHash } from "./hash.ts";
 import type { Manifest, State } from "./manifest.ts";
-import { AGENTS_SKILLS, CLAUDE_SKILLS, claudeRelTarget, REPO } from "./paths.ts";
+import { claudeRelTarget, HostRepo, Paths } from "./paths.ts";
 
 export type LiveKind = "missing" | "symlink" | "broken-symlink" | "dir" | "file";
 
@@ -51,8 +52,18 @@ function observeDir(dir: string): Record<string, LiveEntry> {
   return out;
 }
 
-export function observe(): Observation {
-  return { agents: observeDir(AGENTS_SKILLS), claude: observeDir(CLAUDE_SKILLS) };
+/** Observe the live global skill dirs. */
+export const observe = Effect.fn("Reconcile.observe")(function* () {
+  const paths = yield* Paths;
+  return { agents: observeDir(paths.agentsSkills), claude: observeDir(paths.claudeSkills) } satisfies Observation;
+});
+
+export interface PlanOptions {
+  /** Repo root the plan should link against. */
+  readonly repo: string;
+  /** ~/.claude/skills dir used to resolve expected claude symlink targets. */
+  readonly claudeSkills?: string;
+  readonly force?: boolean;
 }
 
 /**
@@ -65,8 +76,9 @@ export function observe(): Observation {
  * - any enabled skill:    ~/.claude/skills/<n> is a symlink -> ../../.agents/skills/<n>
  * - disabled skill:       absent from both dirs (repo retains the content)
  */
-export function planSync(manifest: Manifest, state: State, obs: Observation, opts: { force?: boolean; repo?: string } = {}): Plan {
-  const repo = opts.repo ?? REPO;
+export function planSync(manifest: Manifest, state: State, obs: Observation, opts: PlanOptions): Plan {
+  const repo = opts.repo;
+  const claudeSkills = opts.claudeSkills ?? "";
   const force = opts.force ?? false;
   const actions: Action[] = [];
   const warnings: string[] = [];
@@ -76,7 +88,7 @@ export function planSync(manifest: Manifest, state: State, obs: Observation, opt
     const live: LiveEntry = Object.hasOwn(obs.agents, name) ? obs.agents[name]! : { kind: "missing" };
     const claude: LiveEntry = Object.hasOwn(obs.claude, name) ? obs.claude[name]! : { kind: "missing" };
     const repoPath = resolve(repo, meta.path);
-    const claudeTarget = resolve(CLAUDE_SKILLS, claudeRelTarget(name));
+    const claudeTarget = resolve(claudeSkills, claudeRelTarget(name));
 
     if (enabled) {
       // canonical store
@@ -163,61 +175,72 @@ export interface ApplyResult {
   skipped: string[];
 }
 
-export function apply(plan: Plan, opts: { force?: boolean } = {}): ApplyResult {
+function applySync(agentsSkills: string, claudeSkills: string, plan: Plan, opts: { force?: boolean }): ApplyResult {
   const done: string[] = [];
   const skipped: string[] = [];
-  mkdirSync(AGENTS_SKILLS, { recursive: true });
-  mkdirSync(CLAUDE_SKILLS, { recursive: true });
+  mkdirSync(agentsSkills, { recursive: true });
+  mkdirSync(claudeSkills, { recursive: true });
 
-  const rmIfExists = (p: string) => {
-    try {
-      lstatSync(p);
-      rmSync(p, { recursive: true, force: true });
-    } catch {}
-  };
+  // force: true tolerates missing paths; real removal failures surface as defects.
+  const rmIfExists = (p: string) => rmSync(p, { recursive: true, force: true });
 
-  for (const a of plan.actions) {
-    const agentsPath = join(AGENTS_SKILLS, a.skill);
-    const claudePath = join(CLAUDE_SKILLS, a.skill);
-    switch (a.type) {
-      case "remove-claude":
-        rmIfExists(claudePath);
-        done.push(`removed ~/.claude/skills/${a.skill}`);
-        break;
-      case "remove-agents": {
-        if (a.verifyHash && lstatSync(agentsPath).isDirectory()) {
-          const live = contentHash(agentsPath);
-          if (live !== a.verifyHash && !opts.force) {
-            skipped.push(`${a.skill}: live dir drifted from repo copy; run \`diff ${a.skill}\` then \`vendor ${a.skill}\` or use --force`);
-            continue;
-          }
+  const applyAction = Match.type<Action>().pipe(
+    Match.discriminator("type")("remove-claude", (a) => {
+      rmIfExists(join(claudeSkills, a.skill));
+      done.push(`removed ~/.claude/skills/${a.skill}`);
+    }),
+    Match.discriminator("type")("remove-agents", (a) => {
+      const agentsPath = join(agentsSkills, a.skill);
+      if (a.verifyHash && lstatSync(agentsPath).isDirectory()) {
+        const live = contentHash(agentsPath);
+        if (live !== a.verifyHash && !opts.force) {
+          skipped.push(`${a.skill}: live dir drifted from repo copy; run \`diff ${a.skill}\` then \`vendor ${a.skill}\` or use --force`);
+          return;
         }
-        rmIfExists(agentsPath);
-        done.push(`removed ~/.agents/skills/${a.skill}`);
-        break;
       }
-      case "ensure-agents-symlink":
-        rmIfExists(agentsPath);
-        symlinkSync(a.target, agentsPath);
-        done.push(`linked ~/.agents/skills/${a.skill} -> ${a.target}`);
-        break;
-      case "restore-agents-dir":
-        rmIfExists(agentsPath);
-        cpSync(a.from, agentsPath, { recursive: true });
-        done.push(`restored ~/.agents/skills/${a.skill} from repo`);
-        break;
-      case "ensure-claude-symlink": {
-        // Skip if canonical entry was skipped (avoid creating broken links).
-        if (!existsSync(join(AGENTS_SKILLS, a.skill))) {
-          skipped.push(`${a.skill}: skipped claude symlink (no canonical entry)`);
-          continue;
-        }
-        rmIfExists(claudePath);
-        symlinkSync(claudeRelTarget(a.skill), claudePath);
-        done.push(`linked ~/.claude/skills/${a.skill}`);
-        break;
+      rmIfExists(agentsPath);
+      done.push(`removed ~/.agents/skills/${a.skill}`);
+    }),
+    Match.discriminator("type")("ensure-agents-symlink", (a) => {
+      const agentsPath = join(agentsSkills, a.skill);
+      rmIfExists(agentsPath);
+      symlinkSync(a.target, agentsPath);
+      done.push(`linked ~/.agents/skills/${a.skill} -> ${a.target}`);
+    }),
+    Match.discriminator("type")("restore-agents-dir", (a) => {
+      const agentsPath = join(agentsSkills, a.skill);
+      rmIfExists(agentsPath);
+      cpSync(a.from, agentsPath, { recursive: true });
+      done.push(`restored ~/.agents/skills/${a.skill} from repo`);
+    }),
+    Match.discriminator("type")("ensure-claude-symlink", (a) => {
+      // Skip if canonical entry was skipped (avoid creating broken links).
+      if (!existsSync(join(agentsSkills, a.skill))) {
+        skipped.push(`${a.skill}: skipped claude symlink (no canonical entry)`);
+        return;
       }
-    }
-  }
+      const claudePath = join(claudeSkills, a.skill);
+      rmIfExists(claudePath);
+      symlinkSync(claudeRelTarget(a.skill), claudePath);
+      done.push(`linked ~/.claude/skills/${a.skill}`);
+    }),
+    Match.exhaustive,
+  );
+
+  for (const a of plan.actions) applyAction(a);
   return { done, skipped };
 }
+
+/** Execute a plan against the live global dirs. */
+export const apply = Effect.fn("Reconcile.apply")(function* (plan: Plan, opts: { force?: boolean } = {}) {
+  const paths = yield* Paths;
+  return yield* Effect.sync(() => applySync(paths.agentsSkills, paths.claudeSkills, plan, opts));
+});
+
+/** Observe the live dirs and plan a sync without applying it. */
+export const observeAndPlan = Effect.fn("Reconcile.observeAndPlan")(function* (manifest: Manifest, state: State, opts: { force?: boolean } = {}) {
+  const paths = yield* Paths;
+  const host = yield* HostRepo;
+  const obs = yield* observe();
+  return planSync(manifest, state, obs, { repo: host.repo, claudeSkills: paths.claudeSkills, ...opts });
+});

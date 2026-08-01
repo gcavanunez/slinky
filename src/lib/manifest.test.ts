@@ -2,6 +2,10 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Cause, Effect, Exit, Layer } from "effect";
+import { ManifestStore } from "./manifest.ts";
+import type { ManifestStoreInterface } from "./manifest.ts";
+import { HostRepo } from "./paths.ts";
 
 const roots: string[] = [];
 const HASH = "a".repeat(64);
@@ -25,43 +29,65 @@ function host(): string {
   return root;
 }
 
-function run(root: string, body: string) {
-  const source = join(import.meta.dir, "manifest.ts");
-  return Bun.spawnSync([process.execPath, "-e", `import * as Store from ${JSON.stringify(source)}; ${body}`], { env: { ...process.env, SLINKY_REPO: root } });
-}
+const storeLayer = (root: string) =>
+  ManifestStore.layer.pipe(
+    Layer.provide(
+      Layer.succeed(
+        HostRepo,
+        HostRepo.of({
+          repo: root,
+          manifestPath: join(root, "skills.manifest.json"),
+          statePath: join(root, ".local", "state.json"),
+        }),
+      ),
+    ),
+  );
+
+const run = <A, E>(root: string, body: (store: ManifestStoreInterface) => Effect.Effect<A, E>): Exit.Exit<A, E> =>
+  Effect.runSyncExit(
+    Effect.gen(function* () {
+      const store = yield* ManifestStore;
+      return yield* body(store);
+    }).pipe(Effect.provide(storeLayer(root))),
+  );
+
+const failure = <A, E>(exit: Exit.Exit<A, E>): { _tag?: string; operation?: string } => {
+  if (Exit.isSuccess(exit)) throw new Error("expected failure");
+  return Cause.squash(exit.cause) as { _tag?: string; operation?: string };
+};
 
 describe("manifest persistence", () => {
   test("loads plain schema values and defaults only a missing state file", () => {
     const root = host();
-    const result = run(
-      root,
-      `const manifest = Store.loadManifest(); const state = Store.loadState(manifest); console.log(Object.getPrototypeOf(manifest) === Object.prototype, Object.getPrototypeOf(state) === Object.prototype, state.disabledSkills.length);`,
+    const exit = run(root, (store) =>
+      Effect.gen(function* () {
+        const loaded = yield* store.loadManifest();
+        const state = yield* store.loadState(loaded);
+        return [Object.getPrototypeOf(loaded) === Object.prototype, Object.getPrototypeOf(state) === Object.prototype, state.disabledSkills.length];
+      }),
     );
 
-    expect(result.exitCode).toBe(0);
-    expect(result.stdout.toString().trim()).toBe("true true 0");
+    expect(Exit.isSuccess(exit)).toBe(true);
+    if (Exit.isSuccess(exit)) expect(exit.value).toEqual([true, true, 0]);
   });
 
   test("rejects excess manifest properties", () => {
     const root = host();
     writeFileSync(join(root, "skills.manifest.json"), `${JSON.stringify({ ...manifest(), generatedAt: "2026-07-13T12:00:00.000Z" })}\n`);
-    const result = run(root, `try { Store.loadManifest(); } catch (error) { console.log(error._tag, error.operation); process.exit(7); }`);
+    const error = failure(run(root, (store) => store.loadManifest()));
 
-    expect(result.exitCode).toBe(7);
-    expect(result.stdout.toString().trim()).toBe("ManifestFileError decode");
+    expect(error._tag).toBe("ManifestFileError");
+    expect(error.operation).toBe("decode");
   });
 
   test("rejects malformed state instead of resetting it", () => {
     const root = host();
     mkdirSync(join(root, ".local"));
     writeFileSync(join(root, ".local", "state.json"), "{not-json}\n");
-    const result = run(
-      root,
-      `const manifest = Store.loadManifest(); try { Store.loadState(manifest); } catch (error) { console.log(error._tag, error.operation); process.exit(8); }`,
-    );
+    const error = failure(run(root, (store) => store.loadManifest().pipe(Effect.flatMap((loaded) => store.loadState(loaded)))));
 
-    expect(result.exitCode).toBe(8);
-    expect(result.stdout.toString().trim()).toBe("StateFileError parse");
+    expect(error._tag).toBe("StateFileError");
+    expect(error.operation).toBe("parse");
   });
 
   test("rejects state references that are not in the manifest", () => {
@@ -77,12 +103,9 @@ describe("manifest persistence", () => {
         recentProjects: [],
       })}\n`,
     );
-    const result = run(
-      root,
-      `const manifest = Store.loadManifest(); try { Store.loadState(manifest); } catch (error) { console.log(error._tag, error.operation); process.exit(9); }`,
-    );
+    const error = failure(run(root, (store) => store.loadManifest().pipe(Effect.flatMap((loaded) => store.loadState(loaded)))));
 
-    expect(result.exitCode).toBe(9);
-    expect(result.stdout.toString().trim()).toBe("StateFileError decode");
+    expect(error._tag).toBe("StateFileError");
+    expect(error.operation).toBe("decode");
   });
 });

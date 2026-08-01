@@ -6,8 +6,8 @@ export const version = 1;
 const SkillName = Schema.NonEmptyString;
 const ProfileName = Schema.NonEmptyString;
 const ContentHash = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));
-const UpstreamTreeHash = Schema.String.check(Schema.isPattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/));
-const PortableRelativePath = Schema.NonEmptyString.check(
+export const UpstreamTreeHash = Schema.String.check(Schema.isPattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/));
+export const PortableRelativePath = Schema.NonEmptyString.check(
   Schema.makeFilter(
     (value) => {
       if (value.includes("\\") || value.includes("\0") || posix.isAbsolute(value)) return false;
@@ -21,7 +21,7 @@ const LocalSkillPath = PortableRelativePath.check(Schema.isPattern(/^skills\/.+$
 const VendorSkillPath = PortableRelativePath.check(Schema.isPattern(/^vendor\/[^/]+\/[^/]+$/));
 const ProjectPath = Schema.NonEmptyString.check(Schema.makeFilter((value) => isAbsolute(value) && normalize(value) === value, { expected: "a normalized absolute project path" }));
 const HostPath = Schema.NonEmptyString.check(Schema.makeFilter((value) => isAbsolute(value) && normalize(value) === value, { expected: "a normalized absolute skills host path" }));
-const RepositorySlug = Schema.NonEmptyString.check(
+export const RepositorySlug = Schema.NonEmptyString.check(
   Schema.makeFilter(
     (value) => {
       const [owner, repository, extra] = value.split("/");
@@ -33,7 +33,7 @@ const RepositorySlug = Schema.NonEmptyString.check(
     { expected: "a GitHub repository in owner/name form" },
   ),
 );
-const HttpUrl = Schema.NonEmptyString.check(
+export const HttpUrl = Schema.NonEmptyString.check(
   Schema.makeFilter(
     (value) => {
       try {
@@ -305,63 +305,59 @@ export function validateState(manifest: Manifest, state: State): ReadonlyArray<s
 }
 
 const FileOperation = Schema.Literals(["read", "parse", "decode", "encode", "write", "rename"]);
+export type FileOperation = typeof FileOperation.Type;
 
-export class ManifestFileError extends Schema.TaggedErrorClass<ManifestFileError>()("ManifestFileError", {
+const FileErrorFields = {
   path: Schema.String,
   operation: FileOperation,
   detail: Schema.String,
   message: Schema.String,
-}) {
-  constructor(
-    readonly path: string,
-    readonly operation: typeof FileOperation.Type,
-    readonly detail: string,
-  ) {
-    super({ path, operation, detail, message: `${operation} ${path}: ${detail}` });
+};
+
+const fileErrorArgs = (path: string, operation: FileOperation, detail: string) => ({
+  path,
+  operation,
+  detail,
+  message: `${operation} ${path}: ${detail}`,
+});
+
+/** Render an unknown thrown value as a human-readable detail string. */
+export const errorDetail = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
+/** True when an fs error means "file does not exist". */
+export const isMissingFile = (error: unknown): boolean => error instanceof Error && "code" in error && error.code === "ENOENT";
+
+/** Expected domain-rule failure (unknown skill, drift guard, existing destination, ...). */
+export class OperationFailed extends Schema.TaggedErrorClass<OperationFailed>()("OperationFailed", {
+  message: Schema.String,
+}) {}
+
+/** An external tool (git, tar, npx skills, ...) failed at an adapter boundary. */
+export class ExternalToolError extends Schema.TaggedErrorClass<ExternalToolError>()("ExternalToolError", {
+  tool: Schema.String,
+  message: Schema.String,
+}) {}
+
+export class ManifestFileError extends Schema.TaggedErrorClass<ManifestFileError>()("ManifestFileError", FileErrorFields) {
+  constructor(path: string, operation: FileOperation, detail: string) {
+    super(fileErrorArgs(path, operation, detail));
   }
 }
 
-export class StateFileError extends Schema.TaggedErrorClass<StateFileError>()("StateFileError", {
-  path: Schema.String,
-  operation: FileOperation,
-  detail: Schema.String,
-  message: Schema.String,
-}) {
-  constructor(
-    readonly path: string,
-    readonly operation: typeof FileOperation.Type,
-    readonly detail: string,
-  ) {
-    super({ path, operation, detail, message: `${operation} ${path}: ${detail}` });
+export class StateFileError extends Schema.TaggedErrorClass<StateFileError>()("StateFileError", FileErrorFields) {
+  constructor(path: string, operation: FileOperation, detail: string) {
+    super(fileErrorArgs(path, operation, detail));
   }
 }
 
-export class ConfigFileError extends Schema.TaggedErrorClass<ConfigFileError>()("ConfigFileError", {
-  path: Schema.String,
-  operation: FileOperation,
-  detail: Schema.String,
-  message: Schema.String,
-}) {
-  constructor(
-    readonly path: string,
-    readonly operation: typeof FileOperation.Type,
-    readonly detail: string,
-  ) {
-    super({ path, operation, detail, message: `${operation} ${path}: ${detail}` });
+export class ConfigFileError extends Schema.TaggedErrorClass<ConfigFileError>()("ConfigFileError", FileErrorFields) {
+  constructor(path: string, operation: FileOperation, detail: string) {
+    super(fileErrorArgs(path, operation, detail));
   }
 }
 
-export class SkillLockDecodeError extends Schema.TaggedErrorClass<SkillLockDecodeError>()("SkillLockDecodeError", {
-  path: Schema.String,
-  operation: FileOperation,
-  detail: Schema.String,
-  message: Schema.String,
-}) {
-  constructor(
-    readonly path: string,
-    readonly operation: typeof FileOperation.Type,
-    readonly detail: string,
-  ) {
-    super({ path, operation, detail, message: `${operation} ${path}: ${detail}` });
+export class SkillLockDecodeError extends Schema.TaggedErrorClass<SkillLockDecodeError>()("SkillLockDecodeError", FileErrorFields) {
+  constructor(path: string, operation: FileOperation, detail: string) {
+    super(fileErrorArgs(path, operation, detail));
   }
 }

@@ -138,6 +138,16 @@ slinky rehash my-skill
 slinky verify
 ```
 
+Add an upstream skill through Slinky so skills.sh provenance, the vendored baseline, and the manifest are updated together:
+
+```bash
+slinky skills add kitlangton/skills --skill effect
+```
+
+Slinky installs the selected skill into the global skills.sh store, adopts it as a vendor skill, and reconciles the global agent directories. `slinky status` and the TUI also report skill directories under `skills/`, `vendor/`, or the host's `.agents/skills/` that are missing from `skills.manifest.json`.
+
+In the TUI, select an unindexed skill and press `a`. Enter the source (`kitlangton/skills`) or paste its add command (`skills add kitlangton/skills --skill effect`). Slinky verifies that the installed content matches the unindexed copy before indexing it in place or moving it to the inferred vendor path.
+
 ## Project Links
 
 Copy a skill into a project, which is the default:
@@ -162,6 +172,10 @@ slinky unlink frontend-design /path/to/project
 ```
 
 Slinky refuses to remove modified copies or replaced symlinks unless `--force` is explicitly requested.
+
+The TUI skill list shows project placement separately from global availability: `link·hid` and `copy·hid` are excluded through `.git/info/exclude`, while `link·git` and `copy·git` are visible to Git.
+
+The TUI opens on the top-level `available here` tab, which hides unavailable catalog entries and shows only skills discoverable globally or through the current project's `.agents` and `.claude` directories. Press `2` for the complete catalog and `1` to return to available skills.
 
 ## Update Workflow
 
@@ -205,6 +219,7 @@ slinky profile list
 slinky profile apply <name> [--force]
 slinky update --check
 slinky update [skill...] [--yes]
+slinky skills add <source> --skill <name>
 slinky diff [skill] [--patch]
 slinky vendor <skill...>
 slinky restore <skill...>
