@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -115,23 +115,33 @@ describe("CLI options", () => {
 });
 
 describe("CLI catalog actions", () => {
-  test("installs, vendors, and indexes a skill through skills.sh", () => {
-    const f = fixture();
-    mkdirSync(join(f.host, "vendor", "kitlangton", "effect"), { recursive: true });
-    writeFileSync(join(f.host, "vendor", "kitlangton", "effect", "SKILL.md"), "# effect\n");
-    const bin = join(f.root, "bin");
-    mkdirSync(bin);
+  /** Stub `npx` that installs into the repo staging inbox, as project-scoped skills.sh does. */
+  function stagingNpx(root: string, names: ReadonlyArray<string>): string {
+    const bin = join(root, "bin");
+    mkdirSync(bin, { recursive: true });
     const npx = join(bin, "npx");
+    const lock = JSON.stringify({
+      version: 1,
+      skills: Object.fromEntries(names.map((name) => [name, { source: "kitlangton/skills", sourceType: "github", computedHash: "c".repeat(64) }])),
+    });
     writeFileSync(
       npx,
       `#!/bin/sh
 printf '%s\\n' "$@" > "$HOME/npx-args"
-mkdir -p "$HOME/.agents/skills/effect"
-printf '%s\\n' '# effect' > "$HOME/.agents/skills/effect/SKILL.md"
-printf '%s\\n' '{"skills":{"effect":{"source":"kitlangton/skills","sourceType":"github","sourceUrl":"https://github.com/kitlangton/skills"}}}' > "$HOME/.agents/.skill-lock.json"
+printf '%s\\n' "$PWD" > "$HOME/npx-cwd"
+${names.map((name) => `mkdir -p "$PWD/.agents/skills/${name}"\nprintf '%s\\n' '# ${name}' > "$PWD/.agents/skills/${name}/SKILL.md"`).join("\n")}
+mkdir -p "$PWD/.claude/skills"
+${names.map((name) => `ln -sfn "../../.agents/skills/${name}" "$PWD/.claude/skills/${name}"`).join("\n")}
+printf '%s\\n' '${lock}' > "$PWD/skills-lock.json"
 `,
     );
     chmodSync(npx, 0o755);
+    return bin;
+  }
+
+  test("installs project-scoped, vendors, indexes, and clears the staging inbox", () => {
+    const f = fixture();
+    const bin = stagingNpx(f.root, ["effect"]);
 
     const result = runCli(f.host, f.home, ["skills", "add", "kitlangton/skills", "--skill", "effect"], {
       PATH: `${bin}:${process.env.PATH ?? ""}`,
@@ -143,27 +153,75 @@ printf '%s\\n' '{"skills":{"effect":{"source":"kitlangton/skills","sourceType":"
           origin: string;
           path: string;
           contentHash: string;
-          upstream?: { kind: string; repository?: string; url?: string; tracking?: { kind: string } };
+          upstream?: { kind: string; repository?: string; url?: string | null; tracking?: { kind: string } };
           vendoredAt?: string;
         }
       >;
     };
 
     if (result.exitCode !== 0) throw new Error(result.stderr.toString());
-    expect(readFileSync(join(f.home, "npx-args"), "utf8").trim().split("\n")).toEqual(["-y", "skills", "add", "kitlangton/skills", "--skill", "effect", "--global", "--yes"]);
+    // Project scope, not --global: that is what keeps the install inside the repo.
+    expect(readFileSync(join(f.home, "npx-args"), "utf8").trim().split("\n")).toEqual([
+      "-y",
+      "skills",
+      "add",
+      "kitlangton/skills",
+      "--project",
+      "-a",
+      "universal",
+      "--skill",
+      "effect",
+      "--yes",
+    ]);
+    expect(readFileSync(join(f.home, "npx-cwd"), "utf8").trim()).toBe(f.host);
     expect(manifest.skills.effect).toEqual({
       origin: "vendor",
       path: "vendor/kitlangton/effect",
       contentHash: expect.any(String),
-      upstream: {
-        kind: "github",
-        repository: "kitlangton/skills",
-        url: "https://github.com/kitlangton/skills",
-        tracking: { kind: "untracked" },
-      },
+      // No skillPath in the lock, so there is nothing to look up upstream.
+      upstream: { kind: "github", repository: "kitlangton/skills", url: null, tracking: { kind: "untracked" } },
       vendoredAt: expect.any(String),
     });
     expect(readFileSync(join(f.host, "vendor", "kitlangton", "effect", "SKILL.md"), "utf8")).toBe("# effect\n");
+    // Staging inbox and its residue are cleared.
+    expect(existsSync(join(f.host, ".agents", "skills", "effect"))).toBe(false);
+    expect(existsSync(join(f.host, ".claude", "skills", "effect"))).toBe(false);
+    expect(existsSync(join(f.host, "skills-lock.json"))).toBe(false);
+  });
+
+  test("without --skill it defers discovery to skills.sh and adopts everything staged", () => {
+    const f = fixture();
+    const bin = stagingNpx(f.root, ["effect", "cause"]);
+
+    const result = runCli(f.host, f.home, ["skills", "add", "kitlangton/skills"], {
+      PATH: `${bin}:${process.env.PATH ?? ""}`,
+    });
+    const manifest = JSON.parse(readFileSync(join(f.host, "skills.manifest.json"), "utf8")) as { skills: Record<string, { path: string }> };
+
+    if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+    // No --yes: that would make skills.sh silently select every skill instead of asking.
+    expect(readFileSync(join(f.home, "npx-args"), "utf8").trim().split("\n")).toEqual(["-y", "skills", "add", "kitlangton/skills", "--project", "-a", "universal"]);
+    expect(manifest.skills.effect?.path).toBe("vendor/kitlangton/effect");
+    expect(manifest.skills.cause?.path).toBe("vendor/kitlangton/cause");
+    expect(existsSync(join(f.host, "skills-lock.json"))).toBe(false);
+  });
+
+  test("adopt discards a staging copy that duplicates an indexed baseline", () => {
+    const f = fixture();
+    // `foo` is already indexed as skills/foo with the same content.
+    mkdirSync(join(f.host, ".agents", "skills", "foo"), { recursive: true });
+    writeFileSync(join(f.host, ".agents", "skills", "foo", "SKILL.md"), "# foo\n");
+    const rehash = runCli(f.host, f.home, ["rehash", "foo"]);
+    expect(rehash.exitCode).toBe(0);
+
+    const listing = runCli(f.host, f.home, ["adopt"]);
+    expect(listing.stdout.toString()).toContain("staging copy is redundant");
+    expect(existsSync(join(f.host, ".agents", "skills", "foo"))).toBe(true);
+
+    const applied = runCli(f.host, f.home, ["adopt", "--all"]);
+    expect(applied.exitCode).toBe(0);
+    expect(applied.stdout.toString()).toContain("removed the redundant staging copy");
+    expect(existsSync(join(f.host, ".agents", "skills", "foo"))).toBe(false);
   });
 
   test("status reports host skill directories missing from the manifest", () => {

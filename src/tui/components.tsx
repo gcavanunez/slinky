@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/react */
 import type { ReactNode } from "react";
 import type { MouseEvent } from "@opentui/core";
 import { colors } from "./theme.ts";

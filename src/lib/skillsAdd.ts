@@ -1,10 +1,11 @@
 import { rmSync } from "node:fs";
 import { Effect, Schema } from "effect";
 import { errorDetail, formatUtc, nowUtc, OperationFailed, Skill, withManifestSkill } from "../domain/model.ts";
-import { adoptSkill, finalizeAdoption, findForeign, rollbackAdoption, upstreamFromLock } from "./adopt.ts";
+import { adoptSkill, backfillTreeHash, clearStagingResidue, finalizeAdoption, findStaged, rollbackAdoption, upstreamFromLock } from "./adopt.ts";
 import type { Adoption, UnindexedSkill } from "./adopt.ts";
 import { contentHash } from "./hash.ts";
 import { alignStateWithManifest, getSkill, ManifestStore } from "./manifest.ts";
+import { HostRepo } from "./paths.ts";
 import { apply, observeAndPlan } from "./reconcile.ts";
 import { runSkillsAdd } from "./update.ts";
 
@@ -60,18 +61,22 @@ export function parseSkillsAddSource(input: string, expectedName: string): strin
   return source;
 }
 
-/** Install globally through skills.sh, adopt into the host, persist, and reconcile. */
+/** Install one named skill into the repo staging inbox, index it, persist, and reconcile. */
 export const addSkillFromSource = Effect.fn("SkillsAdd.addSkillFromSource")(function* (source: string, name: string, options: SkillsAddOptions = {}) {
   const store = yield* ManifestStore;
+  const { repo } = yield* HostRepo;
   let manifest = yield* store.loadManifest();
   let state = yield* store.loadState(manifest);
   if (getSkill(manifest, name)) return yield* Effect.fail(new OperationFailed({ message: `${name} is already indexed in skills.manifest.json` }));
 
-  yield* runSkillsAdd(source, name, options.inheritStdio ?? false);
+  yield* runSkillsAdd(source, [name], repo);
 
-  const scan = yield* findForeign(manifest);
-  const candidate = scan.candidates.find((item) => item.name === name);
-  if (!candidate) return yield* Effect.fail(new OperationFailed({ message: `${name} was not found in the global skills store after installation` }));
+  const scan = yield* findStaged(manifest);
+  const entry = scan.staged.find((item) => item.candidate.name === name);
+  if (!entry) return yield* Effect.fail(new OperationFailed({ message: `${name} was not found in .agents/skills after installation` }));
+  // Project locks omit the git tree SHA; recover it so `update --check` still works.
+  const lockMeta = entry.candidate.lock ? yield* backfillTreeHash(entry.candidate.lock) : undefined;
+  const candidate = { ...entry.candidate, ...(lockMeta ? { lock: lockMeta } : {}) };
   const unindexed = options.unindexedSkill;
   if (unindexed && unindexed.name !== name) {
     return yield* Effect.fail(new OperationFailed({ message: `unindexed skill ${unindexed.name} does not match ${name}` }));
@@ -129,13 +134,16 @@ export const addSkillFromSource = Effect.fn("SkillsAdd.addSkillFromSource")(func
   const plan = yield* observeAndPlan(manifest, state, { force: replaceLocalGlobalCopy });
   const applied = yield* apply(plan, { force: replaceLocalGlobalCopy });
   const warnings = [...(scan.warning ? [scan.warning.message] : []), ...plan.warnings, ...applied.skipped];
-  if (unindexed?.origin === "agent") {
+
+  // Adoption moves the staging dir out; indexing in place leaves a duplicate behind.
+  if (!adoption) {
     try {
-      rmSync(unindexed.dir, { recursive: true });
+      rmSync(candidate.dir, { recursive: true, force: true });
     } catch (error) {
-      warnings.push(`indexed, but could not remove ${unindexed.dir}: ${errorDetail(error)}`);
+      warnings.push(`indexed, but could not remove ${candidate.dir}: ${errorDetail(error)}`);
     }
   }
+  warnings.push(...(yield* clearStagingResidue(name)));
 
   return { name, path, messages: applied.done, warnings } satisfies SkillsAddResult;
 });

@@ -152,6 +152,28 @@ export interface HostRepoInterface {
   readonly repo: string;
   readonly manifestPath: string;
   readonly statePath: string;
+  /**
+   * Staging area. `npx skills add` run inside the repo installs here, because
+   * skills.sh always writes `<scope-root>/.agents/skills/<name>` and offers no
+   * way to target another directory. Slinky consolidates these into vendor/.
+   */
+  readonly stagedSkills: string;
+  /** skills.sh project lock, written beside the staging area (owned by `npx skills`). */
+  readonly stagedLock: string;
+  /** Symlinks skills.sh points at the staging area; they dangle once we move a skill. */
+  readonly stagedClaudeSkills: string;
+}
+
+/** Every repo-relative path Slinky cares about, derived from the repo root. */
+export function hostRepoPaths(repo: string): HostRepoInterface {
+  return {
+    repo,
+    manifestPath: join(repo, "skills.manifest.json"),
+    statePath: join(repo, ".local", "state.json"),
+    stagedSkills: join(repo, ".agents", "skills"),
+    stagedLock: join(repo, "skills-lock.json"),
+    stagedClaudeSkills: join(repo, ".claude", "skills"),
+  };
 }
 
 export class HostRepo extends Context.Service<HostRepo, HostRepoInterface>()("slinky/HostRepo") {
@@ -164,11 +186,7 @@ export class HostRepo extends Context.Service<HostRepo, HostRepoInterface>()("sl
         NotFound: () => Effect.fail(new RepoNotFoundError()),
         Invalid: ({ error }) => Effect.fail(error),
       });
-      return HostRepo.of({
-        repo,
-        manifestPath: join(repo, "skills.manifest.json"),
-        statePath: join(repo, ".local", "state.json"),
-      });
+      return HostRepo.of(hostRepoPaths(repo));
     }),
   );
 }

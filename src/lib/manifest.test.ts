@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { Cause, Effect, Exit, Layer } from "effect";
 import { ManifestStore } from "./manifest.ts";
 import type { ManifestStoreInterface } from "./manifest.ts";
-import { HostRepo } from "./paths.ts";
+import { HostRepo, hostRepoPaths } from "./paths.ts";
 
 const roots: string[] = [];
 const HASH = "a".repeat(64);
@@ -29,19 +29,7 @@ function host(): string {
   return root;
 }
 
-const storeLayer = (root: string) =>
-  ManifestStore.layer.pipe(
-    Layer.provide(
-      Layer.succeed(
-        HostRepo,
-        HostRepo.of({
-          repo: root,
-          manifestPath: join(root, "skills.manifest.json"),
-          statePath: join(root, ".local", "state.json"),
-        }),
-      ),
-    ),
-  );
+const storeLayer = (root: string) => ManifestStore.layer.pipe(Layer.provide(Layer.succeed(HostRepo, HostRepo.of(hostRepoPaths(root)))));
 
 const run = <A, E>(root: string, body: (store: ManifestStoreInterface) => Effect.Effect<A, E>): Exit.Exit<A, E> =>
   Effect.runSyncExit(

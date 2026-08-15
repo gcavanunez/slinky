@@ -5,17 +5,10 @@ import { join, resolve } from "node:path";
 import { Cause, Effect, Exit, Layer, Schema } from "effect";
 import { Manifest, ProjectLink, State, version } from "./manifest.ts";
 import { applyUnlink, checkLink, linkSkill, prepareUnlink, unlinkSkill } from "./linker.ts";
-import { HostRepo } from "./paths.ts";
+import { HostRepo, hostRepoPaths } from "./paths.ts";
 
 const REPO = "/repo";
-const hostLayer = Layer.succeed(
-  HostRepo,
-  HostRepo.of({
-    repo: REPO,
-    manifestPath: join(REPO, "skills.manifest.json"),
-    statePath: join(REPO, ".local", "state.json"),
-  }),
-);
+const hostLayer = Layer.succeed(HostRepo, HostRepo.of(hostRepoPaths(REPO)));
 
 const run = <A, E>(effect: Effect.Effect<A, E, HostRepo>): A => Effect.runSync(effect.pipe(Effect.provide(hostLayer)));
 

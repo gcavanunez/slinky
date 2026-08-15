@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/react */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { existsSync } from "node:fs";
 import { basename, extname } from "node:path";

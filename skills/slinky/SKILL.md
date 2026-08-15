@@ -104,10 +104,27 @@ slinky verify
 Install a new upstream skill through Slinky rather than invoking skills.sh directly:
 
 ```bash
-slinky skills add <source> --skill <name>
+slinky skills add <source>                         # skills.sh picks, Slinky vendors
+slinky skills add <source> --skill <name>          # or name them
+slinky skills add <source> --skill a --skill b
 ```
 
-This installs globally through skills.sh, preserves its lock metadata, adopts the skill into `vendor/`, updates the manifest, and reconciles enabled global stores. Review and commit the host changes afterward. If `slinky status` reports an unindexed directory under `skills/`, `vendor/`, or the host's `.agents/skills/`, inspect it before editing the manifest or moving its content.
+Slinky never implements skill discovery. It runs `npx skills add` project-scoped inside the host repo (`--project -a universal`), so omitting `--skill` hands you skills.sh's own picker. skills.sh cannot install into `vendor/<owner>/<name>` — its target directory is a fixed constant — so it writes to the repo's `.agents/skills/` staging inbox and Slinky consolidates from there: vendor by owner, index in the manifest, reconcile, clear the inbox.
+
+Never edit anything under `.agents/skills/`. It is a handoff point, and re-running `npx skills add` overwrites it silently.
+
+You can also fill the inbox yourself and consolidate later:
+
+```bash
+cd <host-repo>
+npx skills add <source>     # skills.sh installs into .agents/skills/
+slinky adopt                # review what is staged
+slinky adopt --all          # vendor, index, and sync
+```
+
+`slinky adopt` lists staged skills next to host skills missing from the manifest; a staged copy wins its name when both exist. Provenance comes from `<repo>/skills-lock.json`. Project-scoped locks omit the git tree hash, so Slinky recovers it from GitHub to keep `update --check` working, falling back to untracked when that call fails. After adopting, Slinky clears the staging dir, removes the dangling `.claude` symlink, and prunes the lock entry; a staged copy identical to an indexed baseline is discarded as redundant. Agent directories that a hand-run `npx skills add` populated are reported, not deleted.
+
+A staged copy that differs from an already-indexed baseline is left alone: updating a vendored skill from the inbox is not supported yet, so use `slinky update` for that.
 
 For an unindexed skill, select it in the TUI and press `a`. Enter the source alone or paste the matching `skills add <source> --skill <name>` command. Slinky indexes existing `skills/` and `vendor/` directories in place; it removes an old host-local `.agents` copy only when its content matches the global installation.
 

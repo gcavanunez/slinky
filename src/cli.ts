@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { spawnSync } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { BunServices } from "@effect/platform-bun";
@@ -8,7 +8,7 @@ import { Cause, Effect, Exit, Layer, Option } from "effect";
 import { Argument, CliError, Command, Flag } from "effect/unstable/cli";
 import packageJson from "../package.json" with { type: "json" };
 import { OperationFailed } from "./domain/model.ts";
-import { adoptSkill, finalizeAdoption, findForeign, findUnindexedSkills, rollbackAdoption } from "./lib/adopt.ts";
+import { adoptSkill, backfillTreeHash, clearStagingResidue, finalizeAdoption, findForeign, findStaged, findUnindexedSkills, rollbackAdoption } from "./lib/adopt.ts";
 import type { Adoption, AdoptOptions, ForeignSkill } from "./lib/adopt.ts";
 import { backupGlobalDirs } from "./lib/bootstrap.ts";
 import { applyProfile, linkProjectSkill, setSkillsEnabled, unlinkProjectSkill } from "./lib/catalogActions.ts";
@@ -21,9 +21,8 @@ import { alignStateWithManifest, getSkill, isSkillEnabled, ManifestStore, withMa
 import type { Manifest, ManifestStoreInterface, State } from "./lib/manifest.ts";
 import { HostRepo, isRepoDir, Paths, RepoNotFoundError } from "./lib/paths.ts";
 import { apply, observe, observeAndPlan } from "./lib/reconcile.ts";
-import { addSkillFromSource } from "./lib/skillsAdd.ts";
 import { vendorAccept, vendorRestore } from "./lib/vendorOps.ts";
-import { baselineDirty, checkUpstream, detectChanges, runSkillsUpdate } from "./lib/update.ts";
+import { baselineDirty, checkUpstream, detectChanges, runSkillsAdd, runSkillsUpdate } from "./lib/update.ts";
 import type { GitHub } from "./lib/update.ts";
 
 const c = {
@@ -211,11 +210,16 @@ const adoptCandidates = Effect.fn("Cli.adoptCandidates")(function* (
   let manifest = initialManifest;
   let state = initialState;
   const adoptions: Adoption[] = [];
+  const staged: string[] = [];
   let manifestWritten = false;
   yield* Effect.gen(function* () {
     for (const cand of picked) {
-      const result = yield* adoptSkill(manifest, cand, options);
+      // A project-scoped lock has no git tree SHA; recover it so the adopted
+      // skill still answers to `update --check`.
+      const lock = cand.lock ? yield* backfillTreeHash(cand.lock) : undefined;
+      const result = yield* adoptSkill(manifest, { ...cand, ...(lock ? { lock } : {}) }, options);
       adoptions.push(result);
+      if (cand.location === "staged") staged.push(cand.name);
       manifest = result.manifest;
       console.log(`adopted ${c.bold(cand.name)} -> ${result.meta.path}`);
     }
@@ -238,7 +242,69 @@ const adoptCandidates = Effect.fn("Cli.adoptCandidates")(function* (
     ),
   );
   for (const adoption of adoptions) finalizeAdoption(adoption);
-  return { manifest, state };
+  const warnings: string[] = [];
+  for (const name of staged) warnings.push(...(yield* clearStagingResidue(name)));
+  return { manifest, state, warnings };
+});
+
+/** Where an adoptable skill currently sits, for display. */
+const originLabel = (cand: ForeignSkill): string => (cand.location === "staged" ? ".agents/skills" : `~/.${cand.location}`);
+
+interface AdoptPool {
+  /** Adoptable now: staged inbox entries first, then host skills not shadowed by one. */
+  readonly candidates: ReadonlyArray<ForeignSkill>;
+  /** Staged copies identical to a baseline already in the manifest; safe to discard. */
+  readonly redundant: ReadonlyArray<{ readonly name: string; readonly path: string; readonly dir: string }>;
+  /** Staged copies that moved on from their baseline: an update, not an adoption. */
+  readonly changed: ReadonlyArray<{ readonly name: string; readonly path: string }>;
+  readonly warnings: ReadonlyArray<string>;
+}
+
+/** Merge the repo staging inbox with host skill dirs; a staged copy wins its name. */
+const collectAdoptable = Effect.fn("Cli.collectAdoptable")(function* (manifest: Manifest) {
+  const stagedScan = yield* findStaged(manifest);
+  const foreignScan = yield* findForeign(manifest);
+  const warnings: string[] = [];
+  if (stagedScan.warning) warnings.push(stagedScan.warning.message);
+  if (foreignScan.warning) warnings.push(foreignScan.warning.message);
+
+  const candidates: ForeignSkill[] = [];
+  const redundant: Array<{ name: string; path: string; dir: string }> = [];
+  const changed: Array<{ name: string; path: string }> = [];
+  const stagedNames = new Set<string>();
+  for (const { candidate, status } of stagedScan.staged) {
+    stagedNames.add(candidate.name);
+    if (status.kind === "new") candidates.push(candidate);
+    else if (status.kind === "duplicate") redundant.push({ name: candidate.name, path: status.path, dir: candidate.dir });
+    else changed.push({ name: candidate.name, path: status.path });
+  }
+  for (const cand of foreignScan.candidates) {
+    if (stagedNames.has(cand.name)) {
+      warnings.push(`${cand.name}: staged in the repo and also in ~/.${cand.location}; using the staged copy`);
+      continue;
+    }
+    candidates.push(cand);
+  }
+  return { candidates, redundant, changed, warnings } satisfies AdoptPool;
+});
+
+/** The staging inbox is skills.sh working space, not repo content worth committing. */
+const suggestStagingIgnore = Effect.fn("Cli.suggestStagingIgnore")(function* () {
+  const { repo, stagedSkills } = yield* HostRepo;
+  if (!existsSync(stagedSkills)) return;
+  const gitignore = join(repo, ".gitignore");
+  const lines = existsSync(gitignore) ? readFileSync(gitignore, "utf8").split(/\r?\n/) : [];
+  if (lines.some((line) => line.trim() === ".agents/" || line.trim() === ".agents")) return;
+  console.log(c.dim("tip: add `.agents/` to .gitignore so the skills.sh staging inbox stays out of git"));
+});
+
+/** Discard staging copies that merely duplicate a baseline already in the manifest. */
+const dropRedundantStaging = Effect.fn("Cli.dropRedundantStaging")(function* (pool: AdoptPool) {
+  for (const entry of pool.redundant) {
+    rmSync(entry.dir, { recursive: true, force: true });
+    for (const warning of yield* clearStagingResidue(entry.name)) console.log(c.yellow(`warn: ${warning}`));
+    console.log(c.dim(`  ${entry.name}: already indexed at ${entry.path}; removed the redundant staging copy`));
+  }
 });
 
 // --- shared flags/arguments ----------------------------------------------
@@ -599,27 +665,44 @@ const skillsAddCommand = Command.make(
   "add",
   {
     source: Argument.string("source"),
-    skill: Flag.string("skill").pipe(Flag.withDescription("Skill name to install from the source")),
+    skill: Flag.string("skill").pipe(Flag.atLeast(0), Flag.withDescription("Skill to install; repeat for several, omit to pick from skills.sh")),
   },
-  ({ source, skill: name }) =>
+  ({ source, skill }) =>
     withRepo(
       Effect.gen(function* () {
-        const { manifest } = yield* loadHostState;
         const { repo } = yield* HostRepo;
-        console.log(c.bold(`running npx skills add ${source} --skill ${name}\n`));
-        const unindexedSkill = findUnindexedSkills(manifest, repo).find((skill) => skill.name === name);
-        const result = yield* addSkillFromSource(source, name, {
-          inheritStdio: true,
-          ...(unindexedSkill ? { unindexedSkill } : {}),
-        });
-        console.log(`adopted ${c.bold(name)} -> ${result.path}`);
-        for (const warning of result.warnings) console.log(c.yellow(`warn: ${warning}`));
-        for (const message of result.messages) console.log(`  ${message}`);
-        if (result.messages.length === 0 && result.warnings.length === 0) console.log("in sync; nothing to do");
+        // Hand discovery to skills.sh: with no --skill it runs its own picker,
+        // so Slinky never has to reimplement listing a remote source.
+        console.log(c.bold(`running npx skills add ${source} in ${repo}\n`));
+        yield* runSkillsAdd(source, skill, repo);
+
+        const { store, manifest: initial, state: initialState } = yield* loadHostState;
+        let manifest = initial;
+        let state = initialState;
+        const pool = yield* collectAdoptable(manifest);
+        for (const warning of pool.warnings) console.log(c.yellow(`warn: ${warning}`));
+        for (const entry of pool.changed) {
+          console.log(c.yellow(`warn: ${entry.name}: staged copy differs from ${entry.path}; updating a vendored skill from the inbox is not supported yet (left in place)`));
+        }
+
+        // Only consolidate the inbox; unrelated host skills stay for `slinky adopt`.
+        const picked = pool.candidates.filter((cand) => cand.location === "staged");
+        yield* dropRedundantStaging(pool);
+        if (picked.length === 0) {
+          if (pool.redundant.length === 0) console.log("nothing new to index");
+          return;
+        }
+
+        const adopted = yield* adoptCandidates(store, manifest, state, picked, {});
+        manifest = adopted.manifest;
+        state = adopted.state;
+        for (const warning of adopted.warnings) console.log(c.yellow(`warn: ${warning}`));
+        yield* runSyncCmd(manifest, state, {});
+        yield* suggestStagingIgnore();
         console.log(c.dim("review with `git status` and commit to lock the new baseline"));
       }),
     ),
-).pipe(Command.withDescription("Install with skills.sh, vendor, index, and sync"));
+).pipe(Command.withDescription("Install with skills.sh into the repo, then vendor, index, and sync"));
 
 const skillsCommand = Command.make("skills").pipe(Command.withDescription("skills.sh integration"), Command.withSubcommands([skillsAddCommand]));
 
@@ -638,18 +721,26 @@ const adoptCommand = Command.make(
         const { store, manifest: initial, state: initialState } = yield* loadHostState;
         let manifest = initial;
         let state = initialState;
-        const scan = yield* findForeign(manifest);
-        const candidates = scan.candidates;
-        if (scan.warning) console.log(c.yellow(`warn: ${scan.warning.message}`));
+        const pool = yield* collectAdoptable(manifest);
+        const candidates = pool.candidates;
+        for (const warning of pool.warnings) console.log(c.yellow(`warn: ${warning}`));
+        for (const entry of pool.changed) {
+          console.log(c.yellow(`warn: ${entry.name}: staged copy differs from ${entry.path}; updating a vendored skill from the inbox is not supported yet (left in place)`));
+        }
         if (input.names.length === 0 && !input.all) {
-          if (candidates.length === 0) {
-            console.log(c.green("nothing to adopt; all host skills are in the repo"));
+          if (candidates.length === 0 && pool.redundant.length === 0) {
+            console.log(c.green("nothing to adopt; all staged and host skills are in the repo"));
             return;
           }
-          console.log(c.bold("host skills not in the repo:"));
-          for (const cand of candidates) {
-            const prov = cand.lock ? `from ${cand.lock.source}` : c.yellow("unknown source");
-            console.log(`  ${pad(cand.name, 32)}${pad(`~/.${cand.location}`, 12)}${prov}`);
+          if (candidates.length > 0) {
+            console.log(c.bold("skills not in the repo:"));
+            for (const cand of candidates) {
+              const prov = cand.lock ? `from ${cand.lock.source}` : c.yellow("unknown source");
+              console.log(`  ${pad(cand.name, 32)}${pad(originLabel(cand), 16)}${prov}`);
+            }
+          }
+          for (const entry of pool.redundant) {
+            console.log(c.dim(`  ${pad(entry.name, 32)}${pad(".agents/skills", 16)}already indexed at ${entry.path}; staging copy is redundant`));
           }
           console.log(c.dim("\nadopt with: adopt <skill...> [--local] [--owner=<x>]  or  adopt --all"));
           return;
@@ -666,8 +757,10 @@ const adoptCommand = Command.make(
           }
           picked = chosen;
         }
+        // --all also clears staging copies that duplicate an existing baseline.
+        if (input.all) yield* dropRedundantStaging(pool);
         if (picked.length === 0) {
-          console.log("nothing to adopt");
+          if (pool.redundant.length === 0) console.log("nothing to adopt");
           return;
         }
         const adopted = yield* adoptCandidates(store, manifest, state, picked, {
@@ -676,11 +769,13 @@ const adoptCommand = Command.make(
         });
         manifest = adopted.manifest;
         state = adopted.state;
+        for (const warning of adopted.warnings) console.log(c.yellow(`warn: ${warning}`));
         yield* runSyncCmd(manifest, state, { force: input.force });
+        yield* suggestStagingIgnore();
         console.log(c.dim("review with `git status` and commit to lock the new baseline"));
       }),
     ),
-).pipe(Command.withDescription("List host skills not yet in the repo, or import them (never nukes them)"));
+).pipe(Command.withDescription("List staged and host skills not yet in the repo, or import them (never nukes them)"));
 
 const updateCommand = Command.make(
   "update",

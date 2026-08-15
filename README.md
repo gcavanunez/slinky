@@ -141,10 +141,31 @@ slinky verify
 Add an upstream skill through Slinky so skills.sh provenance, the vendored baseline, and the manifest are updated together:
 
 ```bash
-slinky skills add kitlangton/skills --skill effect
+slinky skills add kitlangton/skills                        # skills.sh picks, Slinky vendors
+slinky skills add kitlangton/skills --skill effect         # or name them
+slinky skills add plannotator/effective-html --skill html --skill html-plan
 ```
 
-Slinky installs the selected skill into the global skills.sh store, adopts it as a vendor skill, and reconciles the global agent directories. `slinky status` and the TUI also report skill directories under `skills/`, `vendor/`, or the host's `.agents/skills/` that are missing from `skills.manifest.json`.
+Slinky does not implement skill discovery. It runs `npx skills add` **project-scoped inside the host repo**, so with no `--skill` you get skills.sh's own picker. skills.sh cannot be pointed at `vendor/<owner>/<name>` — its install directory is a fixed constant — so it installs into the repo's `.agents/skills/` staging inbox, and Slinky consolidates from there: vendor by owner, index in the manifest, reconcile, and clear the inbox.
+
+### The staging inbox
+
+`<repo>/.agents/skills/` is a handoff point, never a place to edit. Re-running `npx skills add` overwrites it without warning.
+
+Because it is just a directory, you can fill it yourself and let Slinky consolidate later:
+
+```bash
+cd ~/my-agent-skills
+npx skills add mattpocock/skills     # skills.sh installs into .agents/skills/
+slinky adopt                         # review what is staged
+slinky adopt --all                   # vendor, index, and sync it
+```
+
+`slinky adopt` lists staged skills alongside host skills that are missing from the manifest. A staged copy wins its name when both exist. Adoption reads provenance from `<repo>/skills-lock.json` and, since project-scoped locks omit the git tree hash, recovers it from GitHub so `slinky update --check` keeps working; an unreachable upstream just leaves the skill untracked.
+
+Afterwards Slinky clears the staging directory, removes the `.claude` symlink skills.sh left pointing at it, and prunes the adopted entry from `skills-lock.json`. A staged copy identical to a baseline already in the manifest is discarded as redundant. Running `npx skills add` yourself also copies into every agent directory it detects; Slinky reports those rather than deleting them, since they are in your worktree. Add `.agents/` to the host repo's `.gitignore` to keep the inbox out of git.
+
+`slinky status` and the TUI also report skill directories under `skills/`, `vendor/`, or `.agents/skills/` that are missing from `skills.manifest.json`.
 
 In the TUI, select an unindexed skill and press `a`. Enter the source (`kitlangton/skills`) or paste its add command (`skills add kitlangton/skills --skill effect`). Slinky verifies that the installed content matches the unindexed copy before indexing it in place or moving it to the inferred vendor path.
 
@@ -219,12 +240,12 @@ slinky profile list
 slinky profile apply <name> [--force]
 slinky update --check
 slinky update [skill...] [--yes]
-slinky skills add <source> --skill <name>
+slinky skills add <source> [--skill <name>...]
 slinky diff [skill] [--patch]
 slinky vendor <skill...>
 slinky restore <skill...>
 slinky rehash <local-skill...>
-slinky adopt
+slinky adopt                          # list staged + host skills not in the repo
 slinky adopt <skill...>|--all [--local] [--owner=<owner>]
 slinky link <skill> [project] [--copy|--symlink] [--no-exclude] [--no-claude]
 slinky unlink <skill> [project] [--force]

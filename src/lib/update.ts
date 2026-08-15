@@ -149,15 +149,26 @@ export const runSkillsUpdate = Effect.fn("Update.runSkillsUpdate")(function* (na
   }
 });
 
-/** Install one skill into the global store so Slinky can adopt its copy and lock metadata. */
-export const runSkillsAdd = Effect.fn("Update.runSkillsAdd")(function* (source: string, name: string, inheritStdio = true) {
-  const res = yield* Effect.sync(() =>
-    spawnSync("npx", ["-y", "skills", "add", source, "--skill", name, "--global", "--yes"], inheritStdio ? { stdio: "inherit" } : { encoding: "utf8" }),
-  );
+/**
+ * Install into the repo's staging inbox (`<repo>/.agents/skills`) so Slinky can
+ * consolidate from there. Project scope rather than `--global` for two reasons:
+ * it keeps the install inside the repo we are about to vendor into, and it
+ * avoids skills.sh trying to global-install into agents that do not support it.
+ *
+ * With no names, skills.sh runs its own interactive picker — deliberately, so
+ * Slinky never has to reimplement skill discovery.
+ */
+export const runSkillsAdd = Effect.fn("Update.runSkillsAdd")(function* (source: string, names: ReadonlyArray<string>, cwd: string) {
+  // `-a universal` targets only the canonical .agents/skills dir. Without it
+  // skills.sh fans the install out across every agent it detects, littering the
+  // repo with .claude symlinks and per-agent copies we would only have to undo.
+  const args = ["-y", "skills", "add", source, "--project", "-a", "universal", ...names.flatMap((name) => ["--skill", name])];
+  // `--yes` would silently select every skill, so only pass it once names are known.
+  if (names.length > 0) args.push("--yes");
+  const res = yield* Effect.sync(() => spawnSync("npx", args, { cwd, stdio: "inherit" }));
   const code = res.status ?? 1;
   if (code !== 0) {
-    const detail = inheritStdio ? "" : [res.stderr, res.stdout].filter(Boolean).join("\n").trim();
-    return yield* Effect.fail(new ExternalToolError({ tool: "npx skills", message: `skills.sh exited with ${code}${detail ? `: ${detail}` : ""}` }));
+    return yield* Effect.fail(new ExternalToolError({ tool: "npx skills", message: `skills.sh exited with ${code}` }));
   }
 });
 
