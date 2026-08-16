@@ -2,8 +2,11 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Schema } from "effect";
+import { Manifest } from "./domain/model.ts";
 
 const roots: string[] = [];
+const decodeEncodedManifest = Schema.decodeUnknownSync(Schema.toEncoded(Manifest));
 
 function fixture(disabledSkills: ReadonlyArray<string> = []) {
   const root = mkdtempSync(join(tmpdir(), "slinky-cli-actions-"));
@@ -103,14 +106,14 @@ describe("CLI options", () => {
     const result = Bun.spawnSync([process.execPath, cli, "rehash", "foo"], {
       env: { ...process.env, SLINKY_REPO: host },
     });
-    const manifest = JSON.parse(readFileSync(join(host, "skills.manifest.json"), "utf8")) as {
-      skills: { foo: { contentHash: string } };
-    };
+    const manifest = decodeEncodedManifest(JSON.parse(readFileSync(join(host, "skills.manifest.json"), "utf8")));
+    const foo = manifest.skills.foo;
+    if (!foo) throw new Error("expected foo in manifest");
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout.toString()).toContain("foo: refreshed manifest hash");
-    expect(manifest.skills.foo.contentHash).not.toBe("0".repeat(64));
-    expect(manifest.skills.foo.contentHash).toHaveLength(64);
+    expect(foo.contentHash).not.toBe("0".repeat(64));
+    expect(foo.contentHash).toHaveLength(64);
   });
 });
 
@@ -146,18 +149,7 @@ printf '%s\\n' '${lock}' > "$PWD/skills-lock.json"
     const result = runCli(f.host, f.home, ["skills", "add", "kitlangton/skills", "--skill", "effect"], {
       PATH: `${bin}:${process.env.PATH ?? ""}`,
     });
-    const manifest = JSON.parse(readFileSync(join(f.host, "skills.manifest.json"), "utf8")) as {
-      skills: Record<
-        string,
-        {
-          origin: string;
-          path: string;
-          contentHash: string;
-          upstream?: { kind: string; repository?: string; url?: string | null; tracking?: { kind: string } };
-          vendoredAt?: string;
-        }
-      >;
-    };
+    const manifest = decodeEncodedManifest(JSON.parse(readFileSync(join(f.host, "skills.manifest.json"), "utf8")));
 
     if (result.exitCode !== 0) throw new Error(result.stderr.toString());
     // Project scope, not --global: that is what keeps the install inside the repo.
@@ -196,7 +188,7 @@ printf '%s\\n' '${lock}' > "$PWD/skills-lock.json"
     const result = runCli(f.host, f.home, ["skills", "add", "kitlangton/skills"], {
       PATH: `${bin}:${process.env.PATH ?? ""}`,
     });
-    const manifest = JSON.parse(readFileSync(join(f.host, "skills.manifest.json"), "utf8")) as { skills: Record<string, { path: string }> };
+    const manifest = decodeEncodedManifest(JSON.parse(readFileSync(join(f.host, "skills.manifest.json"), "utf8")));
 
     if (result.exitCode !== 0) throw new Error(result.stderr.toString());
     // No --yes: that would make skills.sh silently select every skill instead of asking.

@@ -20,6 +20,11 @@ export interface LinkOptions {
   claude?: boolean;
 }
 
+export interface LinkResult {
+  readonly state: State;
+  readonly link: ProjectLink;
+}
+
 const exists = (path: string) => {
   try {
     lstatSync(path);
@@ -45,7 +50,7 @@ export function findLink(state: State, skill: string, project: string): ProjectL
   return state.projectLinks.find((link) => link.skill === skill && resolve(link.project) === resolved);
 }
 
-function linkSkillSync(repo: string, manifest: Manifest, state: State, opts: LinkOptions): { readonly state: State; readonly link: ProjectLink } {
+function linkSkillSync(repo: string, manifest: Manifest, state: State, opts: LinkOptions): LinkResult {
   const meta = getSkill(manifest, opts.skill);
   if (!meta) throw new OperationFailed({ message: `unknown skill: ${opts.skill}` });
   const project = resolve(opts.project);
@@ -115,14 +120,7 @@ export const linkSkill = Effect.fn("Linker.linkSkill")(function* (manifest: Mani
   return yield* tryOp(() => linkSkillSync(repo, manifest, state, opts));
 });
 
-function prepareUnlinkSync(
-  repo: string,
-  manifest: Manifest,
-  state: State,
-  skill: string,
-  project: string,
-  opts: { force?: boolean },
-): { readonly state: State; readonly link: ProjectLink } {
+function prepareUnlinkSync(repo: string, manifest: Manifest, state: State, skill: string, project: string, opts: { force?: boolean }): LinkResult {
   const link = findLink(state, skill, project);
   if (!link) throw new OperationFailed({ message: `no recorded link for ${skill} in ${project}` });
   const meta = getSkill(manifest, skill);

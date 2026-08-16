@@ -78,25 +78,25 @@ interface IndexFlow {
   error?: string;
 }
 
-const liveColor: Record<LiveStatus, string> = {
+const liveColor = {
   ok: colors.green,
   drift: colors.yellow,
   missing: colors.red,
   off: colors.muted,
   stale: colors.yellow,
   checking: colors.muted,
-};
+} satisfies Record<LiveStatus, string>;
 
-const liveLabel: Record<LiveStatus, string> = {
+const liveLabel = {
   ok: "ok",
   drift: "drift",
   missing: "missing",
   off: "-",
   stale: "stale",
   checking: "\u2026",
-};
+} satisfies Record<LiveStatus, string>;
 
-const placementCell: Record<ProjectPlacement, { label: string; fg: string }> = {
+const placementCell = {
   none: { label: "-", fg: colors.muted },
   "link-hidden": { label: "link·hid", fg: colors.accent },
   "link-tracked": { label: "link·git", fg: colors.accent },
@@ -104,7 +104,7 @@ const placementCell: Record<ProjectPlacement, { label: string; fg: string }> = {
   "copy-tracked": { label: "copy·git", fg: colors.accent },
   missing: { label: "missing", fg: colors.red },
   unmanaged: { label: "unmanaged", fg: colors.yellow },
-};
+} satisfies Record<ProjectPlacement, { label: string; fg: string }>;
 
 export function App() {
   const renderer = useRenderer();

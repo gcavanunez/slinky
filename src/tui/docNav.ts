@@ -36,7 +36,7 @@ export function scrollRowForLine(doc: DocRenderable, scroll: ScrollBoxRenderable
   let stateIndex = 0;
   let best: { renderable: { y: number }; startLine: number } | null = null;
   for (const token of tokens) {
-    const raw = typeof token.raw === "string" ? token.raw : "";
+    const raw = token.raw;
     const lineCount = countNewlines(raw);
     const state = states[stateIndex];
     if (state && (state.token === token || state.tokenRaw === raw)) {

@@ -25,6 +25,7 @@ export {
 } from "../domain/model.ts";
 
 const strict = { errors: "all", onExcessProperty: "error" } as const;
+const decodeJson = Schema.decodeUnknownSync(Schema.Json);
 
 type FileErrorClass<E> = new (path: string, operation: FileOperation, detail: string) => E;
 
@@ -36,11 +37,11 @@ const readOwnedFile = <E>(path: string, ErrorClass: FileErrorClass<E>) =>
 
 const parseOwnedJson = <E>(path: string, raw: string, ErrorClass: FileErrorClass<E>) =>
   Effect.try({
-    try: (): unknown => JSON.parse(raw),
+    try: () => decodeJson(JSON.parse(raw)),
     catch: (error) => new ErrorClass(path, "parse", errorDetail(error)),
   });
 
-const writeOwnedJson = <E>(path: string, value: unknown, ErrorClass: FileErrorClass<E>) =>
+const writeOwnedJson = <E>(path: string, value: Schema.Json, ErrorClass: FileErrorClass<E>) =>
   Effect.gen(function* () {
     const tmp = `${path}.${process.pid}.tmp`;
     yield* Effect.try({

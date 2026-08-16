@@ -72,7 +72,10 @@ export class GitHub extends Context.Service<GitHub, GitHubInterface>()("slinky/G
 
       const lookup = (key: string) =>
         Effect.gen(function* () {
-          const [repo, parent] = key.split("\0") as [string, string];
+          const separator = key.indexOf("\0");
+          if (separator < 0) return yield* Effect.fail(new GitHubError({ message: "invalid GitHub cache key" }));
+          const repo = key.slice(0, separator);
+          const parent = key.slice(separator + 1);
           const response = yield* client.get(`https://api.github.com/repos/${repo}/contents/${parent}`);
           const entries = yield* HttpClientResponse.schemaBodyJson(GitHubContents)(response);
           return new Map(entries.map((entry) => [entry.name, entry.sha]));

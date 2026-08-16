@@ -53,7 +53,7 @@ describe("adoptDestination", () => {
 
 describe("upstreamFromLock", () => {
   test("accepts skills.sh well-known entries with empty folder hashes", () => {
-    const skills = decodeSkillLock({
+    const lockFile = {
       version: 3,
       skills: {
         stripe: {
@@ -64,7 +64,8 @@ describe("upstreamFromLock", () => {
           installedAt: "2026-04-06T18:03:28.142Z",
         },
       },
-    });
+    } as const;
+    const skills = decodeSkillLock(lockFile);
 
     expect(skills.stripe?.sourceType).toBe("well-known");
   });
@@ -98,10 +99,16 @@ afterEach(() => {
 });
 
 /** A repo with `<repo>/.agents/skills/<name>` staged and a project lock. */
-function stagedRepo(entries: Record<string, { readonly body: string; readonly lock?: unknown }>): string {
+type ProjectLockMeta = LockMeta & { readonly computedHash?: string };
+interface StagedRepoEntry {
+  readonly body: string;
+  readonly lock?: ProjectLockMeta;
+}
+
+function stagedRepo(entries: Readonly<Record<string, StagedRepoEntry>>): string {
   const repo = mkdtempSync(join(tmpdir(), "slinky-staged-"));
   roots.push(repo);
-  const lock: Record<string, unknown> = {};
+  const lock: Record<string, ProjectLockMeta> = {};
   for (const [name, { body, lock: meta }] of Object.entries(entries)) {
     mkdirSync(join(repo, ".agents", "skills", name), { recursive: true });
     writeFileSync(join(repo, ".agents", "skills", name, "SKILL.md"), body);
@@ -170,8 +177,8 @@ describe("clearStagingResidue", () => {
 
     expect(runInRepo(repo, clearStagingResidue("gone"))).toEqual([]);
     expect(existsSync(join(repo, ".claude", "skills", "gone"))).toBe(false);
-    const lock = JSON.parse(readFileSync(join(repo, "skills-lock.json"), "utf8")) as { skills: Record<string, unknown> };
-    expect(Object.keys(lock.skills)).toEqual(["kept"]);
+    const lock = decodeSkillLock(JSON.parse(readFileSync(join(repo, "skills-lock.json"), "utf8")));
+    expect(Object.keys(lock)).toEqual(["kept"]);
   });
 
   test("removes the lock file once its last entry is pruned", () => {
@@ -189,7 +196,7 @@ describe("clearStagingResidue", () => {
 describe("backfillTreeHash", () => {
   const stubGitHub = (shas: Record<string, string>) => Layer.succeed(GitHub, GitHub.of({ contentsShas: () => Effect.succeed(new Map(Object.entries(shas))) }));
 
-  const run = <E>(lock: LockMeta, layer: Layer.Layer<GitHub>) => Effect.runSync(backfillTreeHash(lock).pipe(Effect.provide(layer)) as Effect.Effect<LockMeta, E>);
+  const run = (lock: LockMeta, layer: Layer.Layer<GitHub>): LockMeta => Effect.runSync(backfillTreeHash(lock).pipe(Effect.provide(layer)));
 
   test("recovers the git tree hash a project lock omits", () => {
     const result = run({ source: "acme/pack", sourceType: "github", skillPath: "skills/foo/SKILL.md" }, stubGitHub({ foo: "b".repeat(40) }));

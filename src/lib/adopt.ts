@@ -49,14 +49,20 @@ export type LockMeta = typeof LockMetaSchema.Type;
 const SkillLockFile = Schema.Struct({
   skills: Schema.Record(Schema.String, LockMetaSchema),
 });
+const decodeSkillLockFile = Schema.decodeUnknownSync(SkillLockFile);
+const JsonObject = Schema.Record(Schema.String, Schema.Json);
+const decodeJsonObject = Schema.decodeUnknownSync(JsonObject);
+const isJsonObject = Schema.is(JsonObject);
 
 export interface SkillLockSnapshot {
   readonly skills: Readonly<Record<string, LockMeta>>;
   readonly warning?: SkillLockDecodeError;
 }
 
-export function decodeSkillLock(input: unknown): Readonly<Record<string, LockMeta>> {
-  return Schema.decodeUnknownSync(SkillLockFile)(input).skills;
+export type SkillLockInput = typeof SkillLockFile.Encoded;
+
+export function decodeSkillLock(input: SkillLockInput): Readonly<Record<string, LockMeta>> {
+  return decodeSkillLockFile(input).skills;
 }
 
 function readSkillLockSync(skillLock: string): SkillLockSnapshot {
@@ -75,7 +81,7 @@ function readSkillLockSync(skillLock: string): SkillLockSnapshot {
   }
 
   try {
-    return { skills: decodeSkillLock(input) };
+    return { skills: decodeSkillLockFile(input).skills };
   } catch (error) {
     return { skills: {}, warning: new SkillLockDecodeError(skillLock, "decode", errorDetail(error)) };
   }
@@ -186,13 +192,12 @@ export const findForeign = Effect.fn("Adopt.findForeign")(function* (manifest: M
       if (!existsSync(join(dir, "SKILL.md"))) continue;
       seen.add(name);
       const meta = lock.skills[name];
-      out.push({ name, location, dir, ...(meta ? { lock: meta } : {}) });
+      const candidate: ForeignSkill = meta === undefined ? { name, location, dir } : { name, location, dir, lock: meta };
+      out.push(candidate);
     }
   }
-  const scan: ForeignScan = {
-    candidates: out.sort((a, b) => a.name.localeCompare(b.name)),
-    ...(lock.warning ? { warning: lock.warning } : {}),
-  };
+  const candidates = out.sort((a, b) => a.name.localeCompare(b.name));
+  const scan: ForeignScan = lock.warning === undefined ? { candidates } : { candidates, warning: lock.warning };
   return scan;
 });
 
@@ -238,7 +243,7 @@ export const findStaged = Effect.fn("Adopt.findStaged")(function* (manifest: Man
     if (!existsSync(join(dir, "SKILL.md"))) continue;
 
     const meta = lock.skills[name];
-    const candidate: ForeignSkill = { name, location: "staged", dir, ...(meta ? { lock: meta } : {}) };
+    const candidate: ForeignSkill = meta === undefined ? { name, location: "staged", dir } : { name, location: "staged", dir, lock: meta };
     const indexed = manifest.skills[name];
     if (!indexed) {
       staged.push({ candidate, status: { kind: "new" } });
@@ -248,10 +253,8 @@ export const findStaged = Effect.fn("Adopt.findStaged")(function* (manifest: Man
     staged.push({ candidate, status: same ? { kind: "duplicate", path: indexed.path } : { kind: "changed", path: indexed.path } });
   }
 
-  const scan: StagedScan = {
-    staged: staged.sort((a, b) => a.candidate.name.localeCompare(b.candidate.name)),
-    ...(lock.warning ? { warning: lock.warning } : {}),
-  };
+  const sortedStaged = staged.sort((a, b) => a.candidate.name.localeCompare(b.candidate.name));
+  const scan: StagedScan = lock.warning === undefined ? { staged: sortedStaged } : { staged: sortedStaged, warning: lock.warning };
   return scan;
 });
 
@@ -306,11 +309,12 @@ export const clearStagingResidue = Effect.fn("Adopt.clearStagingResidue")(functi
 
   try {
     const raw = readFileSync(stagedLock, "utf8");
-    const parsed = JSON.parse(raw) as { skills?: Record<string, unknown> };
-    if (parsed.skills && Object.hasOwn(parsed.skills, name)) {
-      delete parsed.skills[name];
-      if (Object.keys(parsed.skills).length === 0) rmSync(stagedLock, { force: true });
-      else writeFileSync(stagedLock, `${JSON.stringify(parsed, null, 2)}\n`);
+    const parsed = decodeJsonObject(JSON.parse(raw));
+    const lockedSkills = parsed.skills;
+    if (isJsonObject(lockedSkills) && Object.hasOwn(lockedSkills, name)) {
+      const skills = Object.fromEntries(Object.entries(lockedSkills).filter(([skillName]) => skillName !== name));
+      if (Object.keys(skills).length === 0) rmSync(stagedLock, { force: true });
+      else writeFileSync(stagedLock, `${JSON.stringify({ ...parsed, skills }, null, 2)}\n`);
     }
   } catch (error) {
     if (!isMissingFile(error)) warnings.push(`${name}: could not prune ${stagedLock}: ${errorDetail(error)}`);

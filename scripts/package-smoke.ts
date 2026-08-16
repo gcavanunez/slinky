@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Schema } from "effect";
 import { binaryPackageName as binaryPackageNameForTarget, currentReleaseTargetId, findReleaseTarget } from "./release-targets.ts";
 
 interface CommandResult {
@@ -9,10 +10,12 @@ interface CommandResult {
 }
 
 const root = process.cwd();
-const rootPackage = (await Bun.file(join(root, "package.json")).json()) as {
-  readonly name: string;
-  readonly version: string;
-};
+const RootPackage = Schema.Struct({ name: Schema.String, version: Schema.String });
+const InstalledPackage = Schema.Struct({
+  optionalDependencies: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+  version: Schema.String,
+});
+const rootPackage = Schema.decodeUnknownSync(RootPackage)(await Bun.file(join(root, "package.json")).json());
 const targetId = currentReleaseTargetId();
 const target = findReleaseTarget(targetId);
 const binaryPackageName = target ? binaryPackageNameForTarget(rootPackage.name, target) : null;
@@ -31,21 +34,18 @@ function run(command: ReadonlyArray<string>, cwd: string): CommandResult {
   return result;
 }
 
-function assert(condition: unknown, message: string): asserts condition {
+function assert(condition: boolean, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
 async function assertInstalledPackage(projectDir: string): Promise<void> {
   const packageDir = join(projectDir, "node_modules", "@gcavanunez", "slinky");
   const binaryPackageDir = targetId ? join(projectDir, "node_modules", "@gcavanunez", `slinky-${targetId}`) : null;
-  const packageJson = JSON.parse(await readFile(join(packageDir, "package.json"), "utf8")) as {
-    readonly optionalDependencies?: Record<string, string>;
-    readonly version: string;
-  };
+  const packageJson = Schema.decodeUnknownSync(InstalledPackage)(JSON.parse(await readFile(join(packageDir, "package.json"), "utf8")));
 
   assert(packageJson.version === rootPackage.version, `Expected installed version ${rootPackage.version}`);
-  assert(binaryPackageName && packageJson.optionalDependencies?.[binaryPackageName] === rootPackage.version, `Published package must depend on ${binaryPackageName}`);
-  assert(binaryPackageDir && (await Bun.file(join(binaryPackageDir, "bin", "slinky")).exists()), "Installed package must include the platform binary");
+  assert(binaryPackageName !== null && packageJson.optionalDependencies?.[binaryPackageName] === rootPackage.version, `Published package must depend on ${binaryPackageName}`);
+  assert(binaryPackageDir !== null && (await Bun.file(join(binaryPackageDir, "bin", "slinky")).exists()), "Installed package must include the platform binary");
   assert(!(await Bun.file(join(packageDir, "src", "cli.ts")).exists()), "Published package must not rely on TypeScript sources");
 
   const version = run([join(projectDir, "node_modules", ".bin", "slinky"), "--version"], projectDir);
@@ -64,7 +64,7 @@ async function pack(cwd: string, packDir: string): Promise<string> {
 
 const tempRoot = await mkdtemp(join(tmpdir(), "slinky-package-smoke-"));
 try {
-  assert(binaryPackageName && targetId, `Unsupported package smoke platform: ${process.platform}-${process.arch}`);
+  assert(binaryPackageName !== null && targetId !== null, `Unsupported package smoke platform: ${process.platform}-${process.arch}`);
 
   const packDir = join(tempRoot, "pack");
   const npmProject = join(tempRoot, "npm-install");

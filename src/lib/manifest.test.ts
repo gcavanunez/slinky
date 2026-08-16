@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Cause, Effect, Exit, Layer } from "effect";
+import { Cause, Effect, Exit, Layer, Schema } from "effect";
 import { ManifestStore } from "./manifest.ts";
 import type { ManifestStoreInterface } from "./manifest.ts";
 import { HostRepo, hostRepoPaths } from "./paths.ts";
@@ -39,9 +39,15 @@ const run = <A, E>(root: string, body: (store: ManifestStoreInterface) => Effect
     }).pipe(Effect.provide(storeLayer(root))),
   );
 
-const failure = <A, E>(exit: Exit.Exit<A, E>): { _tag?: string; operation?: string } => {
+const FileFailure = Schema.Struct({ _tag: Schema.String, operation: Schema.String });
+type FileFailure = typeof FileFailure.Type;
+const isFileFailure = Schema.is(FileFailure);
+
+const failure = <A, E>(exit: Exit.Exit<A, E>): FileFailure => {
   if (Exit.isSuccess(exit)) throw new Error("expected failure");
-  return Cause.squash(exit.cause) as { _tag?: string; operation?: string };
+  const candidate = Cause.squash(exit.cause);
+  if (!isFileFailure(candidate)) throw new Error("expected a tagged file failure");
+  return candidate;
 };
 
 describe("manifest persistence", () => {

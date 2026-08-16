@@ -159,13 +159,13 @@ export function planSync(manifest: Manifest, state: State, obs: Observation, opt
     }
   }
 
-  const order: Record<Action["type"], number> = {
+  const order = {
     "remove-claude": 0,
     "remove-agents": 1,
     "ensure-agents-symlink": 2,
     "restore-agents-dir": 3,
     "ensure-claude-symlink": 4,
-  };
+  } satisfies Record<Action["type"], number>;
   actions.sort((a, b) => order[a.type] - order[b.type]);
   return { actions, warnings };
 }

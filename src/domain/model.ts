@@ -321,11 +321,13 @@ const fileErrorArgs = (path: string, operation: FileOperation, detail: string) =
   message: `${operation} ${path}: ${detail}`,
 });
 
-/** Render an unknown thrown value as a human-readable detail string. */
-export const errorDetail = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+/** Render any thrown value as a human-readable detail string. */
+export const errorDetail = <Thrown>(error: Thrown): string => (error instanceof Error ? error.message : String(error));
+
+const MissingFileError = Schema.instanceOf(Error).check(Schema.makeFilter((error) => "code" in error && error.code === "ENOENT"));
 
 /** True when an fs error means "file does not exist". */
-export const isMissingFile = (error: unknown): boolean => error instanceof Error && "code" in error && error.code === "ENOENT";
+export const isMissingFile = Schema.is(MissingFileError);
 
 /** Expected domain-rule failure (unknown skill, drift guard, existing destination, ...). */
 export class OperationFailed extends Schema.TaggedErrorClass<OperationFailed>()("OperationFailed", {

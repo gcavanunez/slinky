@@ -1,18 +1,20 @@
 import { chmod, cp, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { Schema } from "effect";
 import { binaryPackageName, currentReleaseTargetId, findReleaseTarget, releaseTargets, type ReleaseTarget } from "./release-targets.ts";
 
 const root = process.cwd();
-const rootPackage = (await Bun.file(join(root, "package.json")).json()) as {
-  readonly name: string;
-  readonly version: string;
-  readonly description: string;
-  readonly license: string;
-  readonly engines: { readonly node: string };
-  readonly repository: { readonly type: string; readonly url: string };
-  readonly bugs: { readonly url: string };
-  readonly homepage: string;
-};
+const RootPackage = Schema.Struct({
+  name: Schema.String,
+  version: Schema.String,
+  description: Schema.String,
+  license: Schema.String,
+  engines: Schema.Struct({ node: Schema.String }),
+  repository: Schema.Struct({ type: Schema.String, url: Schema.String }),
+  bugs: Schema.Struct({ url: Schema.String }),
+  homepage: Schema.String,
+});
+const rootPackage = Schema.decodeUnknownSync(RootPackage)(await Bun.file(join(root, "package.json")).json());
 
 const outDir = join(root, "dist", "npm");
 const requested = process.argv[2];
@@ -40,10 +42,10 @@ function selectedTargets(): ReadonlyArray<ReleaseTarget> {
   return [target];
 }
 
-const writeJson = (path: string, value: unknown) => writeFile(path, `${JSON.stringify(value, null, 2)}\n`);
+const writeJson = (path: string, value: Schema.Json) => writeFile(path, `${JSON.stringify(value, null, 2)}\n`);
 
 function packageMetadata(target: ReleaseTarget) {
-  return {
+  const base = {
     name: binaryPackageName(rootPackage.name, target),
     version: rootPackage.version,
     description: `${rootPackage.description} (${target.id} binary)`,
@@ -53,7 +55,8 @@ function packageMetadata(target: ReleaseTarget) {
     homepage: rootPackage.homepage,
     os: [target.os],
     cpu: [target.cpu],
-    ...(target.os === "linux" ? { libc: ["glibc"] } : {}),
+  };
+  const trailing = {
     files: ["bin", "LICENSE"],
     publishConfig: {
       access: "public",
@@ -61,6 +64,7 @@ function packageMetadata(target: ReleaseTarget) {
       registry: "https://registry.npmjs.org/",
     },
   };
+  return target.os === "linux" ? { ...base, libc: ["glibc"], ...trailing } : { ...base, ...trailing };
 }
 
 async function buildBinaryPackage(target: ReleaseTarget): Promise<void> {

@@ -76,7 +76,7 @@ export const addSkillFromSource = Effect.fn("SkillsAdd.addSkillFromSource")(func
   if (!entry) return yield* Effect.fail(new OperationFailed({ message: `${name} was not found in .agents/skills after installation` }));
   // Project locks omit the git tree SHA; recover it so `update --check` still works.
   const lockMeta = entry.candidate.lock ? yield* backfillTreeHash(entry.candidate.lock) : undefined;
-  const candidate = { ...entry.candidate, ...(lockMeta ? { lock: lockMeta } : {}) };
+  const candidate = lockMeta === undefined ? entry.candidate : { ...entry.candidate, lock: lockMeta };
   const unindexed = options.unindexedSkill;
   if (unindexed && unindexed.name !== name) {
     return yield* Effect.fail(new OperationFailed({ message: `unindexed skill ${unindexed.name} does not match ${name}` }));

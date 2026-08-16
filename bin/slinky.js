@@ -27,7 +27,7 @@ const run = (target, args = process.argv.slice(2)) => {
     console.error(result.error.message);
     process.exit(1);
   }
-  process.exit(typeof result.status === "number" ? result.status : 1);
+  process.exit(result.status ?? 1);
 };
 
 if (process.env.SLINKY_BIN_PATH) run(process.env.SLINKY_BIN_PATH);

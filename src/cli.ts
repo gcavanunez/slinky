@@ -217,7 +217,8 @@ const adoptCandidates = Effect.fn("Cli.adoptCandidates")(function* (
       // A project-scoped lock has no git tree SHA; recover it so the adopted
       // skill still answers to `update --check`.
       const lock = cand.lock ? yield* backfillTreeHash(cand.lock) : undefined;
-      const result = yield* adoptSkill(manifest, { ...cand, ...(lock ? { lock } : {}) }, options);
+      const candidate = lock === undefined ? cand : { ...cand, lock };
+      const result = yield* adoptSkill(manifest, candidate, options);
       adoptions.push(result);
       if (cand.location === "staged") staged.push(cand.name);
       manifest = result.manifest;
@@ -763,10 +764,8 @@ const adoptCommand = Command.make(
           if (pool.redundant.length === 0) console.log("nothing to adopt");
           return;
         }
-        const adopted = yield* adoptCandidates(store, manifest, state, picked, {
-          local: input.local,
-          ...(Option.isSome(input.owner) ? { owner: input.owner.value } : {}),
-        });
+        const options: AdoptOptions = Option.isSome(input.owner) ? { local: input.local, owner: input.owner.value } : { local: input.local };
+        const adopted = yield* adoptCandidates(store, manifest, state, picked, options);
         manifest = adopted.manifest;
         state = adopted.state;
         for (const warning of adopted.warnings) console.log(c.yellow(`warn: ${warning}`));
@@ -795,12 +794,12 @@ const updateCommand = Command.make(
         if (input.check) {
           console.log(c.dim("comparing persisted upstream hashes against GitHub\u2026"));
           const statuses = yield* checkUpstream(manifest);
-          const label: Record<string, string> = {
+          const label = {
             current: c.green("up to date"),
             update: c.yellow("update available"),
             gone: c.red("gone upstream (kept: vendored)"),
             unchecked: c.dim("unchecked"),
-          };
+          } satisfies Record<(typeof statuses)[number]["state"], string>;
           for (const s of statuses.filter((x) => x.state !== "current")) {
             console.log(`  ${pad(s.name, 32)}${label[s.state]}${s.detail ? c.dim(`  ${s.detail}`) : ""}`);
           }
@@ -933,10 +932,10 @@ const root = Command.make("slinky").pipe(
 
 // --- runtime boundary -----------------------------------------------------
 
-function renderFailure(error: unknown): never {
+function renderFailure(cause: unknown): never {
   // Usage errors and help output are already rendered by the CLI framework.
-  if (CliError.isCliError(error)) process.exit(1);
-  if (error instanceof RepoNotFoundError) {
+  if (CliError.isCliError(cause)) process.exit(1);
+  if (cause instanceof RepoNotFoundError) {
     const slinkyConfig = join(homedir(), ".config", "slinky", "config.json");
     console.error(
       c.red(
@@ -947,7 +946,7 @@ function renderFailure(error: unknown): never {
     );
     process.exit(1);
   }
-  console.error(c.red(`error: ${error instanceof Error ? error.message : String(error)}`));
+  console.error(c.red(`error: ${cause instanceof Error ? cause.message : String(cause)}`));
   process.exit(1);
 }
 

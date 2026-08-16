@@ -44,11 +44,8 @@ export const vendorAccept = Effect.fn("Vendor.accept")(function* (manifest: Mani
     vendoredAt: formatUtc(nowUtc()),
     upstream: lock.skills[name] ? upstreamFromLock(lock.skills[name]) : meta.upstream,
   });
-  const accepted: VendorAcceptResult = {
-    manifest: withManifestSkill(manifest, name, next),
-    changed: true,
-    ...(lock.warning ? { warning: lock.warning } : {}),
-  };
+  const nextManifest = withManifestSkill(manifest, name, next);
+  const accepted: VendorAcceptResult = lock.warning === undefined ? { manifest: nextManifest, changed: true } : { manifest: nextManifest, changed: true, warning: lock.warning };
   return accepted;
 });
 

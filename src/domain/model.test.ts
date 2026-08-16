@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Schema } from "effect";
+import { DateTime, Schema } from "effect";
 import { Manifest, ProjectLink, State, getSkill, validateState, withManifestSkill, withProfile, withProjectLink, withSkillEnabled, withoutProjectLink } from "./model.ts";
 
 const strict = { errors: "all", onExcessProperty: "error" } as const;
@@ -104,43 +104,49 @@ describe("domain schemas", () => {
     const oldState = { ...stateInput(), enabled: { foo: true } };
     expect(() => Schema.decodeUnknownSync(State)(oldState, strict)).toThrow();
 
-    const copyWithoutSnapshot = stateInput();
-    copyWithoutSnapshot.projectLinks = [
-      {
-        mode: "copy",
-        project: "/tmp/project",
-        skill: "foo",
-        targets: [".agents/skills/foo"],
-        excludedTargets: [],
-        linkedAt: "2026-07-13T12:00:00.000Z",
-      } as never,
-    ];
+    const copyWithoutSnapshot = {
+      ...stateInput(),
+      projectLinks: [
+        {
+          mode: "copy",
+          project: "/tmp/project",
+          skill: "foo",
+          targets: [".agents/skills/foo"],
+          excludedTargets: [],
+          linkedAt: "2026-07-13T12:00:00.000Z",
+        },
+      ],
+    };
 
-    const symlinkWithSnapshot = stateInput();
-    symlinkWithSnapshot.projectLinks = [
-      {
-        mode: "symlink",
-        project: "/tmp/project",
-        skill: "foo",
-        targets: [".agents/skills/foo"],
-        excludedTargets: [],
-        linkedAt: "2026-07-13T12:00:00.000Z",
-        snapshotHash: HASH,
-      } as never,
-    ];
+    const symlinkWithSnapshot = {
+      ...stateInput(),
+      projectLinks: [
+        {
+          mode: "symlink",
+          project: "/tmp/project",
+          skill: "foo",
+          targets: [".agents/skills/foo"],
+          excludedTargets: [],
+          linkedAt: "2026-07-13T12:00:00.000Z",
+          snapshotHash: HASH,
+        },
+      ],
+    };
 
-    const destructiveTarget = stateInput();
-    destructiveTarget.projectLinks = [
-      {
-        mode: "copy",
-        project: "/tmp/project",
-        skill: "foo",
-        targets: ["src"],
-        excludedTargets: [],
-        linkedAt: "2026-07-13T12:00:00.000Z",
-        snapshotHash: HASH,
-      } as never,
-    ];
+    const destructiveTarget = {
+      ...stateInput(),
+      projectLinks: [
+        {
+          mode: "copy",
+          project: "/tmp/project",
+          skill: "foo",
+          targets: ["src"],
+          excludedTargets: [],
+          linkedAt: "2026-07-13T12:00:00.000Z",
+          snapshotHash: HASH,
+        },
+      ],
+    };
 
     expect(() => Schema.decodeUnknownSync(State)(copyWithoutSnapshot, strict)).toThrow();
     expect(() => Schema.decodeUnknownSync(State)(symlinkWithSnapshot, strict)).toThrow();
@@ -192,7 +198,7 @@ describe("domain schemas", () => {
     const enabled = withSkillEnabled(added, "bar", true);
     const removed = withoutProjectLink(added, addedFirst);
 
-    expect(typeof first.linkedAt).not.toBe("string");
+    expect(DateTime.isDateTime(first.linkedAt)).toBe(true);
     expect(added.projectLinks).toEqual([first, second]);
     expect(enabled.disabledSkills).toEqual([]);
     expect(removed.projectLinks).toEqual([second]);
@@ -209,7 +215,7 @@ describe("domain schemas", () => {
     const vendor = getSkill(updated, "bar");
 
     expect(vendor?.origin).toBe("vendor");
-    expect(vendor?.origin === "vendor" ? typeof vendor.vendoredAt : "missing").not.toBe("string");
+    expect(vendor?.origin === "vendor" && vendor.vendoredAt !== null && DateTime.isDateTime(vendor.vendoredAt)).toBe(true);
     expect(getSkill(updated, "foo")?.contentHash).toBe("c".repeat(64));
     expect(getSkill(manifest, "foo")?.contentHash).toBe(HASH);
   });
