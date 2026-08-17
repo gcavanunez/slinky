@@ -968,7 +968,6 @@ const saveCommand = Command.make(
         });
         const commit = yield* Effect.gen(function* () {
           yield* runGit(repo, ["add", "--", ...pathspec]);
-          yield* runGit(repo, ["diff", "--cached", "--check", "--", ...pathspec]);
           return yield* runGit(repo, ["commit", "--only", "-m", commitMessage, "--", ...pathspec]);
         }).pipe(
           Effect.catch((commitError) =>

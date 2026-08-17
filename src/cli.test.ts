@@ -184,6 +184,18 @@ describe("save", () => {
     expect(unchanged.stdout.toString()).toContain("catalog already saved; nothing to commit");
   });
 
+  test("commits verified catalog content without imposing a whitespace policy", () => {
+    const f = fixture();
+    initializeGitFixture(f.host, f.home);
+    writeFileSync(join(f.host, "skills", "foo", "SKILL.md"), "# foo v2\n\n");
+    expect(runCli(f.host, f.home, ["rehash", "foo"]).exitCode).toBe(0);
+
+    const result = runCli(f.host, f.home, ["save"], gitIdentity);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("saved catalog as");
+  });
+
   test("refuses to commit an unindexed catalog directory", () => {
     const f = fixture();
     initializeGitFixture(f.host, f.home);

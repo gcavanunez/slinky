@@ -178,7 +178,7 @@ slinky save
 slinky save --message "Add project skills"
 ```
 
-`save` refuses unindexed directories under `skills/` or `vendor/`, verifies every manifest content hash, checks the staged catalog diff, and commits only `skills.manifest.json` plus skill directories referenced by the current or committed manifest. Other staged files, including loose files elsewhere under `skills/` or `vendor/`, are left out of the commit. The default commit message is `Update skills catalog`.
+`save` refuses unindexed directories under `skills/` or `vendor/`, verifies every manifest content hash, and commits only `skills.manifest.json` plus skill directories referenced by the current or committed manifest. Other staged files, including loose files elsewhere under `skills/` or `vendor/`, are left out of the commit. Vendored content is committed verbatim rather than subjected to the host repository's whitespace policy. The default commit message is `Update skills catalog`.
 
 ## Project Links
 
