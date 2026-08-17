@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Schema } from "effect";
@@ -7,6 +7,12 @@ import { Manifest } from "./domain/model.ts";
 
 const roots: string[] = [];
 const decodeEncodedManifest = Schema.decodeUnknownSync(Schema.toEncoded(Manifest));
+const gitIdentity = {
+  GIT_AUTHOR_NAME: "Slinky Test",
+  GIT_AUTHOR_EMAIL: "slinky@example.com",
+  GIT_COMMITTER_NAME: "Slinky Test",
+  GIT_COMMITTER_EMAIL: "slinky@example.com",
+};
 
 function fixture(disabledSkills: ReadonlyArray<string> = []) {
   const root = mkdtempSync(join(tmpdir(), "slinky-cli-actions-"));
@@ -53,6 +59,29 @@ function runCli(host: string, home: string, args: ReadonlyArray<string>, env: Re
   return Bun.spawnSync([process.execPath, cli, ...args], {
     env: { ...process.env, HOME: home, SLINKY_REPO: host, ...env },
   });
+}
+
+function runGit(repo: string, args: ReadonlyArray<string>) {
+  return Bun.spawnSync(["git", ...args], {
+    cwd: repo,
+    env: { ...process.env, ...gitIdentity },
+  });
+}
+
+function initializeGitFixture(host: string, home: string): void {
+  writeFileSync(join(host, ".gitignore"), ".local/\n");
+  for (const name of ["foo", "bar"]) {
+    const rehash = runCli(host, home, ["rehash", name]);
+    if (rehash.exitCode !== 0) throw new Error(rehash.stderr.toString());
+  }
+  for (const args of [
+    ["init", "-q"],
+    ["add", "."],
+    ["commit", "-qm", "Initial catalog"],
+  ]) {
+    const result = runGit(host, args);
+    if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+  }
 }
 
 function stateAt(path: string): {
@@ -114,6 +143,113 @@ describe("CLI options", () => {
     expect(result.stdout.toString()).toContain("foo: refreshed manifest hash");
     expect(foo.contentHash).not.toBe("0".repeat(64));
     expect(foo.contentHash).toHaveLength(64);
+  });
+});
+
+describe("save", () => {
+  test("verifies and commits catalog paths without including unrelated staged files", () => {
+    const f = fixture();
+    initializeGitFixture(f.host, f.home);
+    writeFileSync(join(f.host, "skills", "foo", "SKILL.md"), "# foo v2\n");
+    expect(runCli(f.host, f.home, ["rehash", "foo"]).exitCode).toBe(0);
+    writeFileSync(join(f.host, "notes.txt"), "keep staged\n");
+    writeFileSync(join(f.host, "skills", "notes.txt"), "not a skill\n");
+    expect(runGit(f.host, ["add", "notes.txt"]).exitCode).toBe(0);
+
+    const result = runCli(f.host, f.home, ["save", "--message", "Update foo"], gitIdentity);
+
+    if (result.exitCode !== 0) throw new Error(`${result.stderr.toString()}\n${result.stdout.toString()}`);
+    expect(result.stdout.toString()).toContain("saved catalog as");
+    expect(runGit(f.host, ["log", "-1", "--pretty=%s"]).stdout.toString().trim()).toBe("Update foo");
+    const committed = runGit(f.host, ["show", "--pretty=", "--name-only", "HEAD"]).stdout.toString().trim().split("\n");
+    expect(committed).toContain("skills.manifest.json");
+    expect(committed).toContain("skills/foo/SKILL.md");
+    expect(committed).not.toContain("notes.txt");
+    expect(runGit(f.host, ["diff", "--cached", "--name-only"]).stdout.toString().trim()).toBe("notes.txt");
+    expect(runGit(f.host, ["status", "--short", "--", "skills/notes.txt"]).stdout.toString().trim()).toBe("?? skills/notes.txt");
+  });
+
+  test("uses the default message and succeeds without changes", () => {
+    const f = fixture();
+    initializeGitFixture(f.host, f.home);
+    writeFileSync(join(f.host, "skills", "foo", "SKILL.md"), "# foo v2\n");
+    expect(runCli(f.host, f.home, ["rehash", "foo"]).exitCode).toBe(0);
+
+    const saved = runCli(f.host, f.home, ["save"], { ...gitIdentity, GIT_DIR: join(f.root, "not-the-host.git") });
+    if (saved.exitCode !== 0) throw new Error(`${saved.stderr.toString()}\n${saved.stdout.toString()}`);
+    expect(runGit(f.host, ["log", "-1", "--pretty=%s"]).stdout.toString().trim()).toBe("Update skills catalog");
+
+    const unchanged = runCli(f.host, f.home, ["save"], gitIdentity);
+    expect(unchanged.exitCode).toBe(0);
+    expect(unchanged.stdout.toString()).toContain("catalog already saved; nothing to commit");
+  });
+
+  test("refuses to commit an unindexed catalog directory", () => {
+    const f = fixture();
+    initializeGitFixture(f.host, f.home);
+    mkdirSync(join(f.host, "vendor", "acme", "unknown"), { recursive: true });
+    writeFileSync(join(f.host, "vendor", "acme", "unknown", "SKILL.md"), "# unknown\n");
+
+    const result = runCli(f.host, f.home, ["save"]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain("unindexed catalog skill: vendor/acme/unknown");
+    expect(runGit(f.host, ["log", "-1", "--pretty=%s"]).stdout.toString().trim()).toBe("Initial catalog");
+  });
+
+  test("refuses a host nested inside another Git repository", () => {
+    const f = fixture();
+    writeFileSync(join(f.root, ".gitignore"), "host/.local/\n");
+    for (const name of ["foo", "bar"]) expect(runCli(f.host, f.home, ["rehash", name]).exitCode).toBe(0);
+    for (const args of [
+      ["init", "-q"],
+      ["add", "."],
+      ["commit", "-qm", "Outer repository"],
+    ]) {
+      const result = runGit(f.root, args);
+      if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+    }
+    writeFileSync(join(f.host, "skills", "foo", "SKILL.md"), "# foo v2\n");
+    expect(runCli(f.host, f.home, ["rehash", "foo"]).exitCode).toBe(0);
+
+    const result = runCli(f.host, f.home, ["save"], gitIdentity);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain("skills host must be a Git repository root");
+    expect(runGit(f.root, ["log", "-1", "--pretty=%s"]).stdout.toString().trim()).toBe("Outer repository");
+  });
+
+  test("restores the Git index when the commit fails", () => {
+    const f = fixture();
+    initializeGitFixture(f.host, f.home);
+    writeFileSync(join(f.host, "skills", "foo", "SKILL.md"), "# foo v2\n");
+    expect(runCli(f.host, f.home, ["rehash", "foo"]).exitCode).toBe(0);
+    writeFileSync(join(f.host, "notes.txt"), "keep staged\n");
+    expect(runGit(f.host, ["add", "notes.txt"]).exitCode).toBe(0);
+    const hook = join(f.host, ".git", "hooks", "pre-commit");
+    writeFileSync(hook, "#!/bin/sh\nexit 1\n");
+    chmodSync(hook, 0o755);
+
+    const result = runCli(f.host, f.home, ["save"], gitIdentity);
+
+    expect(result.exitCode).toBe(1);
+    expect(runGit(f.host, ["diff", "--cached", "--name-only"]).stdout.toString().trim()).toBe("notes.txt");
+    expect(runGit(f.host, ["diff", "--name-only"]).stdout.toString().trim().split("\n")).toEqual(["skills.manifest.json", "skills/foo/SKILL.md"]);
+    expect(runGit(f.host, ["log", "-1", "--pretty=%s"]).stdout.toString().trim()).toBe("Initial catalog");
+  });
+
+  test("refuses symlinks that are excluded from content verification", () => {
+    const f = fixture();
+    initializeGitFixture(f.host, f.home);
+    writeFileSync(join(f.host, "outside.txt"), "not hashed\n");
+    symlinkSync(join(f.host, "outside.txt"), join(f.host, "skills", "foo", "outside.txt"));
+
+    const result = runCli(f.host, f.home, ["save"], gitIdentity);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain("catalog verification problem");
+    expect(result.stdout.toString()).toContain("repo copy contains symlink(s): outside.txt");
+    expect(runGit(f.host, ["log", "-1", "--pretty=%s"]).stdout.toString().trim()).toBe("Initial catalog");
   });
 });
 

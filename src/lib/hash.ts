@@ -27,6 +27,18 @@ export function walkFiles(root: string, prefix = ""): string[] {
   return out;
 }
 
+/** Symlinks are not content-hashed, so callers can reject them when persisting a verified baseline. */
+export function findSymlinks(root: string, prefix = ""): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(join(root, prefix))) {
+    const rel = prefix ? `${prefix}/${entry}` : entry;
+    const st = lstatSync(join(root, rel));
+    if (st.isSymbolicLink()) out.push(rel);
+    else if (st.isDirectory() && !IGNORED_DIRS.has(entry)) out.push(...findSymlinks(root, rel));
+  }
+  return out;
+}
+
 /**
  * Stable sha256 over sorted relative paths + file contents.
  * Matches the Phase 1 migration hasher: for each file (sorted by full path

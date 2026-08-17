@@ -1,24 +1,24 @@
 #!/usr/bin/env bun
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, readFileSync, realpathSync, renameSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { BunServices } from "@effect/platform-bun";
-import { Cause, Effect, Exit, Layer, Option } from "effect";
+import { Cause, Effect, Exit, Layer, Option, Schema } from "effect";
 import { Argument, CliError, Command, Flag } from "effect/unstable/cli";
 import packageJson from "../package.json" with { type: "json" };
-import { OperationFailed } from "./domain/model.ts";
+import { errorDetail, ExternalToolError, OperationFailed } from "./domain/model.ts";
 import { adoptSkill, backfillTreeHash, clearStagingResidue, finalizeAdoption, findForeign, findStaged, findUnindexedSkills, rollbackAdoption } from "./lib/adopt.ts";
 import type { Adoption, AdoptOptions, ForeignSkill } from "./lib/adopt.ts";
 import { backupGlobalDirs } from "./lib/bootstrap.ts";
 import { applyProfile, linkProjectSkill, setSkillsEnabled, unlinkProjectSkill } from "./lib/catalogActions.ts";
 import type { ActionResult } from "./lib/catalogActions.ts";
-import { contentHash } from "./lib/hash.ts";
+import { contentHash, findSymlinks } from "./lib/hash.ts";
 import { diffDirs, isClean, unifiedDiff } from "./lib/diff.ts";
 import { layerRepo } from "./lib/layers.ts";
 import { checkLink } from "./lib/linker.ts";
-import { alignStateWithManifest, getSkill, isSkillEnabled, ManifestStore, withManifestSkill } from "./lib/manifest.ts";
-import type { Manifest, ManifestStoreInterface, State } from "./lib/manifest.ts";
+import { alignStateWithManifest, getSkill, isSkillEnabled, Manifest, ManifestStore, withManifestSkill } from "./lib/manifest.ts";
+import type { ManifestStoreInterface, State } from "./lib/manifest.ts";
 import { HostRepo, isRepoDir, Paths, RepoNotFoundError } from "./lib/paths.ts";
 import { apply, observe, observeAndPlan } from "./lib/reconcile.ts";
 import { vendorAccept, vendorRestore } from "./lib/vendorOps.ts";
@@ -184,14 +184,42 @@ const cmdVerify = Effect.fn("Cli.verify")(function* (manifest: Manifest) {
       bad++;
       continue;
     }
+    const stat = lstatSync(repoPath);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      console.log(c.red(`${name}: repo path must be a real directory: ${meta.path}`));
+      bad++;
+      continue;
+    }
+    const symlinks = findSymlinks(repoPath);
+    if (symlinks.length > 0) {
+      console.log(c.red(`${name}: repo copy contains symlink(s): ${symlinks.join(", ")}`));
+      bad++;
+      continue;
+    }
     const h = contentHash(repoPath);
     if (h !== meta.contentHash) {
       console.log(c.yellow(`${name}: repo copy hash mismatch (manifest stale?)`));
       bad++;
     }
   }
-  console.log(bad === 0 ? c.green(`all ${Object.keys(manifest.skills).length} skills verified`) : c.red(`${bad} problem(s)`));
-  if (bad > 0) process.exit(1);
+  if (bad > 0) return yield* bail(`${bad} catalog verification problem(s)`);
+  console.log(c.green(`all ${Object.keys(manifest.skills).length} skills verified`));
+});
+
+const runGit = Effect.fn("Cli.runGit")(function* (repo: string, args: ReadonlyArray<string>) {
+  const env = { ...process.env };
+  for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX"]) {
+    delete env[name];
+  }
+  const result = yield* Effect.sync(() => spawnSync("git", ["--literal-pathspecs", ...args], { cwd: repo, encoding: "utf8", env }));
+  if (result.error) {
+    return yield* Effect.fail(new ExternalToolError({ tool: "git", message: result.error.message }));
+  }
+  if (result.status !== 0) {
+    const detail = (result.stderr || result.stdout || "").trim();
+    return yield* Effect.fail(new ExternalToolError({ tool: "git", message: detail || `git exited with ${result.status ?? "unknown"}` }));
+  }
+  return { stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 });
 
 /**
@@ -896,6 +924,81 @@ const updateCommand = Command.make(
     ),
 ).pipe(Command.withDescription("Check upstream (--check) or fetch updates via skills.sh and review each diff"));
 
+const saveCommand = Command.make(
+  "save",
+  {
+    message: Flag.string("message").pipe(Flag.withAlias("m"), Flag.optional, Flag.withDescription("Git commit message (default: Update skills catalog)")),
+  },
+  ({ message }) =>
+    withRepo(
+      Effect.gen(function* () {
+        const store = yield* ManifestStore;
+        const manifest = yield* store.loadManifest();
+        const { repo } = yield* HostRepo;
+        const topLevel = yield* runGit(repo, ["rev-parse", "--show-toplevel"]);
+        if (realpathSync(topLevel.stdout.trim()) !== realpathSync(repo)) {
+          return yield* bail(`skills host must be a Git repository root: ${repo}`);
+        }
+        const unindexed = findUnindexedSkills(manifest, repo).filter((skill) => skill.origin !== "agent");
+        if (unindexed.length > 0) return yield* bail(`unindexed catalog skill: ${unindexed.map((skill) => skill.path).join(", ")}`);
+
+        yield* cmdVerify(manifest);
+        const committedManifest = yield* runGit(repo, ["show", "HEAD:skills.manifest.json"]);
+        const previous = yield* Effect.try({
+          try: () => Schema.decodeUnknownSync(Manifest)(JSON.parse(committedManifest.stdout)),
+          catch: (error) => new OperationFailed({ message: `cannot decode committed skills.manifest.json: ${errorDetail(error)}` }),
+        });
+        const pathspec = [
+          "skills.manifest.json",
+          ...new Set([...Object.values(previous.skills).map((skill) => skill.path), ...Object.values(manifest.skills).map((skill) => skill.path)]),
+        ];
+        const status = yield* runGit(repo, ["status", "--porcelain", "--", ...pathspec]);
+        if (status.stdout.trim().length === 0) {
+          console.log(c.green("catalog already saved; nothing to commit"));
+          return;
+        }
+
+        const commitMessage = Option.getOrElse(message, () => "Update skills catalog");
+        const index = yield* runGit(repo, ["rev-parse", "--git-path", "index"]);
+        const indexPath = resolve(repo, index.stdout.trim());
+        const indexBackup = `${indexPath}.slinky-${process.pid}`;
+        yield* Effect.try({
+          try: () => copyFileSync(indexPath, indexBackup),
+          catch: (error) => new ExternalToolError({ tool: "git", message: `could not back up Git index: ${errorDetail(error)}` }),
+        });
+        const commit = yield* Effect.gen(function* () {
+          yield* runGit(repo, ["add", "--", ...pathspec]);
+          yield* runGit(repo, ["diff", "--cached", "--check", "--", ...pathspec]);
+          return yield* runGit(repo, ["commit", "--only", "-m", commitMessage, "--", ...pathspec]);
+        }).pipe(
+          Effect.catch((commitError) =>
+            Effect.try({
+              try: () => {
+                const restore = `${indexPath}.slinky-restore-${process.pid}`;
+                copyFileSync(indexBackup, restore);
+                renameSync(restore, indexPath);
+                rmSync(indexBackup, { force: true });
+              },
+              catch: (restoreError) =>
+                new ExternalToolError({
+                  tool: "git",
+                  message: `${commitError.message}; failed to restore Git index: ${errorDetail(restoreError)} (backup retained at ${indexBackup})`,
+                }),
+            }).pipe(Effect.andThen(Effect.fail(commitError))),
+          ),
+        );
+        try {
+          rmSync(indexBackup, { force: true });
+        } catch (error) {
+          console.log(c.yellow(`warn: commit succeeded, but could not remove Git index backup ${indexBackup}: ${errorDetail(error)}`));
+        }
+        if (commit.stdout.trim()) console.log(commit.stdout.trim());
+        const revision = yield* runGit(repo, ["rev-parse", "--short", "HEAD"]);
+        console.log(c.green(`saved catalog as ${revision.stdout.trim()}`));
+      }),
+    ),
+).pipe(Command.withDescription("Verify and commit catalog-managed paths in the skills host"));
+
 const verifyCommand = Command.make("verify", {}, () =>
   withRepo(
     Effect.gen(function* () {
@@ -926,6 +1029,7 @@ const root = Command.make("slinky").pipe(
     restoreCommand,
     rehashCommand,
     adoptCommand,
+    saveCommand,
     verifyCommand,
   ]),
 );

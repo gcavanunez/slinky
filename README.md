@@ -169,6 +169,17 @@ Afterwards Slinky clears the staging directory, removes the `.claude` symlink sk
 
 In the TUI, select an unindexed skill and press `a`. Enter the source (`kitlangton/skills`) or paste its add command (`skills add kitlangton/skills --skill effect`). Slinky verifies that the installed content matches the unindexed copy before indexing it in place or moving it to the inferred vendor path.
 
+### Save the catalog
+
+After reviewing catalog changes, verify and commit them in the skills host:
+
+```bash
+slinky save
+slinky save --message "Add project skills"
+```
+
+`save` refuses unindexed directories under `skills/` or `vendor/`, verifies every manifest content hash, checks the staged catalog diff, and commits only `skills.manifest.json` plus skill directories referenced by the current or committed manifest. Other staged files, including loose files elsewhere under `skills/` or `vendor/`, are left out of the commit. The default commit message is `Update skills catalog`.
+
 ## Project Links
 
 Copy a skill into a project, which is the default:
@@ -247,6 +258,7 @@ slinky restore <skill...>
 slinky rehash <local-skill...>
 slinky adopt                          # list staged + host skills not in the repo
 slinky adopt <skill...>|--all [--local] [--owner=<owner>]
+slinky save [-m|--message <message>]
 slinky link <skill> [project] [--copy|--symlink] [--no-exclude] [--no-claude]
 slinky unlink <skill> [project] [--force]
 slinky links [--check]

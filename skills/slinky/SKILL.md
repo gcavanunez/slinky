@@ -174,6 +174,15 @@ slinky adopt --all
 
 The default is a vendor skill. Use `--local` only for skills the user intends to author in the host. After adoption, inspect the host with `git status` and `git diff`.
 
+Commit reviewed catalog changes without capturing unrelated staged work:
+
+```bash
+slinky save
+slinky save --message "Add project skills"
+```
+
+`save` rejects unindexed `skills/` or `vendor/` directories, verifies manifest hashes, and commits only the manifest and indexed skill directories. It does not include staged paths elsewhere in the host.
+
 ## Project Links
 
 Copy a skill into a project by default:
@@ -224,6 +233,7 @@ Bootstrap backs up global skill directories before mutation. If it reports forei
 - Do not edit `.local/state.json` or global skill directories by hand.
 - Do not delete vendor drift before showing `slinky diff` or explaining the restore/vendor choice.
 - Keep the skills host under Git and review its diff after adoption or accepted updates.
+- Use `slinky save` after review when the catalog changes should become the new committed baseline.
 - Keep `.local/` ignored because state can contain absolute project paths and machine-specific preferences.
 - If Slinky reports an unowned file or directory, stop and inspect it rather than forcing replacement automatically.
 
