@@ -2,7 +2,7 @@
 import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, lstatSync, readFileSync, realpathSync, renameSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, posix, resolve } from "node:path";
 import { BunServices } from "@effect/platform-bun";
 import { Cause, Effect, Exit, Layer, Option, Schema } from "effect";
 import { Argument, CliError, Command, Flag } from "effect/unstable/cli";
@@ -13,7 +13,7 @@ import type { Adoption, AdoptOptions, ForeignSkill } from "./lib/adopt.ts";
 import { backupGlobalDirs } from "./lib/bootstrap.ts";
 import { applyProfile, linkProjectSkill, setSkillsEnabled, unlinkProjectSkill } from "./lib/catalogActions.ts";
 import type { ActionResult } from "./lib/catalogActions.ts";
-import { contentHash, findSymlinks } from "./lib/hash.ts";
+import { contentHash, findSymlinks, walkFiles } from "./lib/hash.ts";
 import { diffDirs, isClean, pagePatch, unifiedDiff } from "./lib/diff.ts";
 import type { DiffPager } from "./lib/diff.ts";
 import { layerRepo } from "./lib/layers.ts";
@@ -1016,11 +1016,10 @@ const saveCommand = Command.make(
           try: () => Schema.decodeUnknownSync(Manifest)(JSON.parse(committedManifest.stdout)),
           catch: (error) => new OperationFailed({ message: `cannot decode committed skills.manifest.json: ${errorDetail(error)}` }),
         });
-        const pathspec = [
-          ".skill-lock.json",
-          "skills.manifest.json",
-          ...new Set([...Object.values(previous.skills).map((skill) => skill.path), ...Object.values(manifest.skills).map((skill) => skill.path)]),
-        ];
+        const previousPaths = Object.values(previous.skills).map((skill) => skill.path);
+        const committedFiles = yield* runGit(repo, ["ls-tree", "-r", "--name-only", "HEAD", "--", ...previousPaths]);
+        const currentFiles = Object.values(manifest.skills).flatMap((skill) => walkFiles(join(repo, skill.path)).map((file) => posix.join(skill.path, file)));
+        const pathspec = [".skill-lock.json", "skills.manifest.json", ...new Set([...committedFiles.stdout.split("\n").filter(Boolean), ...currentFiles])];
         const status = yield* runGit(repo, ["status", "--porcelain", "--", ...pathspec]);
         if (status.stdout.trim().length === 0) {
           console.log(c.green("catalog already saved; nothing to commit"));
