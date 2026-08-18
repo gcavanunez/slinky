@@ -232,6 +232,21 @@ describe("save", () => {
     expect(result.stdout.toString()).toContain("saved catalog as");
   });
 
+  test("stages catalog paths removed from the current manifest", () => {
+    const f = fixture();
+    initializeGitFixture(f.host, f.home);
+    const manifest = JSON.parse(readFileSync(join(f.host, "skills.manifest.json"), "utf8"));
+    delete manifest.skills.foo;
+    manifest.profiles = {};
+    writeFileSync(join(f.host, "skills.manifest.json"), `${JSON.stringify(manifest)}\n`);
+    rmSync(join(f.host, "skills", "foo"), { recursive: true });
+
+    const result = runCli(f.host, f.home, ["save"], gitIdentity);
+
+    if (result.exitCode !== 0) throw new Error(`${result.stderr.toString()}\n${result.stdout.toString()}`);
+    expect(runGit(f.host, ["show", "--pretty=", "--name-status", "HEAD"]).stdout.toString()).toContain("D\tskills/foo/SKILL.md");
+  });
+
   test("refuses to commit an unindexed catalog directory", () => {
     const f = fixture();
     initializeGitFixture(f.host, f.home);
