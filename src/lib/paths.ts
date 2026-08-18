@@ -97,7 +97,7 @@ export interface PathsInterface {
   readonly claudeSkills: string;
   /** opencode also reads this dir (in addition to ~/.agents/skills). */
   readonly opencodeSkills: string;
-  /** skills.sh lock file (owned by `npx skills`; we only read it). */
+  /** Machine-global skills.sh lock file. */
   readonly skillLock: string;
   readonly resolution: RepoResolution;
   readonly saveHostConfig: (repo: string) => Effect.Effect<void, ConfigFileError>;
@@ -108,6 +108,7 @@ export class Paths extends Context.Service<Paths, PathsInterface>()("slinky/Path
     Paths,
     Effect.gen(function* () {
       const home = yield* Config.string("HOME").pipe(Config.withDefault(homedir()), Effect.orDie);
+      const xdgStateHome = yield* Config.option(Config.string("XDG_STATE_HOME")).pipe(Effect.map(Option.filter((value) => value !== "")), Effect.orDie);
       const envRepo = yield* Config.option(Config.string("SLINKY_REPO")).pipe(Effect.map(Option.filter((value) => value !== "")), Effect.orDie);
       const slinkyConfig = join(home, ".config", "slinky", "config.json");
 
@@ -131,7 +132,10 @@ export class Paths extends Context.Service<Paths, PathsInterface>()("slinky/Path
         agentsSkills: join(home, ".agents", "skills"),
         claudeSkills: join(home, ".claude", "skills"),
         opencodeSkills: join(home, ".opencode", "skills"),
-        skillLock: join(home, ".agents", ".skill-lock.json"),
+        skillLock: Option.match(xdgStateHome, {
+          onNone: () => join(home, ".agents", ".skill-lock.json"),
+          onSome: (stateHome) => join(stateHome, "skills", ".skill-lock.json"),
+        }),
         resolution: resolveRepo(slinkyConfig, envRepo),
         saveHostConfig,
       });
@@ -151,6 +155,8 @@ export interface HostRepoInterface {
   /** Repo root (the git clone that owns skills/, vendor/ and the manifest). */
   readonly repo: string;
   readonly manifestPath: string;
+  /** Committed skills.sh-compatible provenance for every updatable vendor skill. */
+  readonly catalogLock: string;
   readonly statePath: string;
   /**
    * Staging area. `npx skills add` run inside the repo installs here, because
@@ -169,6 +175,7 @@ export function hostRepoPaths(repo: string): HostRepoInterface {
   return {
     repo,
     manifestPath: join(repo, "skills.manifest.json"),
+    catalogLock: join(repo, ".skill-lock.json"),
     statePath: join(repo, ".local", "state.json"),
     stagedSkills: join(repo, ".agents", "skills"),
     stagedLock: join(repo, "skills-lock.json"),

@@ -22,6 +22,15 @@ import { alignStateWithManifest, getSkill, isSkillEnabled, Manifest, ManifestSto
 import type { ManifestStoreInterface, State } from "./lib/manifest.ts";
 import { HostRepo, isRepoDir, Paths, RepoNotFoundError } from "./lib/paths.ts";
 import { apply, observe, observeAndPlan } from "./lib/reconcile.ts";
+import {
+  absorbGlobalSkillLockEntries,
+  ensureHostSkillLock,
+  loadHostSkillLock,
+  restoreHostSkillLock,
+  saveHostSkillLock,
+  seedGlobalSkillLock,
+  validateHostSkillLock,
+} from "./lib/skillLock.ts";
 import { vendorAccept, vendorRestore } from "./lib/vendorOps.ts";
 import { baselineDirty, checkUpstream, detectChanges, runSkillsAdd, runSkillsUpdate } from "./lib/update.ts";
 import type { GitHub } from "./lib/update.ts";
@@ -226,6 +235,10 @@ const cmdVerify = Effect.fn("Cli.verify")(function* (manifest: Manifest) {
       bad++;
     }
   }
+  for (const issue of yield* validateHostSkillLock(manifest)) {
+    console.log(c.yellow(issue));
+    bad++;
+  }
   if (bad > 0) return yield* bail(`${bad} catalog verification problem(s)`);
   console.log(c.green(`all ${Object.keys(manifest.skills).length} skills verified`));
 });
@@ -259,8 +272,11 @@ const adoptCandidates = Effect.fn("Cli.adoptCandidates")(function* (
   options: AdoptOptions,
 ) {
   const previousManifest = initialManifest;
+  const previousLock = yield* loadHostSkillLock();
+  const ensuredLock = yield* ensureHostSkillLock(initialManifest);
   let manifest = initialManifest;
   let state = initialState;
+  const lockEntries = { ...ensuredLock.entries };
   const adoptions: Adoption[] = [];
   const staged: string[] = [];
   let manifestWritten = false;
@@ -272,6 +288,7 @@ const adoptCandidates = Effect.fn("Cli.adoptCandidates")(function* (
       const candidate = lock === undefined ? cand : { ...cand, lock };
       const result = yield* adoptSkill(manifest, candidate, options);
       adoptions.push(result);
+      if (result.lockEntry) lockEntries[cand.name] = result.lockEntry;
       if (cand.location === "staged") staged.push(cand.name);
       manifest = result.manifest;
       console.log(`adopted ${c.bold(cand.name)} -> ${result.meta.path}`);
@@ -280,6 +297,7 @@ const adoptCandidates = Effect.fn("Cli.adoptCandidates")(function* (
     yield* store.saveManifest(manifest);
     manifestWritten = true;
     yield* store.saveState(state);
+    yield* saveHostSkillLock(lockEntries);
   }).pipe(
     Effect.onError(() =>
       Effect.gen(function* () {
@@ -291,6 +309,7 @@ const adoptCandidates = Effect.fn("Cli.adoptCandidates")(function* (
           );
         }
         if (restored) for (const adoption of adoptions) rollbackAdoption(adoption);
+        yield* restoreHostSkillLock(previousLock).pipe(Effect.ignore);
       }),
     ),
   );
@@ -480,6 +499,10 @@ const bootstrapFlow = (input: BootstrapInput) =>
     console.log("");
     state = alignStateWithManifest(manifest, state);
     if (!dryRun && !stateSaved) yield* store.saveState(state); // scaffold state when no adoption wrote it
+    if (!dryRun) {
+      const hostLock = yield* ensureHostSkillLock(manifest);
+      yield* seedGlobalSkillLock(manifest, Object.keys(hostLock.entries));
+    }
     yield* runSyncCmd(manifest, state, input);
 
     // 4. integrity
@@ -887,13 +910,17 @@ const updateCommand = Command.make(
         }
 
         // 1. preflight: the committed baseline is the snapshot we diff against
+        const hostLock = yield* ensureHostSkillLock(manifest);
+        if (hostLock.changed && !input.force) {
+          return yield* bail("created or refreshed .skill-lock.json; review it and run `slinky save` before updating (--force to override)");
+        }
         if ((yield* baselineDirty()) && !input.force) {
-          return yield* bail("vendor/skills baseline has uncommitted changes; commit or stash first (--force to override)");
+          return yield* bail("catalog baseline has uncommitted changes; commit or stash first (--force to override)");
         }
 
         // 2. fetch via skills.sh (updates live copies + lock; baselines untouched)
         console.log(c.bold("running npx skills update\u2026\n"));
-        yield* runSkillsUpdate(selectedNames);
+        yield* runSkillsUpdate(manifest, selectedNames);
 
         // 3. detect what actually changed vs our baselines
         const outcome = yield* detectChanges(manifest, state, selectedNames);
@@ -925,7 +952,7 @@ const updateCommand = Command.make(
             }
           }
           if (decision === "a") {
-            const result = yield* vendorAccept(manifest, name);
+            const result = yield* vendorAccept(manifest, name, { refreshProvenance: true });
             manifest = result.manifest;
             if (result.warning) console.log(c.yellow(`  warn: ${result.warning.message}`));
             accepted.push(name);
@@ -938,7 +965,14 @@ const updateCommand = Command.make(
             console.log(c.dim("  skipped (live copy stays changed; status will show drift)"));
           }
         }
-        if (accepted.length > 0) yield* store.saveManifest(manifest);
+        if (accepted.length > 0) {
+          const previousLock = yield* loadHostSkillLock();
+          yield* Effect.gen(function* () {
+            yield* absorbGlobalSkillLockEntries(manifest, accepted);
+            yield* store.saveManifest(manifest);
+          }).pipe(Effect.onError(() => restoreHostSkillLock(previousLock).pipe(Effect.ignore)));
+        }
+        yield* seedGlobalSkillLock(manifest, selectedNames);
 
         // 5. resurrect enabled skills that upstream deleted
         if (outcome.missing.length > 0) {
@@ -975,6 +1009,7 @@ const saveCommand = Command.make(
         const unindexed = findUnindexedSkills(manifest, repo).filter((skill) => skill.origin !== "agent");
         if (unindexed.length > 0) return yield* bail(`unindexed catalog skill: ${unindexed.map((skill) => skill.path).join(", ")}`);
 
+        yield* ensureHostSkillLock(manifest);
         yield* cmdVerify(manifest);
         const committedManifest = yield* runGit(repo, ["show", "HEAD:skills.manifest.json"]);
         const previous = yield* Effect.try({
@@ -982,6 +1017,7 @@ const saveCommand = Command.make(
           catch: (error) => new OperationFailed({ message: `cannot decode committed skills.manifest.json: ${errorDetail(error)}` }),
         });
         const pathspec = [
+          ".skill-lock.json",
           "skills.manifest.json",
           ...new Set([...Object.values(previous.skills).map((skill) => skill.path), ...Object.values(manifest.skills).map((skill) => skill.path)]),
         ];

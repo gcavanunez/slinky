@@ -1,13 +1,14 @@
 /** @jsxImportSource @opentui/react */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { existsSync } from "node:fs";
-import { basename, extname } from "node:path";
+import { basename, extname, join } from "node:path";
 import { Match } from "effect";
 import { useKeyboard, usePaste, useRenderer, useTerminalDimensions } from "@opentui/react";
 import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core";
-import { applyProfile, linkProjectSkill, setSkillsEnabled } from "../lib/catalogActions.ts";
+import { acceptVendorDrift, applyProfile, linkProjectSkill, restoreVendorDrift, setSkillsEnabled } from "../lib/catalogActions.ts";
 import type { ActionResult } from "../lib/catalogActions.ts";
-import type { DirDiff } from "../lib/diff.ts";
+import { isClean, pagePatch, unifiedDiff } from "../lib/diff.ts";
+import type { DiffPager, DirDiff } from "../lib/diff.ts";
 import { formatUtc, getProfile } from "../lib/manifest.ts";
 import { addSkillFromSource, parseSkillsAddSource } from "../lib/skillsAdd.ts";
 import { checkUpstream } from "../lib/update.ts";
@@ -52,6 +53,7 @@ function skillItemName(item: SkillItem): string {
 interface AuthorGroup {
   label: string;
   enabledCount: number | null;
+  hasDrift: boolean;
   rows: ReadonlyArray<CatalogRow> | null;
   skills: SkillItem[];
 }
@@ -157,6 +159,7 @@ export function App() {
       out.push({
         label: "all available",
         enabledCount: null,
+        hasDrift: availableRows.some((row) => row.live === "drift"),
         rows: null,
         skills: available,
       });
@@ -166,6 +169,7 @@ export function App() {
       out.push({
         label: "unindexed",
         enabledCount: null,
+        hasDrift: false,
         rows: null,
         skills: scopedUnindexed.map((skill) => ({ kind: "unindexed-skill", skill })),
       });
@@ -174,6 +178,7 @@ export function App() {
       out.push({
         label: "project only",
         enabledCount: null,
+        hasDrift: false,
         rows: null,
         skills: projectOnly.map((skill) => ({ kind: "project-skill", skill })),
       });
@@ -192,6 +197,7 @@ export function App() {
       out.push({
         label: key,
         enabledCount: rows.filter((r) => r.enabled).length,
+        hasDrift: rows.some((row) => row.live === "drift"),
         rows,
         skills: rows.map((row) => ({ kind: "skill", row })),
       });
@@ -384,6 +390,46 @@ export function App() {
     if (key.name === "escape" || key.name === "q") {
       setMode("list");
       return true;
+    }
+    if (mode === "diff" && current && diffResult?.kind === "diff" && !isClean(diffResult.diff)) {
+      if (key.name === "a") {
+        const outcome = runSyncResult(acceptVendorDrift(current.name));
+        if (outcome.ok) {
+          const warning = outcome.value.warning;
+          notify(warning ? `accepted ${current.name}: ${warning.message}` : `accepted global ${current.name} as the repo baseline`, warning !== undefined);
+          refresh();
+          setMode("list");
+        } else {
+          notify(outcome.message, true);
+        }
+        return true;
+      }
+      if (key.name === "r") {
+        const outcome = runSyncResult(restoreVendorDrift(current.name));
+        if (outcome.ok) {
+          notify(`restored global ${current.name} from the repo baseline`);
+          refresh();
+          setMode("list");
+        } else {
+          notify(outcome.message, true);
+        }
+        return true;
+      }
+      const pager: DiffPager | undefined = key.name === "h" ? "hunk" : key.name === "d" ? "delta" : undefined;
+      if (pager) {
+        let suspended = false;
+        try {
+          const patch = unifiedDiff(join(catalog.repo, current.meta.path), join(catalog.agentsSkills, current.name));
+          renderer.suspend();
+          suspended = true;
+          pagePatch(patch, pager);
+        } catch (error) {
+          notify(`${pager} failed: ${error instanceof Error ? error.message : String(error)}`, true);
+        } finally {
+          if (suspended) renderer.resume();
+        }
+        return true;
+      }
     }
     if (mode === "profiles") {
       if (key.name === "j" || key.name === "down") {
@@ -897,6 +943,7 @@ export function App() {
       >
         <span fg={selected ? colors.accent : colors.muted}>{selected ? " › " : "   "}</span>
         <span>{fitCell(group.label, authorLabelW)}</span>
+        <span fg={colors.yellow}>{group.hasDrift ? " ⚠" : "  "}</span>
         <span fg={colors.muted}>{fitCell(status, 5, "right")}</span>
       </TextLine>
     );
@@ -1444,8 +1491,16 @@ function DiffModal({ cols, row, result }: { cols: number; row: CatalogRow; resul
             </TextLine>
           ))}
           {entries.length > cap ? <TextLine fg={colors.muted}>{`  \u2026 ${entries.length - cap} more`}</TextLine> : null}
-          <TextLine fg={colors.muted}>{`full patch: slinky diff ${row.name} --patch`}</TextLine>
-          <TextLine fg={colors.muted}>{`accept: slinky vendor ${row.name} · reject: slinky restore ${row.name}`}</TextLine>
+          <TextLine>
+            <span fg={colors.accent}>{"a"}</span>
+            <span fg={colors.muted}>{" accept global  "}</span>
+            <span fg={colors.accent}>{"r"}</span>
+            <span fg={colors.muted}>{" restore baseline  "}</span>
+            <span fg={colors.accent}>{"h"}</span>
+            <span fg={colors.muted}>{" hunk  "}</span>
+            <span fg={colors.accent}>{"d"}</span>
+            <span fg={colors.muted}>{" delta"}</span>
+          </TextLine>
         </box>
       )}
       <TextLine fg={colors.muted}>{"esc to close"}</TextLine>

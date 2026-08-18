@@ -1,123 +1,32 @@
 import { cpSync, existsSync, lstatSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, posix } from "node:path";
 import { Effect, Schema } from "effect";
-import {
-  errorDetail,
-  formatUtc,
-  HttpUrl,
-  isMissingFile,
-  nowUtc,
-  OperationFailed,
-  PortableRelativePath,
-  Skill,
-  SkillLockDecodeError,
-  UpstreamTreeHash,
-  withManifestSkill,
-} from "../domain/model.ts";
+import { errorDetail, formatUtc, isMissingFile, nowUtc, OperationFailed, Skill, withManifestSkill } from "../domain/model.ts";
 import type { Manifest } from "../domain/model.ts";
+import type { SkillLockDecodeError } from "../domain/model.ts";
 import { readdirIfExists } from "./fs.ts";
 import { contentHash } from "./hash.ts";
 import { HostRepo, Paths } from "./paths.ts";
+import { canonicalLockEntry, readSkillLockFile, upstreamFromLock } from "./skillLock.ts";
+import type { LockMeta, SkillLockEntry } from "./skillLock.ts";
 import { GitHub } from "./update.ts";
+
+export { decodeSkillLock, upstreamFromLock } from "./skillLock.ts";
+export type { LockMeta, SkillLockInput, SkillLockSnapshot } from "./skillLock.ts";
 
 const AdoptionDestination = Schema.Union([Schema.String.check(Schema.isPattern(/^skills\/[^/]+$/)), Schema.String.check(Schema.isPattern(/^vendor\/[^/]+\/[^/]+$/))]);
 const decodeAdoptionDestination = Schema.decodeUnknownSync(AdoptionDestination);
 const decodeSkill = Schema.decodeUnknownSync(Skill);
 
-const LockMetaBase = {
-  source: Schema.NonEmptyString,
-  sourceUrl: Schema.optionalKey(HttpUrl),
-};
-
-const GitHubLockMetaSchema = Schema.Struct({
-  ...LockMetaBase,
-  sourceType: Schema.Literal("github"),
-  skillPath: Schema.optionalKey(PortableRelativePath),
-  skillFolderHash: Schema.optionalKey(UpstreamTreeHash),
-});
-
-const WellKnownLockMetaSchema = Schema.Struct({
-  ...LockMetaBase,
-  sourceType: Schema.Literal("well-known"),
-  skillFolderHash: Schema.optionalKey(Schema.String),
-});
-
-const LockMetaSchema = Schema.Union([GitHubLockMetaSchema, WellKnownLockMetaSchema]);
-
-export type LockMeta = typeof LockMetaSchema.Type;
-
-const SkillLockFile = Schema.Struct({
-  skills: Schema.Record(Schema.String, LockMetaSchema),
-});
-const decodeSkillLockFile = Schema.decodeUnknownSync(SkillLockFile);
 const JsonObject = Schema.Record(Schema.String, Schema.Json);
 const decodeJsonObject = Schema.decodeUnknownSync(JsonObject);
 const isJsonObject = Schema.is(JsonObject);
 
-export interface SkillLockSnapshot {
-  readonly skills: Readonly<Record<string, LockMeta>>;
-  readonly warning?: SkillLockDecodeError;
-}
-
-export type SkillLockInput = typeof SkillLockFile.Encoded;
-
-export function decodeSkillLock(input: SkillLockInput): Readonly<Record<string, LockMeta>> {
-  return decodeSkillLockFile(input).skills;
-}
-
-function readSkillLockSync(skillLock: string): SkillLockSnapshot {
-  let raw: string;
-  try {
-    raw = readFileSync(skillLock, "utf8");
-  } catch (error) {
-    return isMissingFile(error) ? { skills: {} } : { skills: {}, warning: new SkillLockDecodeError(skillLock, "read", errorDetail(error)) };
-  }
-
-  let input: unknown;
-  try {
-    input = JSON.parse(raw);
-  } catch (error) {
-    return { skills: {}, warning: new SkillLockDecodeError(skillLock, "parse", errorDetail(error)) };
-  }
-
-  try {
-    return { skills: decodeSkillLockFile(input).skills };
-  } catch (error) {
-    return { skills: {}, warning: new SkillLockDecodeError(skillLock, "decode", errorDetail(error)) };
-  }
-}
-
 /** Read the skills.sh lock file; decode problems degrade to a warning. */
 export const readSkillLock = Effect.fn("Adopt.readSkillLock")(function* () {
   const paths = yield* Paths;
-  return readSkillLockSync(paths.skillLock);
+  return readSkillLockFile(paths.skillLock);
 });
-
-type VendorUpstream = Extract<Skill, { readonly origin: "vendor" }>["upstream"];
-
-export function upstreamFromLock(lock: LockMeta | undefined): VendorUpstream {
-  if (!lock) {
-    return { kind: "unknown", note: "adopted from host; upstream source unknown" };
-  }
-  const url = lock.sourceUrl ?? null;
-  if (lock.sourceType === "well-known") {
-    return { kind: "well-known", source: lock.source, url };
-  }
-  const tracking =
-    lock.skillPath && lock.skillFolderHash
-      ? ({
-          kind: "tree",
-          path: lock.skillPath,
-          hash: lock.skillFolderHash,
-        } as const)
-      : ({ kind: "untracked" } as const);
-  return {
-    kind: "github",
-    repository: lock.source,
-    url,
-    tracking,
-  };
-}
 
 export interface ForeignSkill {
   readonly name: string;
@@ -126,6 +35,8 @@ export interface ForeignSkill {
   readonly dir: string;
   /** Provenance from a skills.sh lock file, when tracked. */
   readonly lock?: LockMeta;
+  /** Full entry retained for the committed host lock. */
+  readonly lockEntry?: SkillLockEntry;
 }
 
 export interface ForeignScan {
@@ -176,7 +87,7 @@ export function findUnindexedSkills(manifest: Manifest, repo: string): Unindexed
  */
 export const findForeign = Effect.fn("Adopt.findForeign")(function* (manifest: Manifest) {
   const paths = yield* Paths;
-  const lock = readSkillLockSync(paths.skillLock);
+  const lock = readSkillLockFile(paths.skillLock);
   const seen = new Set<string>();
   const out: ForeignSkill[] = [];
   const locations: Array<[ForeignSkill["location"], string]> = [
@@ -192,7 +103,8 @@ export const findForeign = Effect.fn("Adopt.findForeign")(function* (manifest: M
       if (!existsSync(join(dir, "SKILL.md"))) continue;
       seen.add(name);
       const meta = lock.skills[name];
-      const candidate: ForeignSkill = meta === undefined ? { name, location, dir } : { name, location, dir, lock: meta };
+      const entry = lock.entries[name];
+      const candidate: ForeignSkill = meta === undefined || entry === undefined ? { name, location, dir } : { name, location, dir, lock: meta, lockEntry: entry };
       out.push(candidate);
     }
   }
@@ -233,7 +145,7 @@ export interface StagedScan {
  */
 export const findStaged = Effect.fn("Adopt.findStaged")(function* (manifest: Manifest) {
   const { stagedSkills, stagedLock } = yield* HostRepo;
-  const lock = readSkillLockSync(stagedLock);
+  const lock = readSkillLockFile(stagedLock);
   const staged: StagedSkill[] = [];
 
   for (const { name } of readdirIfExists(stagedSkills)) {
@@ -243,7 +155,8 @@ export const findStaged = Effect.fn("Adopt.findStaged")(function* (manifest: Man
     if (!existsSync(join(dir, "SKILL.md"))) continue;
 
     const meta = lock.skills[name];
-    const candidate: ForeignSkill = meta === undefined ? { name, location: "staged", dir } : { name, location: "staged", dir, lock: meta };
+    const entry = lock.entries[name];
+    const candidate: ForeignSkill = meta === undefined || entry === undefined ? { name, location: "staged", dir } : { name, location: "staged", dir, lock: meta, lockEntry: entry };
     const indexed = manifest.skills[name];
     if (!indexed) {
       staged.push({ candidate, status: { kind: "new" } });
@@ -345,6 +258,7 @@ export interface Adoption {
   readonly meta: Skill;
   readonly destination: string;
   readonly sourceToRemove: string | null;
+  readonly lockEntry?: SkillLockEntry;
 }
 
 /** Repo-relative destination for an adopted skill. */
@@ -378,12 +292,18 @@ export const adoptSkill = Effect.fn("Adopt.adoptSkill")(function* (manifest: Man
   return yield* Effect.sync(() => {
     cpSync(candidate.dir, dest, { recursive: true });
     const keepLiveDir = candidate.location === "agents" && !opts.local;
-    return {
+    let adoption: Adoption = {
       manifest: withManifestSkill(manifest, candidate.name, meta),
       meta,
       destination: dest,
       sourceToRemove: keepLiveDir ? null : candidate.dir,
-    } satisfies Adoption;
+    };
+    if (meta.origin !== "vendor" || !candidate.lock) return adoption;
+    adoption = {
+      ...adoption,
+      lockEntry: canonicalLockEntry(candidate.lock, candidate.lockEntry, meta.vendoredAt === null ? undefined : formatUtc(meta.vendoredAt)),
+    };
+    return adoption;
   }).pipe(Effect.onError(() => Effect.sync(() => rmSync(dest, { recursive: true, force: true }))));
 });
 

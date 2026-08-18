@@ -39,7 +39,7 @@ slinky bootstrap --clone=https://github.com/owner/my-agent-skills.git
 
 Use `SLINKY_REPO=/path/to/host` for a one-command override. Do not guess which host is active; run `slinky status` before catalog mutations.
 
-Slinky expects the host to contain `skills.manifest.json`. If the user needs an empty host, create `skills/`, `vendor/`, an initial `{ "version": 1, "skills": {}, "profiles": {} }` manifest, and a `.gitignore` entry for `.local/`. Initialize Git and commit that baseline before running `slinky init`.
+Slinky expects the host to contain `skills.manifest.json`. If the user needs an empty host, create `skills/`, `vendor/`, an initial `{ "version": 1, "skills": {}, "profiles": {} }` manifest, a `.skill-lock.json` containing `{ "version": 3, "skills": {} }`, and a `.gitignore` entry for `.local/`. Initialize Git and commit that baseline before running `slinky init`.
 
 ## Mental Model
 
@@ -47,6 +47,7 @@ Slinky expects the host to contain `skills.manifest.json`. If the user needs an 
 skills host
 ├─ skills/                 locally authored source
 ├─ vendor/                 committed upstream baselines
+├─ .skill-lock.json        committed vendor update provenance
 ├─ skills.manifest.json    catalog and profiles
 └─ .local/state.json       machine-local desired state
           │
@@ -122,7 +123,7 @@ slinky adopt                # review what is staged
 slinky adopt --all          # vendor, index, and sync
 ```
 
-`slinky adopt` lists staged skills next to host skills missing from the manifest; a staged copy wins its name when both exist. Provenance comes from `<repo>/skills-lock.json`. Project-scoped locks omit the git tree hash, so Slinky recovers it from GitHub to keep `update --check` working, falling back to untracked when that call fails. After adopting, Slinky clears the staging dir, removes the dangling `.claude` symlink, and prunes the lock entry; a staged copy identical to an indexed baseline is discarded as redundant. Agent directories that a hand-run `npx skills add` populated are reported, not deleted.
+`slinky adopt` lists staged skills next to host skills missing from the manifest; a staged copy wins its name when both exist. Staged provenance comes from temporary `<repo>/skills-lock.json`; global provenance comes from the machine skills.sh lock. Usable entries are absorbed into committed `<repo>/.skill-lock.json`. Project-scoped locks omit the git tree hash, so Slinky recovers it from GitHub to keep `update --check` working, falling back to untracked when that call fails. After adopting, Slinky clears the staging dir, removes the dangling `.claude` symlink, and prunes the temporary lock entry; a staged copy identical to an indexed baseline is discarded as redundant. Agent directories that a hand-run `npx skills add` populated are reported, not deleted.
 
 A staged copy that differs from an already-indexed baseline is left alone: updating a vendored skill from the inbox is not supported yet, so use `slinky update` for that.
 
@@ -144,7 +145,7 @@ Run an interactive update for selected vendor skills:
 slinky update <skill...>
 ```
 
-Slinky runs `npx skills update`, compares live copies with committed baselines, and asks whether to accept, reject, or skip each change.
+Slinky first seeds selected entries in the machine skills.sh lock from committed `.skill-lock.json`, then runs `npx skills update`, compares live copies with committed baselines, and asks whether to accept, reject, or skip each change. Accepted updates advance both content and provenance; rejected or skipped updates leave the committed provenance unchanged. This makes source selection consistent across machines sharing a host commit.
 
 Inspect or resolve a specific drift directly:
 
@@ -158,6 +159,8 @@ slinky restore <skill>  # restore live content from the current baseline
 ```
 
 Pager mode opens one clean patch stream for all selected drifting skills. Use `--hunk` for interactive review, `--delta` for terminal rendering, or the equivalent `--pager hunk|delta` form.
+
+In the TUI, author and category rows show a yellow `⚠` when any of their visible skills has confirmed drift. Select a drifting vendor skill and press `d`. The drift review accepts `a` to vendor the live global copy, `r` to restore the repository baseline, `h` to open Hunk, and `d` to open Delta.
 
 Do not use `update --yes` unless the user explicitly wants every detected change accepted without individual review. Host baseline changes must be committed or stashed before updating.
 
@@ -186,7 +189,7 @@ slinky save
 slinky save --message "Add project skills"
 ```
 
-`save` rejects unindexed `skills/` or `vendor/` directories, verifies manifest hashes, and commits only the manifest and indexed skill directories. It does not include staged paths elsewhere in the host.
+`save` rejects unindexed `skills/` or `vendor/` directories, verifies manifest hashes and vendor provenance, and commits only `.skill-lock.json`, the manifest, and indexed skill directories. It does not include staged paths elsewhere in the host. On an older host, `save` creates the committed lock from manifest provenance and compatible machine metadata.
 
 ## Project Links
 

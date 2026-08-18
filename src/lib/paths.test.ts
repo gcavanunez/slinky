@@ -21,6 +21,15 @@ function resolutionFor(env: Record<string, string>): RepoResolution {
   );
 }
 
+function skillLockFor(env: Record<string, string>): string {
+  const layer = Paths.layer.pipe(Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown(env))));
+  return Effect.runSync(
+    Effect.gen(function* () {
+      return (yield* Paths).skillLock;
+    }).pipe(Effect.provide(layer)),
+  );
+}
+
 describe("skills host discovery", () => {
   test("uses SLINKY_REPO when the application lives outside the host", () => {
     const root = mkdtempSync(join(tmpdir(), "slinky-paths-"));
@@ -60,5 +69,12 @@ describe("skills host discovery", () => {
 
     expect(RepoResolution.$is("Invalid")(resolution)).toBe(true);
     if (RepoResolution.$is("Invalid")(resolution)) expect(resolution.error._tag).toBe("ConfigFileError");
+  });
+});
+
+describe("skills.sh state", () => {
+  test("uses the same XDG lock location as skills.sh", () => {
+    expect(skillLockFor({ HOME: "/home/test", XDG_STATE_HOME: "/state" })).toBe("/state/skills/.skill-lock.json");
+    expect(skillLockFor({ HOME: "/home/test" })).toBe("/home/test/.agents/.skill-lock.json");
   });
 });

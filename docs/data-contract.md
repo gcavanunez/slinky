@@ -48,6 +48,29 @@ Vendor `upstream` values are discriminated by `kind`:
 - `well-known` stores the source identifier and a nullable `url`.
 - `unknown` stores a nullable explanatory `note`.
 
+## Vendor Lock
+
+The host's committed `.skill-lock.json` uses skills.sh's global version-3 lock shape:
+
+```json
+{
+  "version": 3,
+  "skills": {
+    "their-skill": {
+      "source": "acme/skills",
+      "sourceType": "github",
+      "sourceUrl": "https://github.com/acme/skills.git",
+      "skillPath": "skills/their-skill/SKILL.md",
+      "skillFolderHash": "0000000000000000000000000000000000000000"
+    }
+  }
+}
+```
+
+This document contains only entries for manifest vendor skills. It is authoritative for update source selection and must agree with manifest provenance. Slinky preserves update-critical provider fields, but excludes machine preferences such as dismissed prompts and selected agents.
+
+Before `slinky update` or bootstrap, Slinky merges managed entries into the machine lock at `~/.agents/.skill-lock.json`, or `$XDG_STATE_HOME/skills/.skill-lock.json` when configured. Unrelated machine entries and preferences are preserved. Global and staged adoption absorb usable provenance into the committed lock; `<repo>/skills-lock.json` remains a temporary project-scoped staging lock and is pruned after adoption.
+
 ## State
 
 Machine-local `.local/state.json` records exceptions to the default-enabled catalog:

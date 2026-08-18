@@ -5,6 +5,7 @@ import { getProfile, getSkill, ManifestStore, withProfile, withSkillEnabled } fr
 import { applyUnlink, linkSkill, prepareUnlink, unlinkSkill } from "./linker.ts";
 import type { LinkOptions } from "./linker.ts";
 import { apply, observeAndPlan } from "./reconcile.ts";
+import { vendorAccept, vendorRestore } from "./vendorOps.ts";
 
 export interface ActionResult {
   readonly messages: ReadonlyArray<string>;
@@ -79,4 +80,18 @@ export const unlinkProjectSkill = Effect.fn("Catalog.unlinkProjectSkill")(functi
     Effect.onError(() => store.saveState(state).pipe(Effect.ignore)),
   );
   return { link: result.link, warnings };
+});
+
+export const acceptVendorDrift = Effect.fn("Catalog.acceptVendorDrift")(function* (name: string) {
+  const store = yield* ManifestStore;
+  const manifest = yield* store.loadManifest();
+  const result = yield* vendorAccept(manifest, name);
+  yield* store.saveManifest(result.manifest);
+  return { changed: result.changed, warning: result.warning };
+});
+
+export const restoreVendorDrift = Effect.fn("Catalog.restoreVendorDrift")(function* (name: string) {
+  const store = yield* ManifestStore;
+  const manifest = yield* store.loadManifest();
+  yield* vendorRestore(manifest, name);
 });

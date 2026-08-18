@@ -198,6 +198,7 @@ describe("save", () => {
     expect(runGit(f.host, ["log", "-1", "--pretty=%s"]).stdout.toString().trim()).toBe("Update foo");
     const committed = runGit(f.host, ["show", "--pretty=", "--name-only", "HEAD"]).stdout.toString().trim().split("\n");
     expect(committed).toContain("skills.manifest.json");
+    expect(committed).toContain(".skill-lock.json");
     expect(committed).toContain("skills/foo/SKILL.md");
     expect(committed).not.toContain("notes.txt");
     expect(runGit(f.host, ["diff", "--cached", "--name-only"]).stdout.toString().trim()).toBe("notes.txt");
@@ -445,6 +446,8 @@ printf '%s\\n' '${lock}' > "$PWD/skills-lock.json"
     expect(existsSync(join(f.host, ".agents", "skills", "effect"))).toBe(false);
     expect(existsSync(join(f.host, ".claude", "skills", "effect"))).toBe(false);
     expect(existsSync(join(f.host, "skills-lock.json"))).toBe(false);
+    const hostLock = JSON.parse(readFileSync(join(f.host, ".skill-lock.json"), "utf8"));
+    expect(hostLock.skills.effect).toMatchObject({ source: "kitlangton/skills", sourceType: "github" });
   });
 
   test("without --skill it defers discovery to skills.sh and adopts everything staged", () => {
@@ -462,6 +465,106 @@ printf '%s\\n' '${lock}' > "$PWD/skills-lock.json"
     expect(manifest.skills.effect?.path).toBe("vendor/kitlangton/effect");
     expect(manifest.skills.cause?.path).toBe("vendor/kitlangton/cause");
     expect(existsSync(join(f.host, "skills-lock.json"))).toBe(false);
+    expect(Object.keys(JSON.parse(readFileSync(join(f.host, ".skill-lock.json"), "utf8")).skills)).toEqual(["cause", "effect"]);
+  });
+
+  test("adopt absorbs global skills.sh provenance into the host lock", () => {
+    const f = fixture();
+    mkdirSync(join(f.home, ".agents", "skills", "effect"), { recursive: true });
+    writeFileSync(join(f.home, ".agents", "skills", "effect", "SKILL.md"), "# effect\n");
+    writeFileSync(
+      join(f.home, ".agents", ".skill-lock.json"),
+      `${JSON.stringify({
+        version: 3,
+        skills: {
+          effect: {
+            source: "kitlangton/skills",
+            sourceType: "github",
+            sourceUrl: "https://github.com/kitlangton/skills.git",
+            skillPath: "skills/effect/SKILL.md",
+            skillFolderHash: "a".repeat(40),
+            ref: "main",
+            installedAt: "2026-01-01T00:00:00.000Z",
+          },
+        },
+      })}\n`,
+    );
+
+    const result = runCli(f.host, f.home, ["adopt", "effect"]);
+
+    if (result.exitCode !== 0) throw new Error(`${result.stderr.toString()}\n${result.stdout.toString()}`);
+    const hostLock = JSON.parse(readFileSync(join(f.host, ".skill-lock.json"), "utf8"));
+    expect(hostLock.skills.effect).toMatchObject({
+      source: "kitlangton/skills",
+      sourceType: "github",
+      skillPath: "skills/effect/SKILL.md",
+      skillFolderHash: "a".repeat(40),
+      ref: "main",
+    });
+  });
+
+  test("update seeds skills.sh from the committed host lock", () => {
+    const f = fixture();
+    const baseline = join(f.host, "vendor", "kitlangton", "effect");
+    const live = join(f.home, ".agents", "skills", "effect");
+    mkdirSync(baseline, { recursive: true });
+    mkdirSync(live, { recursive: true });
+    writeFileSync(join(baseline, "SKILL.md"), "# effect\n");
+    writeFileSync(join(live, "SKILL.md"), "# effect\n");
+    const manifest = JSON.parse(readFileSync(join(f.host, "skills.manifest.json"), "utf8"));
+    manifest.skills.effect = {
+      origin: "vendor",
+      path: "vendor/kitlangton/effect",
+      contentHash: contentHash(baseline),
+      upstream: {
+        kind: "github",
+        repository: "kitlangton/skills",
+        url: "https://github.com/kitlangton/skills.git",
+        tracking: { kind: "tree", path: "skills/effect/SKILL.md", hash: "a".repeat(40) },
+      },
+      vendoredAt: null,
+    };
+    writeFileSync(join(f.host, "skills.manifest.json"), `${JSON.stringify(manifest)}\n`);
+    writeFileSync(
+      join(f.host, ".skill-lock.json"),
+      `${JSON.stringify({
+        version: 3,
+        skills: {
+          effect: {
+            source: "kitlangton/skills",
+            sourceType: "github",
+            sourceUrl: "https://github.com/kitlangton/skills.git",
+            skillPath: "skills/effect/SKILL.md",
+            skillFolderHash: "a".repeat(40),
+          },
+        },
+      })}\n`,
+    );
+    initializeGitFixture(f.host, f.home);
+    writeFileSync(
+      join(f.home, ".agents", ".skill-lock.json"),
+      `${JSON.stringify({
+        version: 3,
+        skills: {
+          effect: { source: "wrong/source", sourceType: "github" },
+          foreign: { source: "/tmp/foreign", sourceType: "local" },
+        },
+        dismissed: { notice: true },
+      })}\n`,
+    );
+    const bin = join(f.root, "update-bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "npx"), '#!/bin/sh\ncp "$HOME/.agents/.skill-lock.json" "$HOME/seen-skill-lock.json"\n');
+    chmodSync(join(bin, "npx"), 0o755);
+
+    const result = runCli(f.host, f.home, ["update", "effect"], { PATH: `${bin}:${process.env.PATH ?? ""}` });
+
+    if (result.exitCode !== 0) throw new Error(`${result.stderr.toString()}\n${result.stdout.toString()}`);
+    const seen = JSON.parse(readFileSync(join(f.home, "seen-skill-lock.json"), "utf8"));
+    expect(seen.skills.effect.source).toBe("kitlangton/skills");
+    expect(seen.skills.foreign.sourceType).toBe("local");
+    expect(seen.dismissed.notice).toBe(true);
+    expect(result.stdout.toString()).toContain("no changes: all live copies still match the vendored baselines");
   });
 
   test("adopt discards a staging copy that duplicates an indexed baseline", () => {

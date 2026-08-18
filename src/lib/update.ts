@@ -7,6 +7,7 @@ import { errorDetail, ExternalToolError, isSkillEnabled } from "../domain/model.
 import { contentHash } from "./hash.ts";
 import type { Manifest, State } from "./manifest.ts";
 import { HostRepo, Paths } from "./paths.ts";
+import { seedGlobalSkillLock } from "./skillLock.ts";
 
 export type UpstreamState = "current" | "update" | "gone" | "unchecked";
 
@@ -144,7 +145,8 @@ export const checkUpstream = Effect.fn("Update.checkUpstream")(function* (manife
 });
 
 /** Run skills.sh against the global store (writes live copies + lock file). */
-export const runSkillsUpdate = Effect.fn("Update.runSkillsUpdate")(function* (names: ReadonlyArray<string>) {
+export const runSkillsUpdate = Effect.fn("Update.runSkillsUpdate")(function* (manifest: Manifest, names: ReadonlyArray<string>) {
+  yield* seedGlobalSkillLock(manifest, names);
   const res = yield* Effect.sync(() => spawnSync("npx", ["-y", "skills", "update", ...names, "-g", "-y"], { stdio: "inherit" }));
   const code = res.status ?? 1;
   if (code !== 0) {
@@ -200,10 +202,12 @@ export const detectChanges = Effect.fn("Update.detectChanges")(function* (manife
   return { changed, missing } satisfies UpdateOutcome;
 });
 
-/** True when the baseline (vendor/, skills/, manifest) has uncommitted changes. */
+/** True when the baseline (vendor/, skills/, manifest, lock) has uncommitted changes. */
 export const baselineDirty = Effect.fn("Update.baselineDirty")(function* () {
   const { repo } = yield* HostRepo;
-  const res = yield* Effect.sync(() => spawnSync("git", ["status", "--porcelain", "--", "vendor", "skills", "skills.manifest.json"], { cwd: repo, encoding: "utf8" }));
+  const res = yield* Effect.sync(() =>
+    spawnSync("git", ["status", "--porcelain", "--", "vendor", "skills", "skills.manifest.json", ".skill-lock.json"], { cwd: repo, encoding: "utf8" }),
+  );
   if (res.error) {
     return yield* Effect.fail(new ExternalToolError({ tool: "git", message: `git status failed: ${res.error.message}` }));
   }

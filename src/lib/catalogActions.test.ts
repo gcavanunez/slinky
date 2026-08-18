@@ -3,7 +3,8 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Cause, ConfigProvider, Effect, Exit, Layer } from "effect";
-import { applyProfile, linkProjectSkill, setSkillsEnabled, unlinkProjectSkill } from "./catalogActions.ts";
+import { acceptVendorDrift, applyProfile, linkProjectSkill, restoreVendorDrift, setSkillsEnabled, unlinkProjectSkill } from "./catalogActions.ts";
+import { contentHash } from "./hash.ts";
 import { ManifestStore } from "./manifest.ts";
 import { HostRepo, Paths } from "./paths.ts";
 
@@ -15,6 +16,11 @@ interface Fixture {
   readonly host: string;
   readonly home: string;
   readonly statePath: string;
+}
+
+interface VendorPaths {
+  readonly baseline: string;
+  readonly live: string;
 }
 
 afterEach(() => {
@@ -97,6 +103,27 @@ function installGlobal(f: Fixture, name: string): void {
   mkdirSync(join(f.home, ".claude", "skills"), { recursive: true });
   symlinkSync(join(f.host, "skills", name), join(f.home, ".agents", "skills", name));
   symlinkSync(join("..", "..", ".agents", "skills", name), join(f.home, ".claude", "skills", name));
+}
+
+function installDriftingVendor(f: Fixture, name = "vendored"): VendorPaths {
+  const baseline = join(f.host, "vendor", "example", name);
+  const live = join(f.home, ".agents", "skills", name);
+  mkdirSync(baseline, { recursive: true });
+  mkdirSync(live, { recursive: true });
+  writeFileSync(join(baseline, "SKILL.md"), "baseline\n");
+  writeFileSync(join(live, "SKILL.md"), "live\n");
+
+  const manifestPath = join(f.host, "skills.manifest.json");
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  manifest.skills[name] = {
+    origin: "vendor",
+    path: `vendor/example/${name}`,
+    contentHash: contentHash(baseline),
+    upstream: { kind: "unknown", note: null },
+    vendoredAt: null,
+  };
+  writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
+  return { baseline, live };
 }
 
 function state(f: Fixture): {
@@ -184,6 +211,27 @@ describe("catalog actions", () => {
     expect(readFileSync(f.statePath)).toEqual(before);
     expect(existsSync(join(f.home, ".agents"))).toBe(false);
     expect(existsSync(join(f.home, ".claude"))).toBe(false);
+  });
+
+  test("accepting vendor drift persists the live copy as the new baseline", () => {
+    const f = fixture();
+    const paths = installDriftingVendor(f);
+
+    const result = success(run(f, acceptVendorDrift("vendored")));
+
+    expect(result.changed).toBe(true);
+    expect(readFileSync(join(paths.baseline, "SKILL.md"), "utf8")).toBe("live\n");
+    const manifest = JSON.parse(readFileSync(join(f.host, "skills.manifest.json"), "utf8"));
+    expect(manifest.skills.vendored.contentHash).toBe(contentHash(paths.live));
+  });
+
+  test("restoring vendor drift replaces the live copy with the repo baseline", () => {
+    const f = fixture();
+    const paths = installDriftingVendor(f);
+
+    success(run(f, restoreVendorDrift("vendored")));
+
+    expect(readFileSync(join(paths.live, "SKILL.md"), "utf8")).toBe("baseline\n");
   });
 
   test("successful link persists one project link and creates every target", () => {

@@ -7,6 +7,8 @@ import { contentHash } from "./hash.ts";
 import { alignStateWithManifest, getSkill, ManifestStore } from "./manifest.ts";
 import { HostRepo } from "./paths.ts";
 import { apply, observeAndPlan } from "./reconcile.ts";
+import { canonicalLockEntry, ensureHostSkillLock, loadHostSkillLock, restoreHostSkillLock, saveHostSkillLock } from "./skillLock.ts";
+import type { SkillLockEntry } from "./skillLock.ts";
 import { runSkillsAdd } from "./update.ts";
 
 export interface SkillsAddResult {
@@ -86,7 +88,10 @@ export const addSkillFromSource = Effect.fn("SkillsAdd.addSkillFromSource")(func
   }
 
   const previousManifest = manifest;
+  const previousLock = yield* loadHostSkillLock();
+  const ensuredLock = yield* ensureHostSkillLock(manifest);
   let adoption: Adoption | undefined;
+  let lockEntry: SkillLockEntry | undefined;
   let path: string;
   if (unindexed?.origin === "local" || unindexed?.origin === "vendor") {
     const meta = decodeSkill(
@@ -102,10 +107,14 @@ export const addSkillFromSource = Effect.fn("SkillsAdd.addSkillFromSource")(func
     );
     manifest = withManifestSkill(manifest, name, meta);
     path = meta.path;
+    if (meta.origin === "vendor" && candidate.lock) {
+      lockEntry = canonicalLockEntry(candidate.lock, candidate.lockEntry, meta.vendoredAt === null ? undefined : formatUtc(meta.vendoredAt));
+    }
   } else {
     adoption = yield* adoptSkill(manifest, candidate);
     manifest = adoption.manifest;
     path = adoption.meta.path;
+    lockEntry = adoption.lockEntry;
   }
 
   let manifestWritten = false;
@@ -114,6 +123,7 @@ export const addSkillFromSource = Effect.fn("SkillsAdd.addSkillFromSource")(func
     yield* store.saveManifest(manifest);
     manifestWritten = true;
     yield* store.saveState(state);
+    yield* saveHostSkillLock(lockEntry ? { ...ensuredLock.entries, [name]: lockEntry } : ensuredLock.entries);
   }).pipe(
     Effect.onError(() =>
       Effect.gen(function* () {
@@ -125,6 +135,7 @@ export const addSkillFromSource = Effect.fn("SkillsAdd.addSkillFromSource")(func
           );
         }
         if (restored && adoption) rollbackAdoption(adoption);
+        yield* restoreHostSkillLock(previousLock).pipe(Effect.ignore);
       }),
     ),
   );

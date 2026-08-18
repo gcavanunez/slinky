@@ -3,9 +3,9 @@ import { join } from "node:path";
 import { Effect, Schema } from "effect";
 import { formatUtc, getSkill, nowUtc, OperationFailed, Skill, withManifestSkill } from "../domain/model.ts";
 import type { Manifest, SkillLockDecodeError } from "../domain/model.ts";
-import { readSkillLock, upstreamFromLock } from "./adopt.ts";
 import { contentHash } from "./hash.ts";
 import { HostRepo, Paths } from "./paths.ts";
+import { readSkillLockFile, upstreamFromLock } from "./skillLock.ts";
 
 const decodeSkill = Schema.decodeUnknownSync(Skill);
 
@@ -15,8 +15,12 @@ export interface VendorAcceptResult {
   readonly warning?: SkillLockDecodeError;
 }
 
+export interface VendorAcceptOptions {
+  readonly refreshProvenance?: boolean;
+}
+
 /** Accept the live global copy of a vendored skill into the repo. */
-export const vendorAccept = Effect.fn("Vendor.accept")(function* (manifest: Manifest, name: string) {
+export const vendorAccept = Effect.fn("Vendor.accept")(function* (manifest: Manifest, name: string, options: VendorAcceptOptions = {}) {
   const paths = yield* Paths;
   const { repo } = yield* HostRepo;
 
@@ -37,15 +41,15 @@ export const vendorAccept = Effect.fn("Vendor.accept")(function* (manifest: Mani
   rmSync(dest, { recursive: true, force: true });
   cpSync(live, dest, { recursive: true });
 
-  const lock = yield* readSkillLock();
+  const lock = options.refreshProvenance ? readSkillLockFile(paths.skillLock) : undefined;
   const next = decodeSkill({
     ...meta,
     contentHash: contentHash(dest),
     vendoredAt: formatUtc(nowUtc()),
-    upstream: lock.skills[name] ? upstreamFromLock(lock.skills[name]) : meta.upstream,
+    upstream: lock?.skills[name] ? upstreamFromLock(lock.skills[name]) : meta.upstream,
   });
   const nextManifest = withManifestSkill(manifest, name, next);
-  const accepted: VendorAcceptResult = lock.warning === undefined ? { manifest: nextManifest, changed: true } : { manifest: nextManifest, changed: true, warning: lock.warning };
+  const accepted: VendorAcceptResult = lock?.warning === undefined ? { manifest: nextManifest, changed: true } : { manifest: nextManifest, changed: true, warning: lock.warning };
   return accepted;
 });
 
