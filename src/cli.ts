@@ -1035,7 +1035,7 @@ const saveCommand = Command.make(
           catch: (error) => new ExternalToolError({ tool: "git", message: `could not back up Git index: ${errorDetail(error)}` }),
         });
         const commit = yield* Effect.gen(function* () {
-          yield* runGit(repo, ["add", "--all", "--", ...pathspec]);
+          yield* runGit(repo, ["add", "--intent-to-add", "--", ".skill-lock.json", "skills.manifest.json", ...currentFiles]);
           return yield* runGit(repo, ["commit", "--only", "-m", commitMessage, "--", ...pathspec]);
         }).pipe(
           Effect.catch((commitError) =>
