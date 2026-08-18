@@ -19,6 +19,7 @@ import { colors, createMarkdownSyntax } from "./theme.ts";
 import { clamp, fileTreeRows, fitCell, markdownBody, markdownHeadingLines, printable, searchMatchLines, singleLinePaste, windowOf } from "./util.ts";
 import { scrollRowForLine } from "./docNav.ts";
 import type { DocRenderable } from "./docNav.ts";
+import { copySelection, handleSelectionKey } from "./clipboard.ts";
 import {
   diffSkill,
   expandHome,
@@ -284,6 +285,7 @@ export function App() {
       setFlash((cur) => (cur?.text === snapshot ? null : cur));
     }, 3000);
   };
+  const copyActiveSelection = () => copySelection(renderer, { notify });
 
   const reportAction = (label: string, res: ActionResult) => {
     if (res.warnings.length > 0) notify(`${label}: ${res.warnings[0]}`, true);
@@ -809,6 +811,7 @@ export function App() {
 
   useKeyboard((key) => {
     if (key.eventType === "release" || (key.repeated === true && key.name === "g")) return;
+    if (handleSelectionKey(renderer, key, { notify })) return;
     if (handleFilter(key)) return;
     if (handleFind(key)) return;
     if (handleOverlay(key)) return;
@@ -1029,7 +1032,7 @@ export function App() {
   );
 
   return (
-    <box width="100%" height="100%" flexDirection="column">
+    <box width="100%" height="100%" flexDirection="column" onMouseUp={copyActiveSelection}>
       {header}
       {tabs}
       {filterBar}
@@ -1288,8 +1291,9 @@ function HelpModal({ cols }: { cols: number }) {
     ["p", "profile picker (exact-set apply)"],
     ["/", "filter lists; in the document pane, search the document"],
     ["r", "reload catalog"],
-    ["q / ctrl-c", "quit"],
-    ["mouse", "click rows/tabs/panels; wheel scrolls lists and document"],
+    ["drag / ctrl-c", "copy selected text to clipboard"],
+    ["q / ctrl-c", "quit (ctrl-c only without a text selection)"],
+    ["mouse", "click rows/tabs/panels; drag text to copy; wheel scrolls"],
   ];
   return (
     <Modal title="help" width={76} cols={cols}>

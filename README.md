@@ -210,6 +210,8 @@ The TUI skill list shows project placement separately from global availability: 
 
 The TUI opens on the top-level `available here` tab, which hides unavailable catalog entries and shows only skills discoverable globally or through the current project's `.agents` and `.claude` directories. Press `2` for the complete catalog and `1` to return to available skills.
 
+Drag across text to copy it automatically. `Ctrl-C` copies an active text selection and otherwise keeps its normal quit behavior. Clipboard writes use terminal OSC52 plus native platform utilities when available.
+
 ## Update Workflow
 
 `slinky update` keeps the committed vendor baseline separate from the live copy updated by `npx skills`:
