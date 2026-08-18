@@ -150,9 +150,14 @@ Inspect or resolve a specific drift directly:
 
 ```bash
 slinky diff <skill> --patch
+slinky diff <skill...> --hunk
+slinky diff <skill...> --delta
+slinky diff <skill...> --pager hunk
 slinky vendor <skill>   # accept live content as the new baseline
 slinky restore <skill>  # restore live content from the current baseline
 ```
+
+Pager mode opens one clean patch stream for all selected drifting skills. Use `--hunk` for interactive review, `--delta` for terminal rendering, or the equivalent `--pager hunk|delta` form.
 
 Do not use `update --yes` unless the user explicitly wants every detected change accepted without individual review. Host baseline changes must be committed or stashed before updating.
 

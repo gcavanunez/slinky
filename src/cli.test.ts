@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Schema } from "effect";
 import { Manifest } from "./domain/model.ts";
+import { contentHash } from "./lib/hash.ts";
 
 const roots: string[] = [];
 const decodeEncodedManifest = Schema.decodeUnknownSync(Schema.toEncoded(Manifest));
@@ -82,6 +83,40 @@ function initializeGitFixture(host: string, home: string): void {
     const result = runGit(host, args);
     if (result.exitCode !== 0) throw new Error(result.stderr.toString());
   }
+}
+
+function addDriftingVendor(f: ReturnType<typeof fixture>, name = "drifting"): void {
+  const baseline = join(f.host, "vendor", "acme", name);
+  const live = join(f.home, ".agents", "skills", name);
+  mkdirSync(baseline, { recursive: true });
+  mkdirSync(live, { recursive: true });
+  writeFileSync(join(baseline, "SKILL.md"), `# baseline ${name}\n`);
+  writeFileSync(join(live, "SKILL.md"), `# live ${name}\n`);
+  const manifest = JSON.parse(readFileSync(join(f.host, "skills.manifest.json"), "utf8"));
+  manifest.skills[name] = {
+    origin: "vendor",
+    path: `vendor/acme/${name}`,
+    contentHash: contentHash(baseline),
+    upstream: { kind: "unknown", note: "test" },
+    vendoredAt: null,
+  };
+  writeFileSync(join(f.host, "skills.manifest.json"), `${JSON.stringify(manifest)}\n`);
+}
+
+function recordingPager(root: string, name: "hunk" | "delta"): string {
+  const bin = join(root, `bin-${name}`);
+  mkdirSync(bin, { recursive: true });
+  const executable = join(bin, name);
+  writeFileSync(
+    executable,
+    `#!/bin/sh
+printf '%s\n' "$@" > "$HOME/${name}-args"
+printf 'x' >> "$HOME/${name}-invocations"
+cat > "$HOME/${name}-input"
+`,
+  );
+  chmodSync(executable, 0o755);
+  return bin;
 }
 
 function stateAt(path: string): {
@@ -262,6 +297,89 @@ describe("save", () => {
     expect(result.stderr.toString()).toContain("catalog verification problem");
     expect(result.stdout.toString()).toContain("repo copy contains symlink(s): outside.txt");
     expect(runGit(f.host, ["log", "-1", "--pretty=%s"]).stdout.toString().trim()).toBe("Initial catalog");
+  });
+});
+
+describe("diff pagers", () => {
+  test.each([
+    { flags: ["--hunk"], pager: "hunk" as const, args: ["patch", "-"] },
+    { flags: ["--delta"], pager: "delta" as const, args: [] },
+    { flags: ["--pager", "hunk"], pager: "hunk" as const, args: ["patch", "-"] },
+    { flags: ["--pager", "delta"], pager: "delta" as const, args: [] },
+  ])("streams a clean patch through $pager with $flags", ({ flags, pager, args }) => {
+    const f = fixture();
+    addDriftingVendor(f);
+    const bin = recordingPager(f.root, pager);
+
+    const result = runCli(f.host, f.home, ["diff", "drifting", ...flags], { PATH: `${bin}:${process.env.PATH ?? ""}` });
+
+    if (result.exitCode !== 0) throw new Error(`${result.stderr.toString()}\n${result.stdout.toString()}`);
+    expect(
+      readFileSync(join(f.home, `${pager}-args`), "utf8")
+        .trim()
+        .split("\n")
+        .filter(Boolean),
+    ).toEqual([...args]);
+    const input = readFileSync(join(f.home, `${pager}-input`), "utf8");
+    expect(input).toContain("diff -ruN");
+    expect(input).toContain("-# baseline");
+    expect(input).toContain("+# live");
+    expect(result.stdout.toString()).not.toContain("differs from repo baseline");
+  });
+
+  test("opens one Hunk session containing every selected drifting skill", () => {
+    const f = fixture();
+    addDriftingVendor(f, "first");
+    addDriftingVendor(f, "second");
+    const bin = recordingPager(f.root, "hunk");
+
+    const result = runCli(f.host, f.home, ["diff", "first", "second", "--hunk"], { PATH: `${bin}:${process.env.PATH ?? ""}` });
+
+    if (result.exitCode !== 0) throw new Error(`${result.stderr.toString()}\n${result.stdout.toString()}`);
+    expect(readFileSync(join(f.home, "hunk-invocations"), "utf8")).toBe("x");
+    const input = readFileSync(join(f.home, "hunk-input"), "utf8");
+    expect(input).toContain("-# baseline first");
+    expect(input).toContain("+# live first");
+    expect(input).toContain("-# baseline second");
+    expect(input).toContain("+# live second");
+  });
+
+  test("rejects conflicting pager flags", () => {
+    const f = fixture();
+    addDriftingVendor(f);
+
+    const result = runCli(f.host, f.home, ["diff", "drifting", "--hunk", "--delta"]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain("choose only one diff pager");
+  });
+
+  test("reports a missing pager as an external tool failure", () => {
+    const f = fixture();
+    addDriftingVendor(f);
+    const diff = Bun.which("diff");
+    if (!diff) throw new Error("diff is required for this test");
+    symlinkSync(diff, join(f.root, "diff"));
+
+    const result = runCli(f.host, f.home, ["diff", "drifting", "--hunk"], { PATH: f.root });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain('Executable not found in $PATH: "hunk"');
+  });
+
+  test("does not open the pager when diff generation fails", () => {
+    const f = fixture();
+    addDriftingVendor(f);
+    const bin = recordingPager(f.root, "hunk");
+    const diff = join(bin, "diff");
+    writeFileSync(diff, "#!/bin/sh\nprintf 'broken diff' >&2\nexit 2\n");
+    chmodSync(diff, 0o755);
+
+    const result = runCli(f.host, f.home, ["diff", "drifting", "--hunk"], { PATH: `${bin}:${process.env.PATH ?? ""}` });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain("broken diff");
+    expect(existsSync(join(f.home, "hunk-invocations"))).toBe(false);
   });
 });
 

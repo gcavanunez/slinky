@@ -222,9 +222,13 @@ Use these commands when reviewing drift directly:
 
 ```bash
 slinky diff frontend-design --patch
+slinky diff frontend-design --hunk
+slinky diff frontend-design --delta
 slinky vendor frontend-design   # accept the live copy
 slinky restore frontend-design  # reject and restore the baseline
 ```
+
+`--patch` prints a unified patch. `--hunk` opens an interactive review in Hunk, while `--delta` streams the patch through Delta. The generic `--pager hunk|delta` form is equivalent. Pager mode sends one clean patch stream for all selected drifting skills and requires the selected executable on `PATH`.
 
 ## Safety
 
@@ -252,7 +256,7 @@ slinky profile apply <name> [--force]
 slinky update --check
 slinky update [skill...] [--yes]
 slinky skills add <source> [--skill <name>...]
-slinky diff [skill] [--patch]
+slinky diff [skill...] [--patch|--hunk|--delta|--pager <hunk|delta>]
 slinky vendor <skill...>
 slinky restore <skill...>
 slinky rehash <local-skill...>

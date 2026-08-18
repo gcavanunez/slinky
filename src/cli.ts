@@ -14,7 +14,8 @@ import { backupGlobalDirs } from "./lib/bootstrap.ts";
 import { applyProfile, linkProjectSkill, setSkillsEnabled, unlinkProjectSkill } from "./lib/catalogActions.ts";
 import type { ActionResult } from "./lib/catalogActions.ts";
 import { contentHash, findSymlinks } from "./lib/hash.ts";
-import { diffDirs, isClean, unifiedDiff } from "./lib/diff.ts";
+import { diffDirs, isClean, pagePatch, unifiedDiff } from "./lib/diff.ts";
+import type { DiffPager } from "./lib/diff.ts";
 import { layerRepo } from "./lib/layers.ts";
 import { checkLink } from "./lib/linker.ts";
 import { alignStateWithManifest, getSkill, isSkillEnabled, Manifest, ManifestStore, withManifestSkill } from "./lib/manifest.ts";
@@ -134,9 +135,16 @@ const cmdStatus = Effect.fn("Cli.status")(function* (manifest: Manifest, state: 
   }
 });
 
-const cmdDiff = Effect.fn("Cli.diff")(function* (manifest: Manifest, names: ReadonlyArray<string>, patch: boolean) {
+interface DiffOptions {
+  readonly patch: boolean;
+  readonly pager?: DiffPager;
+}
+
+const cmdDiff = Effect.fn("Cli.diff")(function* (manifest: Manifest, names: ReadonlyArray<string>, options: DiffOptions) {
   const paths = yield* Paths;
   const { repo } = yield* HostRepo;
+  const pager = options.pager;
+  const patches: string[] = [];
   const targets =
     names.length > 0
       ? names
@@ -163,13 +171,29 @@ const cmdDiff = Effect.fn("Cli.diff")(function* (manifest: Manifest, names: Read
       continue;
     }
     dirty++;
-    console.log(c.bold(`${name}: ${c.yellow("differs from repo baseline")}`));
-    for (const f of d.added) console.log(c.green(`  + ${f}`));
-    for (const f of d.removed) console.log(c.red(`  - ${f}`));
-    for (const f of d.modified) console.log(c.yellow(`  ~ ${f}`));
-    if (patch) console.log(unifiedDiff(repoPath, live));
+    const rendered =
+      options.patch || pager
+        ? yield* Effect.try({
+            try: () => unifiedDiff(repoPath, live),
+            catch: (error) => new ExternalToolError({ tool: "diff", message: errorDetail(error) }),
+          })
+        : "";
+    if (pager) {
+      patches.push(rendered);
+    } else {
+      console.log(c.bold(`${name}: ${c.yellow("differs from repo baseline")}`));
+      for (const f of d.added) console.log(c.green(`  + ${f}`));
+      for (const f of d.removed) console.log(c.red(`  - ${f}`));
+      for (const f of d.modified) console.log(c.yellow(`  ~ ${f}`));
+      if (options.patch) console.log(rendered);
+    }
   }
-  if (names.length === 0) {
+  if (pager && patches.length > 0) {
+    yield* Effect.try({
+      try: () => pagePatch(patches.join("\n"), pager),
+      catch: (error) => new ExternalToolError({ tool: pager, message: errorDetail(error) }),
+    });
+  } else if (names.length === 0) {
     console.log(dirty === 0 ? c.green("\nall vendored skills in sync") : c.yellow(`\n${dirty} skill(s) differ`));
   }
 });
@@ -624,12 +648,21 @@ const diffCommand = Command.make(
   {
     names: Argument.string("skill").pipe(Argument.variadic()),
     patch: Flag.boolean("patch").pipe(Flag.withDescription("Print the full unified diff")),
+    pager: Flag.choice("pager", ["hunk", "delta"] as const).pipe(Flag.optional, Flag.withDescription("Open the patch in hunk or delta")),
+    hunk: Flag.boolean("hunk").pipe(Flag.withDescription("Open the patch in Hunk")),
+    delta: Flag.boolean("delta").pipe(Flag.withDescription("Open the patch in Delta")),
   },
-  ({ names, patch }) =>
+  ({ names, patch, pager, hunk, delta }) =>
     withRepo(
       Effect.gen(function* () {
+        const requested: DiffPager[] = [];
+        if (Option.isSome(pager)) requested.push(pager.value);
+        if (hunk) requested.push("hunk");
+        if (delta) requested.push("delta");
+        const selected = [...new Set(requested)];
+        if (selected.length > 1) return yield* bail("choose only one diff pager: --hunk, --delta, or --pager");
         const { manifest } = yield* loadHostState;
-        yield* cmdDiff(manifest, names, patch);
+        yield* cmdDiff(manifest, names, { patch, pager: selected[0] });
       }),
     ),
 ).pipe(Command.withDescription("Repo baseline vs live global copy (vendor skills)"));
