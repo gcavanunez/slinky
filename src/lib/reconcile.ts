@@ -1,5 +1,5 @@
-import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { Effect, Match } from "effect";
 import { isSkillEnabled } from "../domain/model.ts";
 import { contentHash } from "./hash.ts";
@@ -10,7 +10,7 @@ export type LiveKind = "missing" | "symlink" | "broken-symlink" | "dir" | "file"
 
 export interface LiveEntry {
   kind: LiveKind;
-  /** Fully resolved symlink target (absolute), when kind === "symlink". */
+  /** Direct symlink target as an absolute path, including for broken symlinks. */
   resolved?: string;
 }
 
@@ -22,9 +22,9 @@ export interface Observation {
 export type Action =
   | { type: "ensure-agents-symlink"; skill: string; target: string }
   | { type: "restore-agents-dir"; skill: string; from: string }
-  | { type: "remove-agents"; skill: string; verifyHash?: string }
+  | { type: "remove-agents"; skill: string; verifyHash?: string; expectedTarget?: string }
   | { type: "ensure-claude-symlink"; skill: string }
-  | { type: "remove-claude"; skill: string };
+  | { type: "remove-claude"; skill: string; expectedTarget?: string };
 
 export interface Plan {
   actions: Action[];
@@ -38,10 +38,12 @@ function observeDir(dir: string): Record<string, LiveEntry> {
     const p = join(dir, name);
     const st = lstatSync(p);
     if (st.isSymbolicLink()) {
+      const resolved = resolve(dir, readlinkSync(p));
       try {
-        out[name] = { kind: "symlink", resolved: realpathSync(p) };
+        realpathSync(p);
+        out[name] = { kind: "symlink", resolved };
       } catch {
-        out[name] = { kind: "broken-symlink" };
+        out[name] = { kind: "broken-symlink", resolved };
       }
     } else if (st.isDirectory()) {
       out[name] = { kind: "dir" };
@@ -148,7 +150,8 @@ export function planSync(manifest: Manifest, state: State, obs: Observation, opt
       } else if (live.kind === "dir") {
         actions.push({ type: "remove-agents", skill: name, verifyHash: meta.contentHash });
       } else if (live.kind === "file") {
-        warnings.push(`${name}: unexpected plain file in ~/.agents/skills; not touching it`);
+        if (force) actions.push({ type: "remove-agents", skill: name });
+        else warnings.push(`${name}: unexpected plain file in ~/.agents/skills; not touching it without --force`);
       }
     }
   }
@@ -183,17 +186,38 @@ function applySync(agentsSkills: string, claudeSkills: string, plan: Plan, opts:
 
   // force: true tolerates missing paths; real removal failures surface as defects.
   const rmIfExists = (p: string) => rmSync(p, { recursive: true, force: true });
+  const stillExpectedSymlink = (path: string, target: string): boolean => {
+    try {
+      return lstatSync(path).isSymbolicLink() && resolve(dirname(path), readlinkSync(path)) === target;
+    } catch {
+      return false;
+    }
+  };
 
   const applyAction = Match.type<Action>().pipe(
     Match.discriminator("type")("remove-claude", (a) => {
-      rmIfExists(join(claudeSkills, a.skill));
+      const claudePath = join(claudeSkills, a.skill);
+      if (skipped.some((message) => message.startsWith(`${a.skill}:`))) {
+        skipped.push(`${a.skill}: skipped claude removal after canonical removal was refused`);
+        return;
+      }
+      if (a.expectedTarget && !stillExpectedSymlink(claudePath, a.expectedTarget) && !opts.force) {
+        skipped.push(`${a.skill}: claude symlink changed after preflight; not removing`);
+        return;
+      }
+      rmIfExists(claudePath);
       done.push(`removed ~/.claude/skills/${a.skill}`);
     }),
     Match.discriminator("type")("remove-agents", (a) => {
       const agentsPath = join(agentsSkills, a.skill);
-      if (a.verifyHash && lstatSync(agentsPath).isDirectory()) {
-        const live = contentHash(agentsPath);
-        if (live !== a.verifyHash && !opts.force) {
+      if (a.expectedTarget && !stillExpectedSymlink(agentsPath, a.expectedTarget) && !opts.force) {
+        skipped.push(`${a.skill}: agents symlink changed after preflight; not removing`);
+        return;
+      }
+      if (a.verifyHash && !opts.force) {
+        if (!existsSync(agentsPath)) return;
+        const stat = lstatSync(agentsPath);
+        if (!stat.isDirectory() || stat.isSymbolicLink() || contentHash(agentsPath) !== a.verifyHash) {
           skipped.push(`${a.skill}: live dir drifted from repo copy; run \`diff ${a.skill}\` then \`vendor ${a.skill}\` or use --force`);
           return;
         }

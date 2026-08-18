@@ -261,7 +261,13 @@ export function withProfile(manifest: Manifest, state: State, name: string): Sta
 }
 
 export function alignStateWithManifest(manifest: Manifest, state: State): State {
-  return state.activeProfile === null ? state : withProfile(manifest, state, state.activeProfile);
+  const activeProfile = state.activeProfile !== null && Object.hasOwn(manifest.profiles, state.activeProfile) ? state.activeProfile : null;
+  const filtered = decodeState({
+    ...state,
+    activeProfile,
+    disabledSkills: state.disabledSkills.filter((name) => Object.hasOwn(manifest.skills, name)),
+  });
+  return activeProfile === null ? filtered : withProfile(manifest, filtered, activeProfile);
 }
 
 export function withProjectLink(state: State, link: ProjectLink): State {

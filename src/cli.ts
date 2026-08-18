@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, lstatSync, readFileSync, realpathSync, renameSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
+import { copyFileSync, existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join, posix, resolve } from "node:path";
 import { BunServices } from "@effect/platform-bun";
 import { Cause, Effect, Exit, Layer, Option, Schema } from "effect";
@@ -18,19 +18,25 @@ import { diffDirs, isClean, pagePatch, unifiedDiff } from "./lib/diff.ts";
 import type { DiffPager } from "./lib/diff.ts";
 import { layerRepo } from "./lib/layers.ts";
 import { checkLink } from "./lib/linker.ts";
-import { alignStateWithManifest, getSkill, isSkillEnabled, Manifest, ManifestStore, withManifestSkill } from "./lib/manifest.ts";
+import { alignStateWithManifest, getSkill, isSkillEnabled, Manifest, ManifestStore, withManifestSkill, withSkillEnabled } from "./lib/manifest.ts";
 import type { ManifestStoreInterface, State } from "./lib/manifest.ts";
 import { HostRepo, isRepoDir, Paths, RepoNotFoundError } from "./lib/paths.ts";
-import { apply, observe, observeAndPlan } from "./lib/reconcile.ts";
+import { apply, observe, observeAndPlan, planSync } from "./lib/reconcile.ts";
+import type { Plan } from "./lib/reconcile.ts";
 import {
   absorbGlobalSkillLockEntries,
   ensureHostSkillLock,
   loadHostSkillLock,
+  loadSkillLockFile,
+  pruneGlobalSkillLockEntries,
+  readSkillLockFile,
   restoreHostSkillLock,
   saveHostSkillLock,
   seedGlobalSkillLock,
-  validateHostSkillLock,
+  skillLockVersion,
+  validateSkillLock,
 } from "./lib/skillLock.ts";
+import type { SkillLockEntry } from "./lib/skillLock.ts";
 import { vendorAccept, vendorRestore } from "./lib/vendorOps.ts";
 import { baselineDirty, checkUpstream, detectChanges, runSkillsAdd, runSkillsUpdate } from "./lib/update.ts";
 import type { GitHub } from "./lib/update.ts";
@@ -93,6 +99,24 @@ const runSyncCmd = Effect.fn("Cli.runSync")(function* (manifest: Manifest, state
   for (const d of res.done) console.log(`  ${d}`);
   for (const s of res.skipped) console.log(c.yellow(`  skipped: ${s}`));
   if (res.done.length === 0 && res.skipped.length === 0) console.log("in sync; nothing to do");
+});
+
+const seedVerifiedGlobalProvenance = Effect.fn("Cli.seedVerifiedGlobalProvenance")(function* (manifest: Manifest) {
+  const paths = yield* Paths;
+  const names = yield* Effect.try({
+    try: () =>
+      Object.entries(manifest.skills)
+        .filter(([name, skill]) => {
+          if (skill.origin !== "vendor") return false;
+          const live = join(paths.agentsSkills, name);
+          if (!existsSync(live)) return false;
+          const stat = lstatSync(live);
+          return stat.isDirectory() && !stat.isSymbolicLink() && contentHash(live) === skill.contentHash;
+        })
+        .map(([name]) => name),
+    catch: (error) => new OperationFailed({ message: `could not verify live vendor provenance: ${errorDetail(error)}` }),
+  });
+  if (names.length > 0) yield* seedGlobalSkillLock(manifest, names);
 });
 
 function renderAction(result: ActionResult): void {
@@ -207,8 +231,7 @@ const cmdDiff = Effect.fn("Cli.diff")(function* (manifest: Manifest, names: Read
   }
 });
 
-const cmdVerify = Effect.fn("Cli.verify")(function* (manifest: Manifest) {
-  const { repo } = yield* HostRepo;
+const verifyCatalogAt = Effect.fn("Cli.verifyCatalogAt")(function* (repo: string, catalogLock: string, manifest: Manifest, requireLock = false) {
   let bad = 0;
   for (const [name, meta] of Object.entries(manifest.skills)) {
     const repoPath = join(repo, meta.path);
@@ -235,12 +258,22 @@ const cmdVerify = Effect.fn("Cli.verify")(function* (manifest: Manifest) {
       bad++;
     }
   }
-  for (const issue of yield* validateHostSkillLock(manifest)) {
+  const lock = yield* loadSkillLockFile(catalogLock);
+  if (requireLock && !lock.exists) {
+    console.log(c.yellow(".skill-lock.json is missing; run `slinky save` to create and commit it"));
+    bad++;
+  }
+  for (const issue of validateSkillLock(manifest, lock)) {
     console.log(c.yellow(issue));
     bad++;
   }
   if (bad > 0) return yield* bail(`${bad} catalog verification problem(s)`);
   console.log(c.green(`all ${Object.keys(manifest.skills).length} skills verified`));
+});
+
+const cmdVerify = Effect.fn("Cli.verify")(function* (manifest: Manifest) {
+  const { repo, catalogLock } = yield* HostRepo;
+  yield* verifyCatalogAt(repo, catalogLock, manifest);
 });
 
 const runGit = Effect.fn("Cli.runGit")(function* (repo: string, args: ReadonlyArray<string>) {
@@ -257,6 +290,186 @@ const runGit = Effect.fn("Cli.runGit")(function* (repo: string, args: ReadonlyAr
     return yield* Effect.fail(new ExternalToolError({ tool: "git", message: detail || `git exited with ${result.status ?? "unknown"}` }));
   }
   return { stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+});
+
+const assertGitRoot = Effect.fn("Cli.assertGitRoot")(function* (repo: string) {
+  const topLevel = yield* runGit(repo, ["rev-parse", "--show-toplevel"]);
+  if (realpathSync(topLevel.stdout.trim()) !== realpathSync(repo)) {
+    return yield* bail(`skills host must be a Git repository root: ${repo}`);
+  }
+});
+
+const requireCleanWorktree = Effect.fn("Cli.requireCleanWorktree")(function* (repo: string) {
+  const status = yield* runGit(repo, ["status", "--porcelain", "--untracked-files=normal"]);
+  if (status.stdout.trim()) return yield* bail("skills host worktree must be clean; save, commit, or remove local changes first");
+});
+
+const requireUpstream = Effect.fn("Cli.requireUpstream")(function* (repo: string) {
+  const branch = (yield* runGit(repo, ["branch", "--show-current"])).stdout.trim();
+  if (!branch) return yield* bail("skills host is on a detached HEAD; check out a branch first");
+  const upstream = yield* runGit(repo, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]).pipe(
+    Effect.map((result) => result.stdout.trim()),
+    Effect.mapError(() => new OperationFailed({ message: `branch ${branch} has no upstream; configure one with git push --set-upstream` })),
+  );
+  const remote = (yield* runGit(repo, ["config", "--get", `branch.${branch}.remote`])).stdout.trim();
+  const mergeRef = (yield* runGit(repo, ["config", "--get", `branch.${branch}.merge`])).stdout.trim();
+  return { branch, upstream, remote, mergeRef };
+});
+
+function renderGitOutput(result: { readonly stdout: string; readonly stderr: string }): void {
+  const output = `${result.stdout}${result.stderr}`.trim();
+  if (output) console.log(output);
+}
+
+interface PullOptions extends SyncOptions {
+  readonly dryRun?: boolean;
+}
+
+const prepareRetirement = Effect.fn("Cli.prepareRetirement")(function* (manifest: Manifest, state: State, removed: ReadonlyArray<string>, options: PullOptions) {
+  if (removed.length === 0) return { actions: [], warnings: [] } satisfies Plan;
+  const paths = yield* Paths;
+  const { repo } = yield* HostRepo;
+  const observation = yield* observe();
+  const removalState = removed.reduce((current, name) => withSkillEnabled(current, name, false), state);
+  const fullPlan = planSync(manifest, removalState, observation, { repo, claudeSkills: paths.claudeSkills, force: options.force ?? false });
+  const names = new Set(removed);
+  const retirementRank = (action: Plan["actions"][number]): number => (action.type === "remove-agents" ? 0 : action.type === "remove-claude" ? 1 : 2);
+  const plan = {
+    actions: fullPlan.actions
+      .filter((action) => names.has(action.skill))
+      .map((action) => {
+        if (action.type === "remove-agents") {
+          const live = observation.agents[action.skill];
+          return live?.kind === "symlink" || live?.kind === "broken-symlink" ? { ...action, expectedTarget: live.resolved } : action;
+        }
+        if (action.type === "remove-claude") {
+          const live = observation.claude[action.skill];
+          return live?.kind === "symlink" || live?.kind === "broken-symlink" ? { ...action, expectedTarget: live.resolved } : action;
+        }
+        return action;
+      })
+      .sort((left, right) => retirementRank(left) - retirementRank(right)),
+    warnings: fullPlan.warnings.filter((warning) => removed.some((name) => warning.startsWith(`${name}:`))),
+  };
+  if (plan.warnings.length > 0) return yield* bail(`cannot retire unowned skill paths: ${plan.warnings.join("; ")}`);
+
+  for (const name of removed) {
+    const meta = manifest.skills[name];
+    if (!meta) continue;
+    const live = observation.agents[name];
+    if (live?.kind === "dir" && contentHash(join(paths.agentsSkills, name)) !== meta.contentHash && !options.force) {
+      return yield* bail(`${name}: live dir drifted from repo copy; run \`diff ${name}\` then \`vendor ${name}\` or use --force`);
+    }
+    const repoPath = resolve(repo, meta.path);
+    if ((live?.kind === "symlink" || live?.kind === "broken-symlink") && live.resolved !== repoPath && !options.force) {
+      return yield* bail(`${name}: ~/.agents/skills symlink is not owned by this catalog; inspect it or use --force`);
+    }
+    const claude = observation.claude[name];
+    const expectedClaudeTarget = resolve(paths.agentsSkills, name);
+    if ((claude?.kind === "symlink" || claude?.kind === "broken-symlink") && claude.resolved !== expectedClaudeTarget && !options.force) {
+      return yield* bail(`${name}: ~/.claude/skills symlink targets ${claude.resolved ?? "a missing path"}, expected ${expectedClaudeTarget}; inspect it or use --force`);
+    }
+  }
+  if (options.dryRun) {
+    for (const action of plan.actions) console.log(`would ${action.type} retired skill ${action.skill}`);
+  }
+  return plan;
+});
+
+const applyRetirement = Effect.fn("Cli.applyRetirement")(function* (
+  manifest: Manifest,
+  oldLockEntries: Readonly<Record<string, SkillLockEntry>>,
+  removed: ReadonlyArray<string>,
+  plan: Plan,
+  options: PullOptions,
+) {
+  const result = yield* apply(plan, { force: options.force ?? false });
+  for (const done of result.done) console.log(`  ${done}`);
+  if (result.skipped.length > 0) {
+    return yield* bail(`retired skill cleanup changed after preflight: ${result.skipped.join("; ")}`);
+  }
+  yield* pruneGlobalSkillLockEntries(manifest, oldLockEntries, removed, options.force ?? false);
+});
+
+const loadIncomingCatalog = Effect.fn("Cli.loadIncomingCatalog")(function* (repo: string, upstream: string) {
+  return yield* Effect.scoped(
+    Effect.gen(function* () {
+      const checkout = yield* Effect.acquireRelease(
+        Effect.gen(function* () {
+          const directory = mkdtempSync(join(tmpdir(), "slinky-pull-"));
+          yield* runGit(repo, ["worktree", "add", "--detach", directory, upstream]).pipe(
+            Effect.onError(() => Effect.sync(() => rmSync(directory, { recursive: true, force: true }))),
+          );
+          return directory;
+        }),
+        (directory) =>
+          Effect.gen(function* () {
+            yield* runGit(repo, ["worktree", "remove", "--force", directory]).pipe(Effect.ignore);
+            yield* Effect.sync(() => rmSync(directory, { recursive: true, force: true }));
+          }),
+      );
+      const manifest = yield* Effect.try({
+        try: () => Schema.decodeUnknownSync(Manifest)(JSON.parse(readFileSync(join(checkout, "skills.manifest.json"), "utf8")), { errors: "all", onExcessProperty: "error" }),
+        catch: (error) => new OperationFailed({ message: `incoming skills.manifest.json is invalid: ${errorDetail(error)}` }),
+      });
+      yield* verifyCatalogAt(checkout, join(checkout, ".skill-lock.json"), manifest, true);
+      return manifest;
+    }),
+  );
+});
+
+const pullAndSync = Effect.fn("Cli.pullAndSync")(function* (options: PullOptions) {
+  const { repo } = yield* HostRepo;
+  const { store, manifest: currentManifest, state: currentState } = yield* loadHostState;
+  const paths = yield* Paths;
+  yield* assertGitRoot(repo);
+  yield* requireCleanWorktree(repo);
+  yield* cmdVerify(currentManifest);
+  const currentHostLock = yield* loadHostSkillLock();
+  if (!currentHostLock.exists) return yield* bail(".skill-lock.json is missing; run `slinky save` before pulling");
+  const globalLock = readSkillLockFile(paths.skillLock);
+  if (globalLock.warning) return yield* Effect.fail(globalLock.warning);
+  if (globalLock.exists && globalLock.version !== skillLockVersion) {
+    return yield* bail(`machine skill lock version ${globalLock.version} is not supported for writes`);
+  }
+  const { upstream, remote, mergeRef } = yield* requireUpstream(repo);
+  renderGitOutput(yield* runGit(repo, ["fetch", remote, mergeRef]));
+  const upstreamCommit = (yield* runGit(repo, ["rev-parse", "FETCH_HEAD^{commit}"])).stdout.trim();
+
+  const counts = (yield* runGit(repo, ["rev-list", "--left-right", "--count", `HEAD...${upstreamCommit}`])).stdout.trim().split(/\s+/);
+  const ahead = Number.parseInt(counts[0] ?? "", 10);
+  const behind = Number.parseInt(counts[1] ?? "", 10);
+  if (!Number.isFinite(ahead) || !Number.isFinite(behind)) return yield* bail(`could not compare HEAD with ${upstream}`);
+  if (ahead > 0 && behind > 0) return yield* bail(`local branch and ${upstream} have diverged; resolve them with Git before pulling`);
+
+  if (behind === 0) {
+    console.log(ahead > 0 ? `already up to date from ${upstream}; local branch is ${ahead} commit(s) ahead` : `already up to date with ${upstream}`);
+    if (options.dryRun) return;
+    yield* store.saveState(currentState);
+    yield* runSyncCmd(currentManifest, currentState, options);
+    yield* seedVerifiedGlobalProvenance(currentManifest);
+    return;
+  }
+
+  const incomingManifest = yield* loadIncomingCatalog(repo, upstreamCommit);
+  const removed = Object.keys(currentManifest.skills).filter((name) => !Object.hasOwn(incomingManifest.skills, name));
+  const linked = currentState.projectLinks.filter((link) => removed.includes(link.skill));
+  if (linked.length > 0) {
+    const commands = linked.map((link) => `slinky unlink ${link.skill} ${link.project}`).join("; ");
+    return yield* bail(`incoming catalog removes linked skills; unlink them before pulling: ${commands}`);
+  }
+
+  console.log(options.dryRun ? `would fast-forward ${behind} commit(s) from ${upstream}` : `fast-forwarding ${behind} commit(s) from ${upstream}`);
+  const retirement = yield* prepareRetirement(currentManifest, currentState, removed, options);
+  if (options.dryRun) return;
+
+  renderGitOutput(yield* runGit(repo, ["merge", "--ff-only", upstreamCommit]));
+  const manifest = yield* store.loadManifest();
+  const state = alignStateWithManifest(manifest, currentState);
+  yield* applyRetirement(currentManifest, currentHostLock.entries, removed, retirement, options);
+  yield* store.saveState(state);
+  yield* runSyncCmd(manifest, state, options);
+  yield* seedVerifiedGlobalProvenance(manifest);
 });
 
 /**
@@ -383,6 +596,7 @@ const dropRedundantStaging = Effect.fn("Cli.dropRedundantStaging")(function* (po
 
 const dryRunFlag = Flag.boolean("dry-run").pipe(Flag.withDescription("Print prospective actions without changing anything"));
 const forceFlag = Flag.boolean("force").pipe(Flag.withDescription("Override drift and safety guards"));
+const pullFlag = Flag.boolean("pull").pipe(Flag.withDescription("Fetch and fast-forward the configured upstream before syncing"));
 const skillsArg = Argument.string("skill").pipe(Argument.variadic({ min: 1 }));
 
 // --- commands -------------------------------------------------------------
@@ -539,14 +753,38 @@ const statusCommand = Command.make("status", {}, () =>
   ),
 ).pipe(Command.withDescription("Catalog: origin, enabled, live state, claude link"));
 
-const syncCommand = Command.make("sync", { dryRun: dryRunFlag, force: forceFlag }, (input) =>
+const syncCommand = Command.make("sync", { dryRun: dryRunFlag, force: forceFlag, pull: pullFlag }, (input) =>
   withRepo(
     Effect.gen(function* () {
+      if (input.pull) return yield* pullAndSync(input);
       const { manifest, state } = yield* loadHostState;
       yield* runSyncCmd(manifest, state, input);
     }),
   ),
-).pipe(Command.withDescription("Reconcile global dirs with manifest + state"));
+).pipe(Command.withDescription("Reconcile global dirs with manifest + state, optionally after a fast-forward pull"));
+
+const pullCommand = Command.make("pull", { dryRun: dryRunFlag, force: forceFlag }, (input) => withRepo(pullAndSync(input))).pipe(
+  Command.withDescription("Fast-forward the catalog from its upstream, align local state, and sync"),
+);
+
+const pushCommand = Command.make("push", { dryRun: dryRunFlag }, ({ dryRun }) =>
+  withRepo(
+    Effect.gen(function* () {
+      const { repo } = yield* HostRepo;
+      yield* loadHostState;
+      yield* assertGitRoot(repo);
+      yield* requireCleanWorktree(repo);
+      const { upstream, remote, mergeRef } = yield* requireUpstream(repo);
+      const headCommit = (yield* runGit(repo, ["rev-parse", "HEAD^{commit}"])).stdout.trim();
+      yield* loadIncomingCatalog(repo, headCommit);
+      const hostLock = yield* loadHostSkillLock();
+      if (!hostLock.exists) return yield* bail(".skill-lock.json is missing; run `slinky save` before pushing");
+      const args = dryRun ? ["push", "--dry-run", remote, `${headCommit}:${mergeRef}`] : ["push", remote, `${headCommit}:${mergeRef}`];
+      renderGitOutput(yield* runGit(repo, args));
+      console.log(dryRun ? `push to ${upstream} would succeed` : `pushed catalog to ${upstream}`);
+    }),
+  ),
+).pipe(Command.withDescription("Push the clean, verified catalog branch to its configured upstream"));
 
 const makeToggleCommand = (name: "enable" | "disable", description: string) =>
   Command.make(name, { skills: skillsArg, dryRun: dryRunFlag, force: forceFlag }, ({ skills, dryRun, force }) =>
@@ -1075,6 +1313,10 @@ const verifyCommand = Command.make("verify", {}, () =>
   ),
 ).pipe(Command.withDescription("Hash-check every skill against the manifest"));
 
+const versionCommand = Command.make("version", {}, () => Effect.sync(() => console.log(`slinky ${packageJson.version}`))).pipe(
+  Command.withDescription("Print the installed Slinky version"),
+);
+
 const root = Command.make("slinky").pipe(
   Command.withDescription("Slinky skill manager (no command opens the TUI)"),
   Command.withSubcommands([
@@ -1083,6 +1325,8 @@ const root = Command.make("slinky").pipe(
     bootstrapCommand,
     statusCommand,
     syncCommand,
+    pullCommand,
+    pushCommand,
     enableCommand,
     disableCommand,
     profileCommand,
@@ -1098,6 +1342,7 @@ const root = Command.make("slinky").pipe(
     adoptCommand,
     saveCommand,
     verifyCommand,
+    versionCommand,
   ]),
 );
 

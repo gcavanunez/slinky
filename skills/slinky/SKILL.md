@@ -193,6 +193,21 @@ slinky save --message "Add project skills"
 
 `save` rejects unindexed `skills/` or `vendor/` directories, verifies manifest hashes and vendor provenance, and commits only `.skill-lock.json`, the manifest, and indexed skill directories. It does not include staged paths elsewhere in the host. On an older host, `save` creates the committed lock from manifest provenance and compatible machine metadata.
 
+Share that commit through the branch's configured upstream:
+
+```bash
+slinky push
+```
+
+On another machine, fast-forward and reconcile with either form:
+
+```bash
+slinky pull
+slinky sync --pull
+```
+
+These commands require a clean host worktree and a configured upstream. Pull is fast-forward only and preserves local disabled skills, project links, recent projects, and profiles that still exist. It blocks removal of a skill that has a local project link. Use `pull --dry-run` or `sync --pull --dry-run` to fetch and inspect whether an update would be applied without changing the checked-out catalog or global skills.
+
 ## Project Links
 
 Copy a skill into a project by default:
@@ -244,6 +259,7 @@ Bootstrap backs up global skill directories before mutation. If it reports forei
 - Do not delete vendor drift before showing `slinky diff` or explaining the restore/vendor choice.
 - Keep the skills host under Git and review its diff after adoption or accepted updates.
 - Use `slinky save` after review when the catalog changes should become the new committed baseline.
+- Use `slinky push` after saving, and `slinky pull` on other machines; do not replace these safety checks with force-pushes or merge pulls.
 - Keep `.local/` ignored because state can contain absolute project paths and machine-specific preferences.
 - If Slinky reports an unowned file or directory, stop and inspect it rather than forcing replacement automatically.
 
@@ -251,6 +267,7 @@ Bootstrap backs up global skill directories before mutation. If it reports forei
 
 Tell the user:
 
+- The installed version from `slinky version` when diagnosing behavior that may differ between releases.
 - Which host and skills were affected.
 - Which commands were run.
 - Whether changes were previewed or applied.

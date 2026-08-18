@@ -1,5 +1,6 @@
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { Effect, Schema } from "effect";
 import { errorDetail, formatUtc, HttpUrl, isMissingFile, OperationFailed, PortableRelativePath, SkillLockDecodeError, UpstreamTreeHash } from "../domain/model.ts";
 import type { Manifest, Skill } from "../domain/model.ts";
@@ -208,13 +209,18 @@ function writeLockFile(path: string, root: SkillLockEntry): void {
 
 export const loadHostSkillLock = Effect.fn("SkillLock.loadHost")(function* () {
   const { catalogLock } = yield* HostRepo;
-  const snapshot = readSkillLockFile(catalogLock);
+  return yield* loadSkillLockFile(catalogLock);
+});
+
+export const loadSkillLockFile = Effect.fn("SkillLock.loadFile")(function* (path: string) {
+  const snapshot = readSkillLockFile(path);
   if (snapshot.warning) return yield* Effect.fail(snapshot.warning);
   if (Object.keys(snapshot.entries).length !== Object.keys(snapshot.skills).length) {
-    return yield* Effect.fail(new SkillLockDecodeError(catalogLock, "decode", "host lock contains an unsupported or malformed vendor entry"));
+    return yield* Effect.fail(new SkillLockDecodeError(path, "decode", "host lock contains an unsupported or malformed vendor entry"));
   }
-  if (snapshot.exists && snapshot.version < skillLockVersion) {
-    return yield* Effect.fail(new SkillLockDecodeError(catalogLock, "decode", `lock version ${snapshot.version} is older than ${skillLockVersion}`));
+  if (snapshot.exists && snapshot.version !== skillLockVersion) {
+    const relation = snapshot.version < skillLockVersion ? "older" : "newer";
+    return yield* Effect.fail(new SkillLockDecodeError(path, "decode", `lock version ${snapshot.version} is ${relation} than supported version ${skillLockVersion}`));
   }
   return snapshot;
 });
@@ -268,6 +274,10 @@ export const ensureHostSkillLock = Effect.fn("SkillLock.ensureHost")(function* (
 
 export const validateHostSkillLock = Effect.fn("SkillLock.validateHost")(function* (manifest: Manifest) {
   const host = yield* loadHostSkillLock();
+  return validateSkillLock(manifest, host);
+});
+
+export function validateSkillLock(manifest: Manifest, host: SkillLockSnapshot): string[] {
   const issues: string[] = [];
   for (const [name, skill] of Object.entries(manifest.skills)) {
     if (skill.origin !== "vendor" || skill.upstream.kind === "unknown") continue;
@@ -279,7 +289,7 @@ export const validateHostSkillLock = Effect.fn("SkillLock.validateHost")(functio
     if (manifest.skills[name]?.origin !== "vendor") issues.push(`${name}: lock entry is not a manifest vendor skill`);
   }
   return issues;
-});
+}
 
 function mergeGlobalRoot(snapshot: SkillLockSnapshot, entries: Readonly<Record<string, SkillLockEntry>>): SkillLockEntry {
   return {
@@ -308,8 +318,40 @@ export const seedGlobalSkillLock = Effect.fn("SkillLock.seedGlobal")(function* (
   }
   const global = readSkillLockFile(paths.skillLock);
   if (global.warning) return yield* Effect.fail(global.warning);
+  if (global.exists && global.version !== skillLockVersion) {
+    return yield* Effect.fail(new SkillLockDecodeError(paths.skillLock, "decode", `lock version ${global.version} is not supported for writes`));
+  }
   yield* Effect.try({
     try: () => writeLockFile(paths.skillLock, mergeGlobalRoot(global, entries)),
+    catch: (error) => (error instanceof SkillLockDecodeError ? error : new SkillLockDecodeError(paths.skillLock, "write", errorDetail(error))),
+  });
+});
+
+/** Remove retired provenance only when the machine entry belongs to the old catalog skill. */
+export const pruneGlobalSkillLockEntries = Effect.fn("SkillLock.pruneGlobal")(function* (
+  manifest: Manifest,
+  oldEntries: Readonly<Record<string, SkillLockEntry>>,
+  names: ReadonlyArray<string>,
+  force = false,
+) {
+  if (names.length === 0) return;
+  const paths = yield* Paths;
+  const global = readSkillLockFile(paths.skillLock);
+  if (global.warning) return yield* Effect.fail(global.warning);
+  if (global.exists && global.version !== skillLockVersion) {
+    return yield* Effect.fail(new SkillLockDecodeError(paths.skillLock, "decode", `lock version ${global.version} is not supported for writes`));
+  }
+  const retired = new Set(names);
+  const entries = Object.fromEntries(
+    Object.entries(global.entries).filter(([name, entry]) => {
+      if (!retired.has(name)) return true;
+      const skill = manifest.skills[name];
+      return !skill || skill.origin !== "vendor" || !(force ? sourceMatches(entry, skill) : isDeepStrictEqual(entry, oldEntries[name]));
+    }),
+  );
+  if (Object.keys(entries).length === Object.keys(global.entries).length) return;
+  yield* Effect.try({
+    try: () => writeLockFile(paths.skillLock, { ...global.root, version: skillLockVersion, skills: sortedEntries(entries) }),
     catch: (error) => (error instanceof SkillLockDecodeError ? error : new SkillLockDecodeError(paths.skillLock, "write", errorDetail(error))),
   });
 });

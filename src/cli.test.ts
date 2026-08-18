@@ -3,6 +3,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Schema } from "effect";
+import packageJson from "../package.json" with { type: "json" };
 import { Manifest } from "./domain/model.ts";
 import { contentHash } from "./lib/hash.ts";
 
@@ -85,6 +86,34 @@ function initializeGitFixture(host: string, home: string): void {
   }
 }
 
+function attachRemote(f: ReturnType<typeof fixture>): string {
+  const saved = runCli(f.host, f.home, ["save"], gitIdentity);
+  if (saved.exitCode !== 0) throw new Error(`${saved.stderr.toString()}\n${saved.stdout.toString()}`);
+  const remote = join(f.root, "remote.git");
+  for (const args of [
+    ["init", "--bare", "-q", remote],
+    ["-C", f.host, "branch", "-M", "main"],
+    ["-C", f.host, "remote", "add", "origin", remote],
+    ["-C", f.host, "push", "-qu", "origin", "main"],
+    ["-C", remote, "symbolic-ref", "HEAD", "refs/heads/main"],
+  ]) {
+    const result = Bun.spawnSync(["git", ...args], { env: { ...process.env, ...gitIdentity } });
+    if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+  }
+  return remote;
+}
+
+function removeBarAndPublish(f: ReturnType<typeof fixture>): void {
+  const manifest = JSON.parse(readFileSync(join(f.host, "skills.manifest.json"), "utf8"));
+  delete manifest.skills.bar;
+  writeFileSync(join(f.host, "skills.manifest.json"), `${JSON.stringify(manifest)}\n`);
+  rmSync(join(f.host, "skills", "bar"), { recursive: true });
+  const saved = runCli(f.host, f.home, ["save"], gitIdentity);
+  if (saved.exitCode !== 0) throw new Error(`${saved.stderr.toString()}\n${saved.stdout.toString()}`);
+  const pushed = runGit(f.host, ["push"]);
+  if (pushed.exitCode !== 0) throw new Error(pushed.stderr.toString());
+}
+
 function addDriftingVendor(f: ReturnType<typeof fixture>, name = "drifting"): void {
   const baseline = join(f.host, "vendor", "acme", name);
   const live = join(f.home, ".agents", "skills", name);
@@ -132,6 +161,18 @@ afterEach(() => {
 });
 
 describe("CLI options", () => {
+  test("reports the installed version as a command and a flag", () => {
+    const f = fixture();
+
+    const command = runCli(f.host, f.home, ["version"]);
+    const flag = runCli(f.host, f.home, ["--version"]);
+
+    expect(command.exitCode).toBe(0);
+    expect(command.stdout.toString().trim()).toBe(`slinky ${packageJson.version}`);
+    expect(flag.exitCode).toBe(0);
+    expect(flag.stdout.toString()).toContain(packageJson.version);
+  });
+
   test("rejects a misspelled dry-run option instead of syncing", () => {
     const host = mkdtempSync(join(tmpdir(), "slinky-cli-"));
     roots.push(host);
@@ -313,6 +354,153 @@ describe("save", () => {
     expect(result.stderr.toString()).toContain("catalog verification problem");
     expect(result.stdout.toString()).toContain("repo copy contains symlink(s): outside.txt");
     expect(runGit(f.host, ["log", "-1", "--pretty=%s"]).stdout.toString().trim()).toBe("Initial catalog");
+  });
+});
+
+describe("remote catalog sync", () => {
+  test("push publishes the saved branch and refuses a dirty worktree", () => {
+    const f = fixture();
+    initializeGitFixture(f.host, f.home);
+    const remote = attachRemote(f);
+    writeFileSync(join(f.host, "skills", "foo", "SKILL.md"), "# foo v2\n");
+    expect(runCli(f.host, f.home, ["rehash", "foo"]).exitCode).toBe(0);
+    expect(runCli(f.host, f.home, ["save"], gitIdentity).exitCode).toBe(0);
+    expect(runGit(f.host, ["config", "remote.pushDefault", "not-the-upstream"]).exitCode).toBe(0);
+
+    const pushed = runCli(f.host, f.home, ["push"]);
+
+    if (pushed.exitCode !== 0) throw new Error(`${pushed.stderr.toString()}\n${pushed.stdout.toString()}`);
+    expect(runGit(remote, ["rev-parse", "refs/heads/main"]).stdout.toString()).toEqual(runGit(f.host, ["rev-parse", "HEAD"]).stdout.toString());
+    writeFileSync(join(f.host, "notes.txt"), "not saved\n");
+    const dirty = runCli(f.host, f.home, ["push"]);
+    expect(dirty.exitCode).toBe(1);
+    expect(dirty.stderr.toString()).toContain("worktree must be clean");
+  });
+
+  test("pull fast-forwards, removes retired globals, and preserves local state", () => {
+    const publisher = fixture();
+    initializeGitFixture(publisher.host, publisher.home);
+    const remote = attachRemote(publisher);
+    const subscriber = join(publisher.root, "subscriber");
+    const subscriberHome = join(publisher.root, "subscriber-home");
+    expect(Bun.spawnSync(["git", "clone", "-q", remote, subscriber]).exitCode).toBe(0);
+    mkdirSync(join(subscriber, ".local"), { recursive: true });
+    mkdirSync(subscriberHome, { recursive: true });
+    writeFileSync(
+      join(subscriber, ".local", "state.json"),
+      `${JSON.stringify({ version: 1, disabledSkills: ["foo"], activeProfile: null, projectLinks: [], recentProjects: [] })}\n`,
+    );
+    expect(runCli(subscriber, subscriberHome, ["sync"]).exitCode).toBe(0);
+    expect(lstatSync(join(subscriberHome, ".agents", "skills", "bar")).isSymbolicLink()).toBe(true);
+
+    const manifest = JSON.parse(readFileSync(join(publisher.host, "skills.manifest.json"), "utf8"));
+    delete manifest.skills.bar;
+    mkdirSync(join(publisher.host, "skills", "baz"), { recursive: true });
+    writeFileSync(join(publisher.host, "skills", "baz", "SKILL.md"), "# baz\n");
+    manifest.skills.baz = { origin: "local", path: "skills/baz", contentHash: "0".repeat(64) };
+    writeFileSync(join(publisher.host, "skills.manifest.json"), `${JSON.stringify(manifest)}\n`);
+    rmSync(join(publisher.host, "skills", "bar"), { recursive: true });
+    expect(runCli(publisher.host, publisher.home, ["rehash", "baz"]).exitCode).toBe(0);
+    expect(runCli(publisher.host, publisher.home, ["save"], gitIdentity).exitCode).toBe(0);
+    expect(runGit(publisher.host, ["push"]).exitCode).toBe(0);
+
+    const pulled = runCli(subscriber, subscriberHome, ["pull"]);
+
+    if (pulled.exitCode !== 0) throw new Error(`${pulled.stderr.toString()}\n${pulled.stdout.toString()}`);
+    expect(runGit(subscriber, ["rev-parse", "HEAD"]).stdout.toString()).toEqual(runGit(publisher.host, ["rev-parse", "HEAD"]).stdout.toString());
+    expect(() => lstatSync(join(subscriberHome, ".agents", "skills", "bar"))).toThrow();
+    expect(lstatSync(join(subscriberHome, ".agents", "skills", "baz")).isSymbolicLink()).toBe(true);
+    expect(stateAt(join(subscriber, ".local", "state.json")).disabledSkills).toEqual(["foo"]);
+  });
+
+  test("sync --pull uses the remote workflow while plain sync stays offline", () => {
+    const f = fixture();
+    initializeGitFixture(f.host, f.home);
+    attachRemote(f);
+
+    const result = runCli(f.host, f.home, ["sync", "--pull", "--dry-run"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("already up to date");
+    expect(runGit(f.host, ["status", "--porcelain"]).stdout.toString()).toBe("");
+  });
+
+  test("pull refuses divergent local and upstream branches", () => {
+    const publisher = fixture();
+    initializeGitFixture(publisher.host, publisher.home);
+    const remote = attachRemote(publisher);
+    const subscriber = join(publisher.root, "diverged-subscriber");
+    const subscriberHome = join(publisher.root, "diverged-home");
+    expect(Bun.spawnSync(["git", "clone", "-q", remote, subscriber]).exitCode).toBe(0);
+    mkdirSync(subscriberHome, { recursive: true });
+    writeFileSync(join(publisher.host, "publisher-note.txt"), "publisher\n");
+    expect(runGit(publisher.host, ["add", "publisher-note.txt"]).exitCode).toBe(0);
+    expect(runGit(publisher.host, ["commit", "-qm", "Publisher commit"]).exitCode).toBe(0);
+    expect(runGit(publisher.host, ["push"]).exitCode).toBe(0);
+    writeFileSync(join(subscriber, "subscriber-note.txt"), "subscriber\n");
+    expect(runGit(subscriber, ["add", "subscriber-note.txt"]).exitCode).toBe(0);
+    expect(runGit(subscriber, ["commit", "-qm", "Subscriber commit"]).exitCode).toBe(0);
+    const before = runGit(subscriber, ["rev-parse", "HEAD"]).stdout.toString();
+
+    const pulled = runCli(subscriber, subscriberHome, ["pull"]);
+
+    expect(pulled.exitCode).toBe(1);
+    expect(pulled.stderr.toString()).toContain("have diverged");
+    expect(runGit(subscriber, ["rev-parse", "HEAD"]).stdout.toString()).toBe(before);
+  });
+
+  test("pull refuses a retired skill with a machine-local project link", () => {
+    const publisher = fixture();
+    initializeGitFixture(publisher.host, publisher.home);
+    const remote = attachRemote(publisher);
+    const subscriber = join(publisher.root, "linked-subscriber");
+    const subscriberHome = join(publisher.root, "linked-home");
+    const project = join(publisher.root, "linked-project");
+    expect(Bun.spawnSync(["git", "clone", "-q", remote, subscriber]).exitCode).toBe(0);
+    mkdirSync(join(subscriber, ".local"), { recursive: true });
+    mkdirSync(subscriberHome, { recursive: true });
+    mkdirSync(project, { recursive: true });
+    writeFileSync(
+      join(subscriber, ".local", "state.json"),
+      `${JSON.stringify({
+        version: 1,
+        disabledSkills: [],
+        activeProfile: null,
+        projectLinks: [{ mode: "symlink", project, skill: "bar", targets: [".agents/skills/bar"], excludedTargets: [], linkedAt: "2026-08-18T00:00:00.000Z" }],
+        recentProjects: [],
+      })}\n`,
+    );
+    removeBarAndPublish(publisher);
+    const before = runGit(subscriber, ["rev-parse", "HEAD"]).stdout.toString();
+
+    const pulled = runCli(subscriber, subscriberHome, ["pull"]);
+
+    expect(pulled.exitCode).toBe(1);
+    expect(pulled.stderr.toString()).toContain("incoming catalog removes linked skills");
+    expect(runGit(subscriber, ["rev-parse", "HEAD"]).stdout.toString()).toBe(before);
+  });
+
+  test("pull detects retired global drift before changing Git or other globals", () => {
+    const publisher = fixture();
+    initializeGitFixture(publisher.host, publisher.home);
+    const remote = attachRemote(publisher);
+    const subscriber = join(publisher.root, "drift-subscriber");
+    const subscriberHome = join(publisher.root, "drift-home");
+    expect(Bun.spawnSync(["git", "clone", "-q", remote, subscriber]).exitCode).toBe(0);
+    mkdirSync(subscriberHome, { recursive: true });
+    expect(runCli(subscriber, subscriberHome, ["sync"]).exitCode).toBe(0);
+    rmSync(join(subscriberHome, ".agents", "skills", "bar"));
+    mkdirSync(join(subscriberHome, ".agents", "skills", "bar"));
+    writeFileSync(join(subscriberHome, ".agents", "skills", "bar", "SKILL.md"), "# unrelated bar\n");
+    removeBarAndPublish(publisher);
+    const before = runGit(subscriber, ["rev-parse", "HEAD"]).stdout.toString();
+
+    const pulled = runCli(subscriber, subscriberHome, ["pull"]);
+
+    expect(pulled.exitCode).toBe(1);
+    expect(pulled.stderr.toString()).toContain("live dir drifted from repo copy");
+    expect(runGit(subscriber, ["rev-parse", "HEAD"]).stdout.toString()).toBe(before);
+    expect(lstatSync(join(subscriberHome, ".claude", "skills", "bar")).isSymbolicLink()).toBe(true);
   });
 });
 

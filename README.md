@@ -181,6 +181,26 @@ slinky save --message "Add project skills"
 
 `save` refuses unindexed directories under `skills/` or `vendor/`, verifies every manifest content hash and vendor lock entry, and commits only `.skill-lock.json`, `skills.manifest.json`, plus skill directories referenced by the current or committed manifest. Other staged files, including loose files elsewhere under `skills/` or `vendor/`, are left out of the commit. Vendored content is committed verbatim rather than subjected to the host repository's whitespace policy. The default commit message is `Update skills catalog`.
 
+### Share the catalog
+
+Push a saved catalog through the current branch's configured Git upstream:
+
+```bash
+slinky push
+```
+
+On another machine, fast-forward the host and reconcile its global skills in one step:
+
+```bash
+slinky pull
+# Equivalent when sync is already part of the workflow:
+slinky sync --pull
+```
+
+`push` requires a clean worktree and verifies the catalog before running `git push`. `pull` also requires a clean worktree, fetches the configured upstream, and accepts only a fast-forward update. It refuses divergent branches and catalog removals that still have project links on the current machine.
+
+Pulling preserves machine-local state: disabled skills, recent projects, project links, and an active profile that still exists upstream. Removed skills are dropped from local disabled state and removed profiles are deactivated. Retired global copies and machine provenance are pruned only when their content still matches the old committed baseline; drift requires review or an explicit `--force`. `slinky pull --dry-run` and `slinky sync --pull --dry-run` fetch remote refs but do not fast-forward or reconcile files.
+
 ## Project Links
 
 Copy a skill into a project, which is the default:
@@ -254,9 +274,13 @@ In the TUI, author and category rows show a yellow `⚠` when any of their visib
 
 ```bash
 slinky                         # open the terminal UI
+slinky version                 # print the installed version
 slinky status                  # inspect catalog, live state, and Claude visibility
 slinky sync --dry-run          # preview reconciliation
 slinky sync [--force]          # apply reconciliation
+slinky sync --pull [--dry-run] [--force]
+slinky pull [--dry-run] [--force]
+slinky push [--dry-run]
 slinky enable <skill...>
 slinky disable <skill...> [--force]
 slinky profile list

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { ConfigProvider, Effect, Layer } from "effect";
 import type { Manifest } from "../domain/model.ts";
 import { HostRepo, Paths } from "./paths.ts";
-import { absorbGlobalSkillLockEntries, ensureHostSkillLock, readSkillLockFile, seedGlobalSkillLock } from "./skillLock.ts";
+import { absorbGlobalSkillLockEntries, ensureHostSkillLock, pruneGlobalSkillLockEntries, readSkillLockFile, seedGlobalSkillLock } from "./skillLock.ts";
 
 const roots: string[] = [];
 
@@ -124,6 +124,59 @@ describe("committed skill lock", () => {
     expect(firstGlobal.skills.foreign.sourceType).toBe("local");
     expect(firstGlobal.dismissed.notice).toBe(true);
     expect(secondGlobal.lastSelectedAgents).toEqual(["claude-code"]);
+  });
+
+  test("prunes retired catalog provenance without changing foreign skills or preferences", () => {
+    const f = fixture("prune");
+    mkdirSync(join(f.home, ".agents"), { recursive: true });
+    writeFileSync(
+      join(f.home, ".agents", ".skill-lock.json"),
+      `${JSON.stringify({
+        version: 3,
+        skills: {
+          effect: {
+            source: "kitlangton/skills",
+            sourceType: "github",
+            sourceUrl: "https://github.com/kitlangton/skills.git",
+            skillPath: "skills/effect/SKILL.md",
+            skillFolderHash: "b".repeat(40),
+          },
+          foreign: { source: "/tmp/local", sourceType: "local" },
+        },
+        lastSelectedAgents: ["claude-code"],
+      })}\n`,
+    );
+
+    const oldEntries = readSkillLockFile(join(f.home, ".agents", ".skill-lock.json")).entries;
+    run(f, pruneGlobalSkillLockEntries(manifest, oldEntries, ["effect"]));
+
+    const global = JSON.parse(readFileSync(join(f.home, ".agents", ".skill-lock.json"), "utf8"));
+    expect(global.skills.effect).toBeUndefined();
+    expect(global.skills.foreign.sourceType).toBe("local");
+    expect(global.lastSelectedAgents).toEqual(["claude-code"]);
+  });
+
+  test("preserves same-named machine provenance that does not belong to the retired catalog skill", () => {
+    const f = fixture("prune-mismatch");
+    mkdirSync(join(f.home, ".agents"), { recursive: true });
+    writeFileSync(
+      join(f.home, ".agents", ".skill-lock.json"),
+      `${JSON.stringify({ version: 3, skills: { effect: { source: "someone/else", sourceType: "github", skillFolderHash: "c".repeat(40) } } })}\n`,
+    );
+
+    const oldEntries = {
+      effect: {
+        source: "kitlangton/skills",
+        sourceType: "github",
+        sourceUrl: "https://github.com/kitlangton/skills.git",
+        skillPath: "skills/effect/SKILL.md",
+        skillFolderHash: "b".repeat(40),
+      },
+    };
+    run(f, pruneGlobalSkillLockEntries(manifest, oldEntries, ["effect"]));
+
+    const global = JSON.parse(readFileSync(join(f.home, ".agents", ".skill-lock.json"), "utf8"));
+    expect(global.skills.effect.source).toBe("someone/else");
   });
 
   test("absorbs an accepted update before the manifest and host hashes agree", () => {

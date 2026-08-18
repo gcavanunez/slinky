@@ -1,6 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import { DateTime, Schema } from "effect";
-import { Manifest, ProjectLink, State, getSkill, validateState, withManifestSkill, withProfile, withProjectLink, withSkillEnabled, withoutProjectLink } from "./model.ts";
+import {
+  alignStateWithManifest,
+  Manifest,
+  ProjectLink,
+  State,
+  getSkill,
+  validateState,
+  withManifestSkill,
+  withProfile,
+  withProjectLink,
+  withSkillEnabled,
+  withoutProjectLink,
+} from "./model.ts";
 
 const strict = { errors: "all", onExcessProperty: "error" } as const;
 const HASH = "a".repeat(64);
@@ -165,6 +177,21 @@ describe("domain schemas", () => {
     expect(profiled.activeProfile).toBe("work");
     expect(profiled.disabledSkills).toEqual(["bar"]);
     expect(enabled.activeProfile).toBeNull();
+  });
+
+  test("aligns local state after catalog skills and profiles are retired", () => {
+    const manifest = Schema.decodeUnknownSync(Manifest)(manifestInput(), strict);
+    const profiled = withProfile(manifest, Schema.decodeUnknownSync(State)(stateInput(), strict), "work");
+    const reduced = Schema.decodeUnknownSync(Manifest)({
+      ...manifestInput(),
+      skills: { foo: manifestInput().skills.foo },
+      profiles: {},
+    });
+
+    const aligned = alignStateWithManifest(reduced, profiled);
+
+    expect(aligned.activeProfile).toBeNull();
+    expect(aligned.disabledSkills).toEqual([]);
   });
 
   test("transitions validate state that already contains decoded project timestamps", () => {
