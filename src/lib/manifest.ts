@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { Context, Effect, Layer, Option, Schema } from "effect";
-import { emptyState, errorDetail, isMissingFile, Manifest, ManifestFileError, State, StateFileError, validateState } from "../domain/model.ts";
+import { alignStateWithManifest, emptyState, errorDetail, isMissingFile, Manifest, ManifestFileError, State, StateFileError, validateState } from "../domain/model.ts";
 import type { FileOperation } from "../domain/model.ts";
 import { HostRepo } from "./paths.ts";
 
@@ -26,6 +26,7 @@ export {
 
 const strict = { errors: "all", onExcessProperty: "error" } as const;
 const decodeJson = Schema.decodeUnknownSync(Schema.Json);
+const decodeState = Schema.decodeUnknownSync(Schema.toType(State));
 
 type FileErrorClass<E> = new (path: string, operation: FileOperation, detail: string) => E;
 
@@ -101,7 +102,12 @@ export class ManifestStore extends Context.Service<ManifestStore, ManifestStoreI
           if (Option.isNone(raw)) return emptyState();
 
           const input = yield* parseOwnedJson(statePath, raw.value, StateFileError);
-          const state = yield* Schema.decodeUnknownEffect(State)(input, strict).pipe(Effect.mapError((error) => new StateFileError(statePath, "decode", errorDetail(error))));
+          const decoded = yield* Schema.decodeUnknownEffect(State)(input, strict).pipe(Effect.mapError((error) => new StateFileError(statePath, "decode", errorDetail(error))));
+          const filtered = decodeState({
+            ...decoded,
+            disabledSkills: decoded.disabledSkills.filter((name) => Object.hasOwn(manifest.skills, name)),
+          });
+          const state = filtered.activeProfile !== null && Object.hasOwn(manifest.profiles, filtered.activeProfile) ? alignStateWithManifest(manifest, filtered) : filtered;
 
           const issues = validateState(manifest, state);
           if (issues.length > 0) return yield* Effect.fail(new StateFileError(statePath, "decode", issues.join("; ")));

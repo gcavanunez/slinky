@@ -84,7 +84,7 @@ describe("manifest persistence", () => {
     expect(error.operation).toBe("parse");
   });
 
-  test("rejects state references that are not in the manifest", () => {
+  test("drops disabled tombstones for skills removed from the manifest", () => {
     const root = host();
     mkdirSync(join(root, ".local"));
     writeFileSync(
@@ -97,8 +97,36 @@ describe("manifest persistence", () => {
         recentProjects: [],
       })}\n`,
     );
-    const error = failure(run(root, (store) => store.loadManifest().pipe(Effect.flatMap((loaded) => store.loadState(loaded)))));
+    const exit = run(root, (store) => store.loadManifest().pipe(Effect.flatMap((loaded) => store.loadState(loaded))));
 
+    expect(Exit.isSuccess(exit)).toBe(true);
+    if (Exit.isSuccess(exit)) expect(exit.value.disabledSkills).toEqual([]);
+  });
+
+  test("still rejects project links for skills removed from the manifest", () => {
+    const root = host();
+    mkdirSync(join(root, ".local"));
+    writeFileSync(
+      join(root, ".local", "state.json"),
+      `${JSON.stringify({
+        version: 1,
+        disabledSkills: [],
+        activeProfile: null,
+        projectLinks: [
+          {
+            mode: "symlink",
+            project: "/tmp/project",
+            skill: "missing",
+            targets: [".agents/skills/missing"],
+            excludedTargets: [],
+            linkedAt: "2026-07-13T12:00:00.000Z",
+          },
+        ],
+        recentProjects: [],
+      })}\n`,
+    );
+
+    const error = failure(run(root, (store) => store.loadManifest().pipe(Effect.flatMap((loaded) => store.loadState(loaded)))));
     expect(error._tag).toBe("StateFileError");
     expect(error.operation).toBe("decode");
   });
