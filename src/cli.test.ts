@@ -671,6 +671,40 @@ printf '%s\\n' '${lock}' > "$PWD/skills-lock.json"
     expect(Object.keys(JSON.parse(readFileSync(join(f.host, ".skill-lock.json"), "utf8")).skills)).toEqual(["cause", "effect"]);
   });
 
+  test("adopts only global skills installed by the interactive add flow", () => {
+    const f = fixture();
+    const bin = join(f.root, "bin");
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(join(f.home, ".agents", "skills", "preexisting"), { recursive: true });
+    writeFileSync(join(f.home, ".agents", "skills", "preexisting", "SKILL.md"), "# preexisting\n");
+    const lock = JSON.stringify({
+      version: 1,
+      skills: Object.fromEntries(["arena", "unslop"].map((name) => [name, { source: "cursor/plugins", sourceType: "github", computedHash: "c".repeat(64) }])),
+    });
+    writeFileSync(
+      join(bin, "npx"),
+      `#!/bin/sh
+mkdir -p "$HOME/.agents/skills/arena" "$HOME/.agents/skills/unslop"
+printf '%s\n' '# arena' > "$HOME/.agents/skills/arena/SKILL.md"
+printf '%s\n' '# unslop' > "$HOME/.agents/skills/unslop/SKILL.md"
+printf '%s\n' '${lock}' > "$HOME/.agents/.skill-lock.json"
+`,
+    );
+    chmodSync(join(bin, "npx"), 0o755);
+
+    const result = runCli(f.host, f.home, ["skills", "add", "cursor/plugins"], {
+      PATH: `${bin}:${process.env.PATH ?? ""}`,
+    });
+    const manifest = decodeEncodedManifest(JSON.parse(readFileSync(join(f.host, "skills.manifest.json"), "utf8")));
+
+    if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+    expect(manifest.skills.arena?.path).toBe("vendor/cursor/arena");
+    expect(manifest.skills.unslop?.path).toBe("vendor/cursor/unslop");
+    expect(manifest.skills.preexisting).toBeUndefined();
+    expect(existsSync(join(f.home, ".agents", "skills", "arena"))).toBe(true);
+    expect(existsSync(join(f.home, ".agents", "skills", "unslop"))).toBe(true);
+  });
+
   test("adopt absorbs global skills.sh provenance into the host lock", () => {
     const f = fixture();
     mkdirSync(join(f.home, ".agents", "skills", "effect"), { recursive: true });

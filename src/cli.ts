@@ -994,12 +994,14 @@ const skillsAddCommand = Command.make(
     withRepo(
       Effect.gen(function* () {
         const { repo } = yield* HostRepo;
+        const { store, manifest: initial, state: initialState } = yield* loadHostState;
+        const foreignBefore = yield* findForeign(initial);
+        const foreignHashes = new Map(foreignBefore.candidates.map((candidate) => [candidate.name, contentHash(candidate.dir)]));
         // Hand discovery to skills.sh: with no --skill it runs its own picker,
         // so Slinky never has to reimplement listing a remote source.
         console.log(c.bold(`running npx skills add ${source} in ${repo}\n`));
         yield* runSkillsAdd(source, skill, repo);
 
-        const { store, manifest: initial, state: initialState } = yield* loadHostState;
         let manifest = initial;
         let state = initialState;
         const pool = yield* collectAdoptable(manifest);
@@ -1008,8 +1010,11 @@ const skillsAddCommand = Command.make(
           console.log(c.yellow(`warn: ${entry.name}: staged copy differs from ${entry.path}; updating a vendored skill from the inbox is not supported yet (left in place)`));
         }
 
-        // Only consolidate the inbox; unrelated host skills stay for `slinky adopt`.
-        const picked = pool.candidates.filter((cand) => cand.location === "staged");
+        // skills.sh currently ignores `--project` during interactive adds. If the
+        // user chooses Global, include only host copies changed by this invocation.
+        const picked = pool.candidates.filter((candidate) => candidate.location === "staged" || foreignHashes.get(candidate.name) !== contentHash(candidate.dir));
+        const globalPicks = picked.filter((candidate) => candidate.location !== "staged");
+        if (globalPicks.length > 0) console.log(c.dim(`indexing ${globalPicks.length} skill(s) installed globally by skills.sh`));
         yield* dropRedundantStaging(pool);
         if (picked.length === 0) {
           if (pool.redundant.length === 0) console.log("nothing new to index");
