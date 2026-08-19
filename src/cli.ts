@@ -18,11 +18,12 @@ import { diffDirs, isClean, pagePatch, unifiedDiff } from "./lib/diff.ts";
 import type { DiffPager } from "./lib/diff.ts";
 import { layerRepo } from "./lib/layers.ts";
 import { checkLink } from "./lib/linker.ts";
-import { alignStateWithManifest, getSkill, isSkillEnabled, Manifest, ManifestStore, withManifestSkill, withSkillEnabled } from "./lib/manifest.ts";
+import { alignStateWithManifest, getSkill, isSkillEnabled, Manifest, ManifestStore, withSkillEnabled } from "./lib/manifest.ts";
 import type { ManifestStoreInterface, State } from "./lib/manifest.ts";
 import { HostRepo, isRepoDir, Paths, RepoNotFoundError } from "./lib/paths.ts";
 import { apply, observe, observeAndPlan, planSync } from "./lib/reconcile.ts";
 import type { Plan } from "./lib/reconcile.ts";
+import { refreshLocalHashes } from "./lib/rehash.ts";
 import {
   absorbGlobalSkillLockEntries,
   ensureHostSkillLock,
@@ -598,6 +599,7 @@ const dryRunFlag = Flag.boolean("dry-run").pipe(Flag.withDescription("Print pros
 const forceFlag = Flag.boolean("force").pipe(Flag.withDescription("Override drift and safety guards"));
 const pullFlag = Flag.boolean("pull").pipe(Flag.withDescription("Fetch and fast-forward the configured upstream before syncing"));
 const skillsArg = Argument.string("skill").pipe(Argument.variadic({ min: 1 }));
+const optionalSkillsArg = Argument.string("skill").pipe(Argument.variadic({ min: 0 }));
 
 // --- commands -------------------------------------------------------------
 
@@ -957,32 +959,30 @@ const restoreCommand = Command.make("restore", { names: skillsArg }, ({ names })
   ),
 ).pipe(Command.withDescription("Reset live copy from repo baseline (reject update)"));
 
-const rehashCommand = Command.make("rehash", { names: skillsArg }, ({ names }) =>
+const rehashCommand = Command.make("rehash", { names: optionalSkillsArg }, ({ names }) =>
   withRepo(
     Effect.gen(function* () {
       const { store, manifest: initial } = yield* loadHostState;
       const { repo } = yield* HostRepo;
-      let manifest = initial;
-      let changed = false;
+      // Named skills are validated up front so a typo or a vendor skill still fails loudly; with no
+      // names the command sweeps every local skill and stays quiet about the ones already current.
       for (const name of names) {
-        const meta = getSkill(manifest, name);
+        const meta = getSkill(initial, name);
         if (!meta) return yield* bail(`unknown skill: ${name}`);
         if (meta.origin !== "local") return yield* bail(`${name} is a vendor skill; use vendor after reviewing live drift`);
-        const path = join(repo, meta.path);
-        if (!existsSync(path)) return yield* bail(`${name}: repo copy missing at ${meta.path}`);
-        const hash = contentHash(path);
-        if (hash === meta.contentHash) {
-          console.log(`${name}: already current`);
-          continue;
-        }
-        manifest = withManifestSkill(manifest, name, { ...meta, contentHash: hash });
-        changed = true;
-        console.log(`${name}: refreshed manifest hash`);
+        if (!existsSync(join(repo, meta.path))) return yield* bail(`${name}: repo copy missing at ${meta.path}`);
       }
-      if (changed) yield* store.saveManifest(manifest);
+      const { manifest, refreshed } = refreshLocalHashes(initial, repo, names.length > 0 ? names : undefined);
+      if (names.length > 0) {
+        for (const name of names) console.log(refreshed.includes(name) ? `${name}: refreshed manifest hash` : `${name}: already current`);
+      } else {
+        for (const name of refreshed) console.log(`${name}: refreshed manifest hash`);
+        if (refreshed.length === 0) console.log("all local skills already current");
+      }
+      if (refreshed.length > 0) yield* store.saveManifest(manifest);
     }),
   ),
-).pipe(Command.withDescription("Refresh manifest hashes after editing local skills"));
+).pipe(Command.withDescription("Refresh manifest hashes after editing local skills (every stale local skill when none are named)"));
 
 const skillsAddCommand = Command.make(
   "add",
@@ -1243,7 +1243,7 @@ const saveCommand = Command.make(
     withRepo(
       Effect.gen(function* () {
         const store = yield* ManifestStore;
-        const manifest = yield* store.loadManifest();
+        let manifest = yield* store.loadManifest();
         const { repo } = yield* HostRepo;
         const topLevel = yield* runGit(repo, ["rev-parse", "--show-toplevel"]);
         if (realpathSync(topLevel.stdout.trim()) !== realpathSync(repo)) {
@@ -1253,6 +1253,15 @@ const saveCommand = Command.make(
         if (unindexed.length > 0) return yield* bail(`unindexed catalog skill: ${unindexed.map((skill) => skill.path).join(", ")}`);
 
         yield* ensureHostSkillLock(manifest);
+        // Editing a local skill edits the repo copy through its symlink, and save commits that
+        // content either way, so a stale local hash is bookkeeping rather than a reason to stop.
+        // Every other verification failure below still aborts the commit.
+        const refresh = refreshLocalHashes(manifest, repo);
+        if (refresh.refreshed.length > 0) {
+          manifest = refresh.manifest;
+          for (const name of refresh.refreshed) console.log(`${name}: refreshed manifest hash`);
+          yield* store.saveManifest(manifest);
+        }
         yield* cmdVerify(manifest);
         const committedManifest = yield* runGit(repo, ["show", "HEAD:skills.manifest.json"]);
         const previous = yield* Effect.try({

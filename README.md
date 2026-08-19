@@ -135,9 +135,11 @@ The application and catalog stay separate: Slinky owns the tooling, while the ho
 After editing locally authored skill content, refresh its manifest hash and verify the catalog:
 
 ```bash
-slinky rehash my-skill
+slinky rehash my-skill   # or bare `slinky rehash` for every stale local skill
 slinky verify
 ```
+
+`slinky save` refreshes stale local hashes itself and prints each one it touched, so editing a local skill and saving is a single step. Vendor skills are never rehashed: a mismatch there means the committed baseline was hand-edited instead of going through `slinky vendor`, and that still fails verification.
 
 Add an upstream skill through Slinky so skills.sh provenance, the vendored baseline, and the manifest are updated together:
 
@@ -291,7 +293,7 @@ slinky skills add <source> [--skill <name>...]
 slinky diff [skill...] [--patch|--hunk|--delta|--pager <hunk|delta>]
 slinky vendor <skill...>
 slinky restore <skill...>
-slinky rehash <local-skill...>
+slinky rehash [local-skill...]        # no names: every stale local skill
 slinky adopt                          # list staged + host skills not in the repo
 slinky adopt <skill...>|--all [--local] [--owner=<owner>]
 slinky save [-m|--message <message>]

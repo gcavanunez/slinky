@@ -220,6 +220,48 @@ describe("CLI options", () => {
     expect(foo.contentHash).not.toBe("0".repeat(64));
     expect(foo.contentHash).toHaveLength(64);
   });
+
+  test("rehashes every stale local skill when none are named", () => {
+    const f = fixture();
+    addDriftingVendor(f);
+    writeFileSync(join(f.host, "skills", "foo", "SKILL.md"), "# foo v2\n");
+
+    const result = runCli(f.host, f.home, ["rehash"]);
+    const manifest = decodeEncodedManifest(JSON.parse(readFileSync(join(f.host, "skills.manifest.json"), "utf8")));
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("foo: refreshed manifest hash");
+    expect(result.stdout.toString()).toContain("bar: refreshed manifest hash");
+    expect(manifest.skills.foo?.contentHash).toBe(contentHash(join(f.host, "skills", "foo")));
+    expect(manifest.skills.bar?.contentHash).toBe(contentHash(join(f.host, "skills", "bar")));
+  });
+
+  test("leaves a drifting vendor baseline for the vendor command", () => {
+    const f = fixture();
+    addDriftingVendor(f);
+    const before = decodeEncodedManifest(JSON.parse(readFileSync(join(f.host, "skills.manifest.json"), "utf8")));
+    writeFileSync(join(f.host, "vendor", "acme", "drifting", "SKILL.md"), "# hand edited\n");
+
+    const sweep = runCli(f.host, f.home, ["rehash"]);
+    const named = runCli(f.host, f.home, ["rehash", "drifting"]);
+    const manifest = decodeEncodedManifest(JSON.parse(readFileSync(join(f.host, "skills.manifest.json"), "utf8")));
+
+    expect(sweep.exitCode).toBe(0);
+    expect(sweep.stdout.toString()).not.toContain("drifting");
+    expect(named.exitCode).toBe(1);
+    expect(named.stderr.toString()).toContain("drifting is a vendor skill");
+    expect(manifest.skills.drifting?.contentHash).toBe(before.skills.drifting?.contentHash);
+  });
+
+  test("reports when no local skill has drifted", () => {
+    const f = fixture();
+    expect(runCli(f.host, f.home, ["rehash"]).exitCode).toBe(0);
+
+    const result = runCli(f.host, f.home, ["rehash"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("all local skills already current");
+  });
 });
 
 describe("save", () => {
@@ -244,6 +286,39 @@ describe("save", () => {
     expect(committed).not.toContain("notes.txt");
     expect(runGit(f.host, ["diff", "--cached", "--name-only"]).stdout.toString().trim()).toBe("notes.txt");
     expect(runGit(f.host, ["status", "--short", "--", "skills/notes.txt"]).stdout.toString().trim()).toBe("?? skills/notes.txt");
+  });
+
+  test("refreshes stale local hashes itself and reports what it refreshed", () => {
+    const f = fixture();
+    initializeGitFixture(f.host, f.home);
+    writeFileSync(join(f.host, "skills", "foo", "SKILL.md"), "# foo v2\n");
+
+    const result = runCli(f.host, f.home, ["save", "--message", "Update foo"], gitIdentity);
+    const manifest = decodeEncodedManifest(JSON.parse(readFileSync(join(f.host, "skills.manifest.json"), "utf8")));
+
+    if (result.exitCode !== 0) throw new Error(`${result.stderr.toString()}\n${result.stdout.toString()}`);
+    expect(result.stdout.toString()).toContain("foo: refreshed manifest hash");
+    expect(result.stdout.toString()).toContain("saved catalog as");
+    expect(manifest.skills.foo?.contentHash).toBe(contentHash(join(f.host, "skills", "foo")));
+    const committed = runGit(f.host, ["show", "--pretty=", "--name-only", "HEAD"]).stdout.toString().trim().split("\n");
+    expect(committed).toContain("skills.manifest.json");
+    expect(committed).toContain("skills/foo/SKILL.md");
+    expect(runGit(f.host, ["status", "--porcelain"]).stdout.toString().trim()).toBe("");
+  });
+
+  test("still refuses to commit a hand-edited vendor baseline", () => {
+    const f = fixture();
+    addDriftingVendor(f);
+    initializeGitFixture(f.host, f.home);
+    writeFileSync(join(f.host, "skills", "foo", "SKILL.md"), "# foo v2\n");
+    writeFileSync(join(f.host, "vendor", "acme", "drifting", "SKILL.md"), "# hand edited\n");
+
+    const result = runCli(f.host, f.home, ["save"], gitIdentity);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout.toString()).toContain("drifting: repo copy hash mismatch");
+    expect(result.stderr.toString()).toContain("catalog verification problem");
+    expect(runGit(f.host, ["log", "-1", "--pretty=%s"]).stdout.toString().trim()).toBe("Initial catalog");
   });
 
   test("uses the default message and succeeds without changes", () => {
