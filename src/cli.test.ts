@@ -500,29 +500,92 @@ describe("remote catalog sync", () => {
     expect(runGit(f.host, ["status", "--porcelain"]).stdout.toString()).toBe("");
   });
 
-  test("pull refuses divergent local and upstream branches", () => {
+  function divergedSubscriber(label: string) {
     const publisher = fixture();
     initializeGitFixture(publisher.host, publisher.home);
     const remote = attachRemote(publisher);
-    const subscriber = join(publisher.root, "diverged-subscriber");
-    const subscriberHome = join(publisher.root, "diverged-home");
+    const subscriber = join(publisher.root, `${label}-subscriber`);
+    const subscriberHome = join(publisher.root, `${label}-home`);
     expect(Bun.spawnSync(["git", "clone", "-q", remote, subscriber]).exitCode).toBe(0);
+    mkdirSync(join(subscriber, ".local"), { recursive: true });
     mkdirSync(subscriberHome, { recursive: true });
-    writeFileSync(join(publisher.host, "publisher-note.txt"), "publisher\n");
-    expect(runGit(publisher.host, ["add", "publisher-note.txt"]).exitCode).toBe(0);
-    expect(runGit(publisher.host, ["commit", "-qm", "Publisher commit"]).exitCode).toBe(0);
+    return { publisher, subscriber, subscriberHome };
+  }
+
+  function commitFile(repo: string, name: string, body: string, message: string): void {
+    writeFileSync(join(repo, name), body);
+    expect(runGit(repo, ["add", name]).exitCode).toBe(0);
+    expect(runGit(repo, ["commit", "-qm", message]).exitCode).toBe(0);
+  }
+
+  test("pull replays diverged local commits onto the upstream tip", () => {
+    const { publisher, subscriber, subscriberHome } = divergedSubscriber("diverged");
+    commitFile(publisher.host, "publisher-note.txt", "publisher\n", "Publisher commit");
     expect(runGit(publisher.host, ["push"]).exitCode).toBe(0);
-    writeFileSync(join(subscriber, "subscriber-note.txt"), "subscriber\n");
-    expect(runGit(subscriber, ["add", "subscriber-note.txt"]).exitCode).toBe(0);
-    expect(runGit(subscriber, ["commit", "-qm", "Subscriber commit"]).exitCode).toBe(0);
+    const publisherHead = runGit(publisher.host, ["rev-parse", "HEAD"]).stdout.toString().trim();
+    commitFile(subscriber, "subscriber-note.txt", "subscriber\n", "Subscriber commit");
+
+    const pulled = runCli(subscriber, subscriberHome, ["pull"]);
+
+    if (pulled.exitCode !== 0) throw new Error(`${pulled.stderr.toString()}\n${pulled.stdout.toString()}`);
+    expect(pulled.stdout.toString()).toContain("replaying 1 local commit(s)");
+    // The local commit survives, on top of the upstream tip, with no merge commit.
+    expect(runGit(subscriber, ["log", "-1", "--pretty=%s"]).stdout.toString().trim()).toBe("Subscriber commit");
+    expect(runGit(subscriber, ["merge-base", "--is-ancestor", publisherHead, "HEAD"]).exitCode).toBe(0);
+    expect(
+      runGit(subscriber, ["rev-list", "--count", "--merges", `${publisherHead}..HEAD`])
+        .stdout.toString()
+        .trim(),
+    ).toBe("0");
+    expect(existsSync(join(subscriber, "publisher-note.txt"))).toBe(true);
+    expect(existsSync(join(subscriber, "subscriber-note.txt"))).toBe(true);
+    expect(runGit(subscriber, ["status", "--porcelain"]).stdout.toString().trim()).toBe("");
+  }, 30_000);
+
+  test("pull refuses to replay commits that do not merge cleanly", () => {
+    const { publisher, subscriber, subscriberHome } = divergedSubscriber("conflicted");
+    writeFileSync(join(publisher.host, "skills", "foo", "SKILL.md"), "# foo from publisher\n");
+    expect(runCli(publisher.host, publisher.home, ["save"], gitIdentity).exitCode).toBe(0);
+    expect(runGit(publisher.host, ["push"]).exitCode).toBe(0);
+    writeFileSync(join(subscriber, "skills", "foo", "SKILL.md"), "# foo from subscriber\n");
+    expect(runCli(subscriber, subscriberHome, ["save"], gitIdentity).exitCode).toBe(0);
     const before = runGit(subscriber, ["rev-parse", "HEAD"]).stdout.toString();
 
     const pulled = runCli(subscriber, subscriberHome, ["pull"]);
 
     expect(pulled.exitCode).toBe(1);
-    expect(pulled.stderr.toString()).toContain("have diverged");
+    expect(pulled.stderr.toString()).toContain("do not merge cleanly");
+    expect(pulled.stderr.toString()).toContain("skills/foo/SKILL.md");
     expect(runGit(subscriber, ["rev-parse", "HEAD"]).stdout.toString()).toBe(before);
-  });
+    expect(runGit(subscriber, ["status", "--porcelain"]).stdout.toString().trim()).toBe("");
+  }, 30_000);
+
+  test("pull refuses to replay commits when the merge retires a skill", () => {
+    const { publisher, subscriber, subscriberHome } = divergedSubscriber("retiring");
+    removeBarAndPublish(publisher);
+    commitFile(subscriber, "subscriber-note.txt", "subscriber\n", "Subscriber commit");
+    const before = runGit(subscriber, ["rev-parse", "HEAD"]).stdout.toString();
+
+    const pulled = runCli(subscriber, subscriberHome, ["pull"]);
+
+    expect(pulled.exitCode).toBe(1);
+    expect(pulled.stderr.toString()).toContain("retires bar");
+    expect(runGit(subscriber, ["rev-parse", "HEAD"]).stdout.toString()).toBe(before);
+  }, 30_000);
+
+  test("pull --dry-run reports a replay without touching the branch", () => {
+    const { publisher, subscriber, subscriberHome } = divergedSubscriber("dry-diverged");
+    commitFile(publisher.host, "publisher-note.txt", "publisher\n", "Publisher commit");
+    expect(runGit(publisher.host, ["push"]).exitCode).toBe(0);
+    commitFile(subscriber, "subscriber-note.txt", "subscriber\n", "Subscriber commit");
+    const before = runGit(subscriber, ["rev-parse", "HEAD"]).stdout.toString();
+
+    const pulled = runCli(subscriber, subscriberHome, ["pull", "--dry-run"]);
+
+    expect(pulled.exitCode).toBe(0);
+    expect(pulled.stdout.toString()).toContain("would replay 1 local commit(s)");
+    expect(runGit(subscriber, ["rev-parse", "HEAD"]).stdout.toString()).toBe(before);
+  }, 30_000);
 
   test("pull refuses a retired skill with a machine-local project link", () => {
     const publisher = fixture();

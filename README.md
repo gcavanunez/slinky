@@ -199,7 +199,9 @@ slinky pull
 slinky sync --pull
 ```
 
-`push` requires a clean worktree and verifies the catalog before running `git push`. `pull` also requires a clean worktree, fetches the configured upstream, and accepts only a fast-forward update. It refuses divergent branches and catalog removals that still have project links on the current machine.
+`push` requires a clean worktree and verifies the catalog before running `git push`. `pull` also requires a clean worktree, fetches the configured upstream, and updates the branch by fast-forward. It refuses catalog removals that still have project links on the current machine.
+
+Saving on two machines diverges the branch, so `pull` replays local commits onto the upstream tip rather than stopping. It only does so when it can prove the result first: the two sides must merge without conflict, and the merged catalog must not retire a skill. Anything else is reported with the conflicting paths or the retired skill names and left for you to resolve with `git rebase`. A replay that cannot be completed is aborted, leaving the branch where it was found.
 
 Pulling preserves machine-local state: disabled skills, recent projects, project links, and an active profile that still exists upstream. Removed skills are dropped from local disabled state and removed profiles are deactivated. Retired global copies and machine provenance are pruned only when their content still matches the old committed baseline; drift requires review or an explicit `--force`. `slinky pull --dry-run` and `slinky sync --pull --dry-run` fetch remote refs but do not fast-forward or reconcile files.
 

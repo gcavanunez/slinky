@@ -277,7 +277,8 @@ const cmdVerify = Effect.fn("Cli.verify")(function* (manifest: Manifest) {
   yield* verifyCatalogAt(repo, catalogLock, manifest);
 });
 
-const runGit = Effect.fn("Cli.runGit")(function* (repo: string, args: ReadonlyArray<string>) {
+/** Run git without inheriting the caller's repository environment, reporting the exit status. */
+const tryGit = Effect.fn("Cli.tryGit")(function* (repo: string, args: ReadonlyArray<string>) {
   const env = { ...process.env };
   for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX"]) {
     delete env[name];
@@ -286,11 +287,16 @@ const runGit = Effect.fn("Cli.runGit")(function* (repo: string, args: ReadonlyAr
   if (result.error) {
     return yield* Effect.fail(new ExternalToolError({ tool: "git", message: result.error.message }));
   }
+  return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+});
+
+const runGit = Effect.fn("Cli.runGit")(function* (repo: string, args: ReadonlyArray<string>) {
+  const result = yield* tryGit(repo, args);
   if (result.status !== 0) {
     const detail = (result.stderr || result.stdout || "").trim();
     return yield* Effect.fail(new ExternalToolError({ tool: "git", message: detail || `git exited with ${result.status ?? "unknown"}` }));
   }
-  return { stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+  return { stdout: result.stdout, stderr: result.stderr };
 });
 
 const assertGitRoot = Effect.fn("Cli.assertGitRoot")(function* (repo: string) {
@@ -419,14 +425,79 @@ const loadIncomingCatalog = Effect.fn("Cli.loadIncomingCatalog")(function* (repo
   );
 });
 
+/** Paths git reports as conflicted in `merge-tree --write-tree` output, which follows the tree OID. */
+function conflictedPaths(mergeTreeStdout: string): ReadonlyArray<string> {
+  const lines = mergeTreeStdout.split("\n").slice(1);
+  const end = lines.indexOf("");
+  const entries = end === -1 ? lines : lines.slice(0, end);
+  return [...new Set(entries.map((line) => line.split("\t")[1]).filter((path): path is string => path !== undefined))];
+}
+
+/**
+ * Reconcile a diverged branch by replaying local commits onto the upstream tip.
+ *
+ * Two machines both running `slinky save` is the ordinary way this catalog diverges, and the
+ * resulting commits almost always touch disjoint skills, so pull rebases them itself rather than
+ * stopping. It only does so when it can prove the outcome first: `merge-tree` has to merge without
+ * conflict, and the merged catalog must not retire any skill. Retirement needs the preflight the
+ * fast-forward path runs below (global drift guards, project-link blocking, lock pruning), and a
+ * rebase leaves nothing behind for it to act on, so those cases are handed back instead of being
+ * silently skipped.
+ */
+const rebaseDivergence = Effect.fn("Cli.rebaseDivergence")(function* (
+  repo: string,
+  upstream: string,
+  upstreamCommit: string,
+  manifest: Manifest,
+  ahead: number,
+  options: PullOptions,
+) {
+  const manually = `resolve them with Git before pulling: git rebase ${upstream}`;
+  const merge = yield* tryGit(repo, ["merge-tree", "--write-tree", upstreamCommit, "HEAD"]);
+  if (merge.status !== 0) {
+    const paths = conflictedPaths(merge.stdout);
+    const detail = paths.length > 0 ? ` (conflicts in ${paths.join(", ")})` : "";
+    return yield* bail(`local branch and ${upstream} have diverged and do not merge cleanly${detail}; ${manually}`);
+  }
+  const tree = merge.stdout.split("\n")[0]?.trim();
+  if (!tree) return yield* bail(`could not compute a merge of HEAD and ${upstream}; ${manually}`);
+
+  const mergedFile = yield* runGit(repo, ["cat-file", "-p", `${tree}:skills.manifest.json`]);
+  const merged = yield* Effect.try({
+    try: () => Schema.decodeUnknownSync(Manifest)(JSON.parse(mergedFile.stdout)),
+    catch: (error) => new OperationFailed({ message: `merged skills.manifest.json is invalid: ${errorDetail(error)}` }),
+  });
+  const retired = Object.keys(manifest.skills).filter((name) => !Object.hasOwn(merged.skills, name));
+  if (retired.length > 0) {
+    return yield* bail(`local branch and ${upstream} have diverged and the merge retires ${retired.join(", ")}; ${manually}`);
+  }
+
+  if (options.dryRun) {
+    console.log(`would replay ${ahead} local commit(s) onto ${upstream}`);
+    return;
+  }
+  const before = (yield* runGit(repo, ["rev-parse", "HEAD"])).stdout.trim();
+  console.log(`diverged from ${upstream}; replaying ${ahead} local commit(s) onto it`);
+  // merge-tree proves the combined result is clean, not that each commit replays cleanly, so an
+  // interrupted rebase is still possible; abort it so the branch is left exactly as it was found.
+  const rebase = yield* tryGit(repo, ["rebase", upstreamCommit]);
+  if (rebase.status !== 0) {
+    yield* tryGit(repo, ["rebase", "--abort"]).pipe(Effect.ignore);
+    return yield* bail(`could not replay local commits onto ${upstream}; branch left at ${before.slice(0, 7)}; ${manually}`);
+  }
+  console.log(`replayed ${ahead} commit(s); previous branch tip was ${before.slice(0, 7)}`);
+});
+
 const pullAndSync = Effect.fn("Cli.pullAndSync")(function* (options: PullOptions) {
   const { repo } = yield* HostRepo;
-  const { store, manifest: currentManifest, state: currentState } = yield* loadHostState;
+  const { store, manifest: loadedManifest, state: loadedState } = yield* loadHostState;
+  let currentManifest = loadedManifest;
+  let currentState = loadedState;
   const paths = yield* Paths;
   yield* assertGitRoot(repo);
   yield* requireCleanWorktree(repo);
   yield* cmdVerify(currentManifest);
-  const currentHostLock = yield* loadHostSkillLock();
+  let currentHostLock = yield* loadHostSkillLock();
   if (!currentHostLock.exists) return yield* bail(".skill-lock.json is missing; run `slinky save` before pulling");
   const globalLock = readSkillLockFile(paths.skillLock);
   if (globalLock.warning) return yield* Effect.fail(globalLock.warning);
@@ -437,11 +508,25 @@ const pullAndSync = Effect.fn("Cli.pullAndSync")(function* (options: PullOptions
   renderGitOutput(yield* runGit(repo, ["fetch", remote, mergeRef]));
   const upstreamCommit = (yield* runGit(repo, ["rev-parse", "FETCH_HEAD^{commit}"])).stdout.trim();
 
-  const counts = (yield* runGit(repo, ["rev-list", "--left-right", "--count", `HEAD...${upstreamCommit}`])).stdout.trim().split(/\s+/);
-  const ahead = Number.parseInt(counts[0] ?? "", 10);
-  const behind = Number.parseInt(counts[1] ?? "", 10);
-  if (!Number.isFinite(ahead) || !Number.isFinite(behind)) return yield* bail(`could not compare HEAD with ${upstream}`);
-  if (ahead > 0 && behind > 0) return yield* bail(`local branch and ${upstream} have diverged; resolve them with Git before pulling`);
+  const countAgainstUpstream = Effect.fn("Cli.countAgainstUpstream")(function* () {
+    const counts = (yield* runGit(repo, ["rev-list", "--left-right", "--count", `HEAD...${upstreamCommit}`])).stdout.trim().split(/\s+/);
+    const ahead = Number.parseInt(counts[0] ?? "", 10);
+    const behind = Number.parseInt(counts[1] ?? "", 10);
+    if (!Number.isFinite(ahead) || !Number.isFinite(behind)) return yield* bail(`could not compare HEAD with ${upstream}`);
+    return { ahead, behind };
+  });
+
+  let { ahead, behind } = yield* countAgainstUpstream();
+  if (ahead > 0 && behind > 0) {
+    yield* rebaseDivergence(repo, upstream, upstreamCommit, currentManifest, ahead, options);
+    if (options.dryRun) return;
+    // The rebase rewrote the catalog under us; re-read it and re-verify before anything acts on it.
+    currentManifest = yield* store.loadManifest();
+    currentState = alignStateWithManifest(currentManifest, currentState);
+    currentHostLock = yield* loadHostSkillLock();
+    yield* cmdVerify(currentManifest);
+    ({ ahead, behind } = yield* countAgainstUpstream());
+  }
 
   if (behind === 0) {
     console.log(ahead > 0 ? `already up to date from ${upstream}; local branch is ${ahead} commit(s) ahead` : `already up to date with ${upstream}`);
@@ -766,7 +851,7 @@ const syncCommand = Command.make("sync", { dryRun: dryRunFlag, force: forceFlag,
 ).pipe(Command.withDescription("Reconcile global dirs with manifest + state, optionally after a fast-forward pull"));
 
 const pullCommand = Command.make("pull", { dryRun: dryRunFlag, force: forceFlag }, (input) => withRepo(pullAndSync(input))).pipe(
-  Command.withDescription("Fast-forward the catalog from its upstream, align local state, and sync"),
+  Command.withDescription("Fast-forward the catalog from its upstream (replaying diverged local commits), align local state, and sync"),
 );
 
 const pushCommand = Command.make("push", { dryRun: dryRunFlag }, ({ dryRun }) =>
