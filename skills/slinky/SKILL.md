@@ -160,7 +160,7 @@ slinky restore <skill>  # restore live content from the current baseline
 
 Pager mode opens one clean patch stream for all selected drifting skills. Use `--hunk` for interactive review, `--delta` for terminal rendering, or the equivalent `--pager hunk|delta` form.
 
-In the TUI, dragging across text copies it automatically. `Ctrl-C` copies an active text selection; without a selection it retains the normal quit behavior.
+In the TUI, dragging across text copies it automatically. `Ctrl-C` copies an active text selection; without a selection it retains the normal quit behavior. `v` and `V` cycle forward or backward through three panes, a contextual two-pane layout, and the focused pane at full width; `<` and `>` resize the focused side of a two-pane split. On a local catalog skill or unindexed local skill, `e` suspends the TUI and opens the skill in `nvim` from the skills host directory; vendor, staging-inbox, and project-only copies are excluded.
 
 In the TUI, author and category rows show a yellow `⚠` when any of their visible skills has confirmed drift. Select a drifting vendor skill and press `d`. The drift review accepts `a` to vendor the live global copy, `r` to restore the repository baseline, `h` to open Hunk, and `d` to open Delta.
 

@@ -20,6 +20,9 @@ import { clamp, fileTreeRows, fitCell, markdownBody, markdownHeadingLines, print
 import { scrollRowForLine } from "./docNav.ts";
 import type { DocRenderable } from "./docNav.ts";
 import { copySelection, handleSelectionKey } from "./clipboard.ts";
+import { editableHostSkillPath, editSkillInNvim, withSuspendedRenderer } from "./external.ts";
+import { cycleLayout, primaryPanel, resizeFocusedSplit } from "./layout.ts";
+import type { Panel, PrimaryPanel, TwoPanePair } from "./layout.ts";
 import {
   diffSkill,
   expandHome,
@@ -42,8 +45,6 @@ import {
 import type { Catalog, CatalogRow, DiffResult, LiveStatus, ProjectPlacement, ProjectSkill } from "./data.ts";
 
 type Mode = "list" | "help" | "detail" | "profiles" | "diff" | "link" | "index";
-type Panel = "authors" | "skills" | "content" | "files";
-type PrimaryPanel = Exclude<Panel, "files">;
 type CatalogView = "available" | "all";
 type SkillItem = { kind: "skill"; row: CatalogRow } | { kind: "project-skill"; skill: ProjectSkill } | { kind: "unindexed-skill"; skill: UnindexedSkill };
 
@@ -119,6 +120,9 @@ export function App() {
   const [catalogView, setCatalogView] = useState<CatalogView>("available");
   const [panel, setPanel] = useState<Panel>("skills");
   const [expanded, setExpanded] = useState<PrimaryPanel | null>(null);
+  const [twoPane, setTwoPane] = useState<TwoPanePair | null>(null);
+  const [catalogSplit, setCatalogSplit] = useState(1 / 3);
+  const [documentSplit, setDocumentSplit] = useState(0.4);
   const [mode, setMode] = useState<Mode>("list");
   const [filterMode, setFilterMode] = useState(false);
   const [filterText, setFilterText] = useState("");
@@ -217,6 +221,7 @@ export function App() {
   const profileNames = Object.keys(catalog.manifest.profiles);
 
   const currentName = current?.name ?? currentProjectSkill?.name ?? currentUnindexedSkill?.name;
+  const editableSkillPath = editableHostSkillPath(panel !== "authors", current ? { origin: current.origin, path: current.meta.path } : undefined, currentUnindexedSkill);
   const previewFile = previewState.skill === currentName ? previewState.file : 0;
   const previewRestore = previewState.skill === currentName ? previewState.restore : 0;
 
@@ -592,7 +597,7 @@ export function App() {
   // ---- panel + selection navigation (shared by keyboard and mouse) -------
 
   const focusPanel = (next: Panel) => {
-    if (panel === "content" && next !== "content") {
+    if ((panel === "content" || panel === "files") && next !== "content" && next !== "files") {
       setPreviewState({ skill: currentName ?? null, file: previewFile, restore: previewScroll.current?.scrollTop ?? 0 });
     }
     setPanel(next);
@@ -616,14 +621,54 @@ export function App() {
     setSelectedAuthor(0);
     setSelectedSkill(0);
   };
+  const cyclePaneLayout = (direction: 1 | -1) => {
+    const next = cycleLayout({ twoPane, expanded }, panel, direction);
+    if (next.twoPane === "catalog" && twoPane !== "catalog") {
+      setDocFind({ typing: false, query: "" });
+    }
+    setTwoPane(next.twoPane);
+    setExpanded(next.expanded);
+  };
+  const editCurrentSkill = () => {
+    if (!editableSkillPath) {
+      const reason =
+        panel === "authors"
+          ? "focus the skill or document pane first"
+          : current?.origin === "vendor" || currentUnindexedSkill?.origin === "vendor"
+            ? "vendor baselines must be changed through update and vendor"
+            : currentUnindexedSkill?.origin === "agent"
+              ? "the staging inbox can be overwritten; index the skill before editing"
+              : "project-only skills are outside the skills host";
+      notify(`cannot edit here: ${reason}`, true);
+      return;
+    }
+    try {
+      withSuspendedRenderer(renderer, () => editSkillInNvim(catalog.repo, editableSkillPath));
+      refresh();
+      notify(
+        current ? `edited ${current.name} · run slinky rehash ${current.name} before saving` : `edited ${currentUnindexedSkill?.name ?? "skill"} · press a to index it when ready`,
+      );
+    } catch (error) {
+      notify(`nvim failed: ${error instanceof Error ? error.message : String(error)}`, true);
+    }
+  };
 
   const handleList = (key: KeyEvent): void => {
-    const panelOrder: Panel[] = previewData ? ["authors", "skills", "content", "files"] : ["authors", "skills", "content"];
+    const panelOrder: Panel[] =
+      twoPane === "catalog"
+        ? ["authors", "skills"]
+        : twoPane === "document"
+          ? previewData
+            ? ["skills", "content", "files"]
+            : ["skills", "content"]
+          : previewData
+            ? ["authors", "skills", "content", "files"]
+            : ["authors", "skills", "content"];
     const movePanel = (delta: number) => {
       const index = Math.max(0, panelOrder.indexOf(panel));
       focusPanel(panelOrder[clamp(index + delta, 0, panelOrder.length - 1)] ?? panel);
     };
-    const focusedPrimary: PrimaryPanel = panel === "files" ? "content" : panel;
+    const focusedPrimary = primaryPanel(panel);
 
     if (key.name === "q" || (key.ctrl && key.name === "c")) return quit();
     if (key.name === "1") return switchCatalogView("available");
@@ -640,7 +685,7 @@ export function App() {
       return;
     }
     if (key.name === "$" || (key.name === "4" && key.shift)) {
-      focusPanel(previewData ? "files" : "content");
+      focusPanel(panelOrder.at(-1) ?? "skills");
       return;
     }
     if (key.name === "x") {
@@ -648,14 +693,22 @@ export function App() {
       return;
     }
     if (key.name === "v") {
-      setPanel("content");
-      setExpanded((value) => (value === "content" ? null : "content"));
+      cyclePaneLayout(key.shift ? -1 : 1);
       return;
     }
     if (key.name === "escape") {
       if (expanded) setExpanded(null);
+      else if (twoPane) setTwoPane(null);
       else if (docFind.query) setDocFind({ typing: false, query: "" });
       else if (filterText) setFilterText("");
+      return;
+    }
+    const shrinkFocusedPane = key.name === "<" || (key.name === "," && key.shift);
+    const growFocusedPane = key.name === ">" || (key.name === "." && key.shift);
+    if (twoPane && !expanded && (shrinkFocusedPane || growFocusedPane)) {
+      const grow = growFocusedPane;
+      if (twoPane === "catalog") setCatalogSplit((split) => resizeFocusedSplit(split, twoPane, panel, grow));
+      else setDocumentSplit((split) => resizeFocusedSplit(split, twoPane, panel, grow));
       return;
     }
     if (key.name === "}" || (key.name === "]" && key.shift)) return jumpHeading(1);
@@ -727,6 +780,10 @@ export function App() {
       notify("refreshed");
       return;
     }
+    if (key.name === "e") {
+      editCurrentSkill();
+      return;
+    }
     if (key.name === "?") return setMode("help");
     if (key.name === "u") {
       notify("checking upstream\u2026");
@@ -759,6 +816,7 @@ export function App() {
 
     if (key.name === "return" || key.name === "enter") {
       if (panel === "authors") setPanel("skills");
+      else if (panel === "skills" && twoPane === "catalog" && (current || currentProjectSkill || currentUnindexedSkill)) setMode("detail");
       else if (panel === "skills" || panel === "files") setPanel("content");
       else if (current || currentProjectSkill || currentUnindexedSkill) setMode("detail");
       return;
@@ -835,22 +893,25 @@ export function App() {
     .size;
   const projectName = basename(catalog.project) || catalog.project;
   const matchCount = new Set(groups.flatMap((group) => group.skills.map(skillItemName))).size;
-  const narrow = cols < 96;
+  const narrow = cols < (twoPane ? 64 : 96);
   const tiny = cols < 48;
   const compactHeader = cols < 72;
-  const focusedPrimary: PrimaryPanel = panel === "files" ? "content" : panel;
-  const showAuthors = expanded ? expanded === "authors" : narrow ? focusedPrimary === "authors" : true;
+  const focusedPrimary = primaryPanel(panel);
+  const showAuthors = expanded ? expanded === "authors" : narrow ? focusedPrimary === "authors" : twoPane !== "document";
   const showSkills = expanded ? expanded === "skills" : narrow ? focusedPrimary === "skills" : true;
-  const showContent = expanded ? expanded === "content" : narrow ? focusedPrimary === "content" : true;
+  const showContent = expanded ? expanded === "content" : narrow ? focusedPrimary === "content" : twoPane !== "catalog";
   const authorW = Math.max(18, Math.min(25, Math.floor(cols * 0.19)));
   const skillW = Math.max(33, Math.min(42, Math.floor(cols * 0.31)));
+  const catalogAuthorW = Math.max(18, Math.min(cols - 33, Math.floor(cols * catalogSplit)));
+  const catalogSkillW = cols - catalogAuthorW;
+  const documentSkillW = Math.max(33, Math.min(cols - 30, Math.floor(cols * documentSplit)));
   const fileTreeW = Math.max(18, Math.min(28, Math.floor(cols * 0.21)));
   const authorViewport = Math.max(1, viewport - 2);
   const authorWin = windowOf(0, authorIndex, groups.length, authorViewport);
   const skillViewport = Math.max(1, viewport - 2);
   const skillWin = windowOf(0, skillIndex, currentGroup?.skills.length ?? 0, skillViewport);
-  const authorsWidth = expanded === "authors" || narrow ? cols : authorW;
-  const skillsWidth = expanded === "skills" || narrow ? cols : skillW;
+  const authorsWidth = expanded === "authors" || narrow ? cols : twoPane === "catalog" ? catalogAuthorW : authorW;
+  const skillsWidth = expanded === "skills" || narrow ? cols : twoPane === "catalog" ? catalogSkillW : twoPane === "document" ? documentSkillW : skillW;
   const authorLabelW = Math.max(4, authorsWidth - 10);
   const skillLabelW = Math.max(4, skillsWidth - 29);
 
@@ -1018,10 +1079,13 @@ export function App() {
       <Hint keys="h/l" label="pane" />
       <Hint keys="tab" label="next" />
       <Hint keys="j/k" label={panel === "content" ? "scroll" : "move"} />
-      <Hint keys="x" label={expanded ? "restore" : "expand"} />
-      {previewData && panel !== "authors" ? <Hint keys="[/]" label="file" /> : null}
+      <Hint keys="x" label={expanded ? "restore" : "zoom"} />
+      <Hint keys="v/V" label="layout" />
+      {twoPane && !expanded ? <Hint keys="</>" label="size" /> : null}
+      {showContent && previewData && panel !== "authors" ? <Hint keys="[/]" label="file" /> : null}
       {(panel === "authors" && currentGroup?.rows) || (panel === "skills" && current) ? <Hint keys="space" label="toggle" /> : null}
       {currentUnindexedSkill ? <Hint keys="a" label="index" /> : null}
+      {editableSkillPath ? <Hint keys="e" label="edit" /> : null}
       <Hint keys="i" label="details" />
       <Hint keys="1/2" label="view" />
       <Hint keys="/" label={panel === "content" ? "search" : "filter"} />
@@ -1275,13 +1339,15 @@ function HelpModal({ cols }: { cols: number }) {
     ["ctrl-f / ctrl-b", "full page down / up"],
     ["ctrl-e / ctrl-y", "scroll the document one line from any panel"],
     ["x", "expand or restore the focused primary panel"],
-    ["v", "expand or restore the document panel"],
+    ["v / V", "cycle layouts forward / backward: three, two, focused"],
+    ["< / >", "shrink / grow the focused pane in a two-pane layout"],
     ["J / K, PgUp/PgDn", "scroll the document from any panel"],
     ["[ / ]", "previous / next related file"],
     ["{ / }", "previous / next markdown heading in the document"],
     ["n / N", "next / previous document search match"],
     ["enter", "enter the next panel; from document, show details"],
     ["i", "show skill details"],
+    ["e", "edit a local or unindexed host skill in nvim"],
     ["1 / 2", "available here / all skills view"],
     ["a", "index selected unindexed .agents skill"],
     ["space", "toggle a skill or every skill by the focused author"],
