@@ -1,4 +1,4 @@
-import { cpSync, existsSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { Effect, Schema } from "effect";
 import { formatUtc, getSkill, nowUtc, OperationFailed, Skill, withManifestSkill } from "../domain/model.ts";
@@ -61,7 +61,17 @@ export const vendorRestore = Effect.fn("Vendor.restore")(function* (manifest: Ma
   const meta = getSkill(manifest, name);
   if (!meta) return yield* Effect.fail(new OperationFailed({ message: `unknown skill: ${name}` }));
   if (meta.origin !== "vendor") return yield* Effect.fail(new OperationFailed({ message: `${name} is a local skill; it is symlinked, not copied` }));
+  const source = join(repo, meta.path);
+  if (!existsSync(source)) return yield* Effect.fail(new OperationFailed({ message: `${name}: repo copy missing at ${meta.path}` }));
   const live = join(paths.agentsSkills, name);
-  rmSync(live, { recursive: true, force: true });
-  cpSync(join(repo, meta.path), live, { recursive: true });
+  mkdirSync(paths.agentsSkills, { recursive: true });
+  const staging = mkdtempSync(join(paths.agentsSkills, ".slinky-restore-"));
+  const replacement = join(staging, name);
+  try {
+    cpSync(source, replacement, { recursive: true });
+    rmSync(live, { recursive: true, force: true });
+    renameSync(replacement, live);
+  } finally {
+    rmSync(staging, { recursive: true, force: true });
+  }
 });

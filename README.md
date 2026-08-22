@@ -161,10 +161,12 @@ Because it is just a directory, you can fill it yourself and let Slinky consolid
 cd ~/my-agent-skills
 npx skills add mattpocock/skills     # skills.sh installs into .agents/skills/
 slinky adopt                         # review what is staged
-slinky adopt --all                   # vendor, index, and sync it
+slinky adopt all                     # vendor, index, and sync every candidate
 ```
 
-`slinky adopt` lists staged skills alongside host skills that are missing from the manifest. A staged copy wins its name when both exist. Staged adoption reads provenance from the temporary `<repo>/skills-lock.json`; global adoption reads the machine's skills.sh lock. Both absorb usable entries into the committed `<repo>/.skill-lock.json`. Since project-scoped locks omit the git tree hash, Slinky recovers it from GitHub so `slinky update --check` keeps working; an unreachable upstream just leaves the skill untracked.
+`slinky adopt` lists staged skills alongside host skills that are missing from the manifest. `slinky adopt all` imports every candidate; `slinky adopt --all` remains an equivalent flag form. A staged copy wins its name when both exist. Staged adoption reads provenance from the temporary `<repo>/skills-lock.json`; global adoption reads the machine's skills.sh lock. Both absorb usable entries into the committed `<repo>/.skill-lock.json`. Since project-scoped locks omit the git tree hash, Slinky recovers it from GitHub so `slinky update --check` keeps working; an unreachable upstream just leaves the skill untracked.
+
+The positional word `all` is reserved by `adopt` and `restore` for their bulk forms.
 
 Afterwards Slinky clears the staging directory, removes the `.claude` symlink skills.sh left pointing at it, and prunes the adopted entry from `skills-lock.json`. A staged copy identical to a baseline already in the manifest is discarded as redundant. Running `npx skills add` yourself also copies into every agent directory it detects; Slinky reports those rather than deleting them, since they are in your worktree. Add `.agents/` to the host repo's `.gitignore` to keep the inbox out of git.
 
@@ -310,9 +312,10 @@ slinky skills add <source> [--skill <name>...]
 slinky diff [skill...] [--patch|--hunk|--delta|--pager <hunk|delta>|--no-pager]
 slinky vendor <skill...>
 slinky restore <skill...>
+slinky restore all                    # catalog wins for every drifting live vendor
 slinky rehash [local-skill...]        # no names: every stale local skill
 slinky adopt                          # list staged + host skills not in the repo
-slinky adopt <skill...>|--all [--local] [--owner=<owner>]
+slinky adopt <skill...>|all [--local] [--owner=<owner>] # `--all` is also supported
 slinky save [-m|--message <message>]
 slinky link <skill> [project] [--copy|--symlink] [--no-exclude] [--no-claude]
 slinky unlink <skill> [project] [--force]

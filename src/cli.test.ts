@@ -869,6 +869,46 @@ printf '%s\\n' '${lock}' > "$PWD/skills-lock.json"
     return bin;
   }
 
+  test("restore all resets every drifting live vendor to the catalog baseline", () => {
+    const f = fixture(["second"]);
+    addDriftingVendor(f, "first");
+    addDriftingVendor(f, "second");
+
+    const result = runCli(f.host, f.home, ["restore", "all"]);
+
+    if (result.exitCode !== 0) throw new Error(`${result.stderr.toString()}\n${result.stdout.toString()}`);
+    expect(readFileSync(join(f.home, ".agents", "skills", "first", "SKILL.md"), "utf8")).toBe("# baseline first\n");
+    expect(readFileSync(join(f.home, ".agents", "skills", "second", "SKILL.md"), "utf8")).toBe("# baseline second\n");
+    expect(result.stdout.toString()).toContain("first: live copy restored from repo baseline");
+    expect(result.stdout.toString()).toContain("second: live copy restored from repo baseline");
+  });
+
+  test("restore leaves the live copy intact when the catalog baseline is missing", () => {
+    const f = fixture();
+    addDriftingVendor(f);
+    rmSync(join(f.host, "vendor", "acme", "drifting"), { recursive: true });
+
+    const result = runCli(f.host, f.home, ["restore", "drifting"]);
+
+    expect(result.exitCode).toBe(1);
+    expect(readFileSync(join(f.home, ".agents", "skills", "drifting", "SKILL.md"), "utf8")).toBe("# live drifting\n");
+  });
+
+  test("adopt all imports every unindexed global skill", () => {
+    const f = fixture();
+    for (const name of ["first", "second"]) {
+      mkdirSync(join(f.home, ".agents", "skills", name), { recursive: true });
+      writeFileSync(join(f.home, ".agents", "skills", name, "SKILL.md"), `# ${name}\n`);
+    }
+
+    const result = runCli(f.host, f.home, ["adopt", "all"]);
+    const manifest = decodeEncodedManifest(JSON.parse(readFileSync(join(f.host, "skills.manifest.json"), "utf8")));
+
+    if (result.exitCode !== 0) throw new Error(`${result.stderr.toString()}\n${result.stdout.toString()}`);
+    expect(manifest.skills.first?.path).toBe("vendor/_unknown/first");
+    expect(manifest.skills.second?.path).toBe("vendor/_unknown/second");
+  });
+
   test("installs project-scoped, vendors, indexes, and clears the staging inbox", () => {
     const f = fixture();
     const bin = stagingNpx(f.root, ["effect"]);

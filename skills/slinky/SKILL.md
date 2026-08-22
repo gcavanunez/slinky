@@ -120,10 +120,10 @@ You can also fill the inbox yourself and consolidate later:
 cd <host-repo>
 npx skills add <source>     # skills.sh installs into .agents/skills/
 slinky adopt                # review what is staged
-slinky adopt --all          # vendor, index, and sync
+slinky adopt all            # vendor, index, and sync every candidate
 ```
 
-`slinky adopt` lists staged skills next to host skills missing from the manifest; a staged copy wins its name when both exist. Staged provenance comes from temporary `<repo>/skills-lock.json`; global provenance comes from the machine skills.sh lock. Usable entries are absorbed into committed `<repo>/.skill-lock.json`. Project-scoped locks omit the git tree hash, so Slinky recovers it from GitHub to keep `update --check` working, falling back to untracked when that call fails. After adopting, Slinky clears the staging dir, removes the dangling `.claude` symlink, and prunes the temporary lock entry; a staged copy identical to an indexed baseline is discarded as redundant. Agent directories that a hand-run `npx skills add` populated are reported, not deleted.
+`slinky adopt` lists staged skills next to host skills missing from the manifest; `slinky adopt all` imports every candidate, with `slinky adopt --all` retained as an equivalent flag form. A staged copy wins its name when both exist. Staged provenance comes from temporary `<repo>/skills-lock.json`; global provenance comes from the machine skills.sh lock. Usable entries are absorbed into committed `<repo>/.skill-lock.json`. Project-scoped locks omit the git tree hash, so Slinky recovers it from GitHub to keep `update --check` working, falling back to untracked when that call fails. After adopting, Slinky clears the staging dir, removes the dangling `.claude` symlink, and prunes the temporary lock entry; a staged copy identical to an indexed baseline is discarded as redundant. Agent directories that a hand-run `npx skills add` populated are reported, not deleted.
 
 A staged copy that differs from an already-indexed baseline is left alone: updating a vendored skill from the inbox is not supported yet, so use `slinky update` for that.
 
@@ -156,6 +156,7 @@ slinky diff <skill...> --delta
 slinky diff <skill...> --pager hunk
 slinky vendor <skill>   # accept live content as the new baseline
 slinky restore <skill>  # restore live content from the current baseline
+slinky restore all      # restore every drifting live vendor from the catalog
 ```
 
 Pager mode opens one clean patch stream for all selected drifting skills. Use `--hunk` for interactive review, `--delta` for terminal rendering, or the equivalent `--pager hunk|delta` form.
@@ -254,7 +255,7 @@ Bootstrap backs up global skill directories before mutation. If it reports forei
 ## Safety Rules
 
 - Prefer preview commands: `sync --dry-run`, `bootstrap --dry-run`, and `update --check`.
-- Treat `--force`, `--adopt-all`, and `update --yes` as explicit user decisions.
+- Treat `--force`, `--adopt-all`, `adopt all`, `restore all`, and `update --yes` as explicit user decisions.
 - Do not edit `.local/state.json` or global skill directories by hand.
 - Do not delete vendor drift before showing `slinky diff` or explaining the restore/vendor choice.
 - Keep the skills host under Git and review its diff after adoption or accepted updates.

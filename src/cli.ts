@@ -1112,14 +1112,28 @@ const vendorCommand = Command.make("vendor", { names: skillsArg }, ({ names }) =
 const restoreCommand = Command.make("restore", { names: skillsArg }, ({ names }) =>
   withRepo(
     Effect.gen(function* () {
+      const restoreAll = names.length === 1 && names[0] === "all";
+      if (!restoreAll && names.includes("all")) return yield* bail("restore all cannot be combined with skill names");
       const { manifest } = yield* loadHostState;
-      for (const name of names) {
+      let targets = names;
+      if (restoreAll) {
+        const paths = yield* Paths;
+        const observation = yield* observe();
+        targets = Object.entries(manifest.skills)
+          .filter(([name, meta]) => {
+            const live = observation.agents[name];
+            return meta.origin === "vendor" && live?.kind === "dir" && contentHash(join(paths.agentsSkills, name)) !== meta.contentHash;
+          })
+          .map(([name]) => name);
+      }
+      for (const name of targets) {
         yield* vendorRestore(manifest, name);
         console.log(`${name}: live copy restored from repo baseline`);
       }
+      if (restoreAll && targets.length === 0) console.log("all live vendor skills already match the catalog");
     }),
   ),
-).pipe(Command.withDescription("Reset live copy from repo baseline (reject update)"));
+).pipe(Command.withDescription("Reset selected live copies, or all drift with `restore all`, from the repo baseline"));
 
 const rehashCommand = Command.make("rehash", { names: optionalSkillsArg }, ({ names }) =>
   withRepo(
@@ -1208,6 +1222,9 @@ const adoptCommand = Command.make(
   (input) =>
     withRepo(
       Effect.gen(function* () {
+        const positionalAll = input.names.length === 1 && input.names[0] === "all";
+        if (!positionalAll && input.names.includes("all")) return yield* bail("adopt all cannot be combined with skill names");
+        const adoptAll = input.all || positionalAll;
         const { store, manifest: initial, state: initialState } = yield* loadHostState;
         let manifest = initial;
         let state = initialState;
@@ -1217,7 +1234,7 @@ const adoptCommand = Command.make(
         for (const entry of pool.changed) {
           console.log(c.yellow(`warn: ${entry.name}: staged copy differs from ${entry.path}; updating a vendored skill from the inbox is not supported yet (left in place)`));
         }
-        if (input.names.length === 0 && !input.all) {
+        if (input.names.length === 0 && !adoptAll) {
           if (candidates.length === 0 && pool.redundant.length === 0) {
             console.log(c.green("nothing to adopt; all staged and host skills are in the repo"));
             return;
@@ -1232,11 +1249,11 @@ const adoptCommand = Command.make(
           for (const entry of pool.redundant) {
             console.log(c.dim(`  ${pad(entry.name, 32)}${pad(".agents/skills", 16)}already indexed at ${entry.path}; staging copy is redundant`));
           }
-          console.log(c.dim("\nadopt with: adopt <skill...> [--local] [--owner=<x>]  or  adopt --all"));
+          console.log(c.dim("\nadopt with: adopt <skill...> [--local] [--owner=<x>]  or  adopt all"));
           return;
         }
         let picked: ReadonlyArray<ForeignSkill>;
-        if (input.all) {
+        if (adoptAll) {
           picked = candidates;
         } else {
           const chosen: ForeignSkill[] = [];
@@ -1247,8 +1264,8 @@ const adoptCommand = Command.make(
           }
           picked = chosen;
         }
-        // --all also clears staging copies that duplicate an existing baseline.
-        if (input.all) yield* dropRedundantStaging(pool);
+        // Adopting all also clears staging copies that duplicate an existing baseline.
+        if (adoptAll) yield* dropRedundantStaging(pool);
         if (picked.length === 0) {
           if (pool.redundant.length === 0) console.log("nothing to adopt");
           return;
