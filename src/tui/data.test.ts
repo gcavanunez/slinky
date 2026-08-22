@@ -12,6 +12,7 @@ import {
   projectSkillDescription,
   projectSkillFiles,
   projectSkillPath,
+  projectSkillsFor,
   readProjectSkillFile,
 } from "./data.ts";
 import type { CatalogRow } from "./data.ts";
@@ -83,6 +84,31 @@ describe("discoverProjectSkills", () => {
     expect(projectSkillFiles(root, agentsOnly)).toEqual(["SKILL.md", "notes.md"]);
     expect(readProjectSkillFile(root, agentsOnly, "notes.md")).toBe("\tnotes\n");
     expect(projectSkillDescription(root, agentsOnly)).toBe("Project-only fixture.");
+  });
+});
+
+describe("projectSkillsFor", () => {
+  test("reports nothing at the home directory that owns the global store", () => {
+    const home = mkdtempSync(join(tmpdir(), "slinky-home-"));
+    roots.push(home);
+    const agentsSkills = join(home, ".agents", "skills");
+    mkdirSync(join(agentsSkills, "installed"), { recursive: true });
+    mkdirSync(join(home, ".claude", "skills", "installed"), { recursive: true });
+
+    // Without the guard every globally installed skill reads back as an unmanaged project skill.
+    expect(discoverProjectSkills(home)).toEqual([{ name: "installed", agents: true, claude: true }]);
+    expect(projectSkillsFor(home, agentsSkills)).toEqual([]);
+  });
+
+  test("still reports skills for an ordinary project under that home", () => {
+    const home = mkdtempSync(join(tmpdir(), "slinky-home-"));
+    roots.push(home);
+    const agentsSkills = join(home, ".agents", "skills");
+    mkdirSync(agentsSkills, { recursive: true });
+    const project = join(home, "work", "app");
+    mkdirSync(join(project, ".agents", "skills", "linked"), { recursive: true });
+
+    expect(projectSkillsFor(project, agentsSkills)).toEqual([{ name: "linked", agents: true, claude: false }]);
   });
 });
 

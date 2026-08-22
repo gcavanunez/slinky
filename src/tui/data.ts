@@ -8,6 +8,7 @@ import { diffDirs } from "../lib/diff.ts";
 import { findUnindexedSkills } from "../lib/adopt.ts";
 import type { UnindexedSkill } from "../lib/adopt.ts";
 import type { DirDiff } from "../lib/diff.ts";
+import { isGlobalStoreProject } from "../lib/linker.ts";
 import { isSkillEnabled, ManifestStore } from "../lib/manifest.ts";
 import type { Manifest, ProjectLink, Skill, State } from "../lib/manifest.ts";
 import { HostRepo, Paths } from "../lib/paths.ts";
@@ -77,6 +78,16 @@ export function projectForCwd(state: State, cwd: string = process.cwd()): string
   );
 }
 
+/**
+ * Skills present in a project's agent stores, treating `$HOME` as not a project.
+ *
+ * At `$HOME` the "project" stores are the global stores, so every installed skill would come back
+ * as a project skill with no matching link and render as `unmanaged`.
+ */
+export function projectSkillsFor(project: string, agentsSkills: string): ProjectSkill[] {
+  return isGlobalStoreProject(project, agentsSkills) ? [] : discoverProjectSkills(project);
+}
+
 /** Discover skills physically present in a project's agent stores. */
 export function discoverProjectSkills(project: string): ProjectSkill[] {
   const found = new Map<string, ProjectSkill>();
@@ -102,7 +113,7 @@ export const loadCatalog = Effect.fn("Tui.loadCatalog")(function* () {
   const state = yield* store.loadState(manifest);
   const obs = yield* observe();
   const project = projectForCwd(state);
-  const projectSkills = discoverProjectSkills(project);
+  const projectSkills = projectSkillsFor(project, paths.agentsSkills);
   const unindexedSkills = findUnindexedSkills(manifest, repo);
   const projectSkillsByName = new Map(projectSkills.map((skill) => [skill.name, skill]));
   const rows: CatalogRow[] = Object.entries(manifest.skills).map(([name, meta]) => {

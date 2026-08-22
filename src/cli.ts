@@ -932,9 +932,7 @@ const linkCommand = Command.make(
   (input) =>
     withRepo(
       Effect.gen(function* () {
-        const { repo } = yield* HostRepo;
         const project = Option.getOrElse(input.project, () => process.cwd());
-        if (resolveDir(project) === repo) return yield* bail("refusing to link a skill into the skills repo itself");
         const mode = input.copy ? "copy" : input.symlink ? "symlink" : "copy";
         const result = yield* linkProjectSkill({
           skill: input.skill,

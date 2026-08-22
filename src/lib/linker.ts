@@ -1,12 +1,12 @@
-import { cpSync, existsSync, lstatSync, mkdirSync, readlinkSync, rmSync, symlinkSync } from "node:fs";
-import { dirname, join, posix, resolve } from "node:path";
+import { cpSync, existsSync, lstatSync, mkdirSync, readlinkSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { basename, dirname, join, posix, resolve } from "node:path";
 import { Effect, Schema } from "effect";
 import { formatUtc, getSkill, nowUtc, OperationFailed, ProjectLink, withoutProjectLink, withProjectLink } from "../domain/model.ts";
 import type { Manifest, State } from "../domain/model.ts";
 import { updateExcludeFile } from "./exclude.ts";
 import { contentHash } from "./hash.ts";
 import { tryOp } from "./ops.ts";
-import { HostRepo } from "./paths.ts";
+import { HostRepo, Paths } from "./paths.ts";
 
 const decodeProjectLink = Schema.decodeUnknownSync(ProjectLink);
 
@@ -114,9 +114,50 @@ function linkSkillSync(repo: string, manifest: Manifest, state: State, opts: Lin
   }
 }
 
+/**
+ * Resolve symlinks as far as the path actually exists, keeping the missing tail.
+ *
+ * Comparing a store path that exists against one that does not would otherwise disagree wherever
+ * an ancestor is a symlink, which on macOS is every temp dir and `/var`.
+ */
+function resolveDir(path: string): string {
+  let current = resolve(path);
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      return join(realpathSync(current), ...tail.reverse());
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) return resolve(path);
+      tail.push(basename(current));
+      current = parent;
+    }
+  }
+}
+
+/**
+ * Whether a directory's `.agents/skills` is the global store rather than a project's own.
+ *
+ * True for `$HOME`, where the "project" store and the global store are the same directory. Linking
+ * there would copy a skill over its own global entry and record a project link against the store.
+ */
+export function isGlobalStoreProject(project: string, agentsSkills: string): boolean {
+  return resolveDir(join(project, ".agents", "skills")) === resolveDir(agentsSkills);
+}
+
 /** Create a project link (copy or symlink) and return the updated state. Created paths are compensated on failure. */
 export const linkSkill = Effect.fn("Linker.linkSkill")(function* (manifest: Manifest, state: State, opts: LinkOptions) {
   const { repo } = yield* HostRepo;
+  const paths = yield* Paths;
+  // Both guards sit here rather than in the CLI so the TUI, which links into whichever directory
+  // it was opened in, cannot walk into them either.
+  const project = resolveDir(opts.project);
+  if (project === resolveDir(repo)) {
+    return yield* Effect.fail(new OperationFailed({ message: "refusing to link a skill into the skills repo itself" }));
+  }
+  if (isGlobalStoreProject(project, paths.agentsSkills)) {
+    return yield* Effect.fail(new OperationFailed({ message: `refusing to link a skill into ${project}: its .agents/skills is the global skill store` }));
+  }
   return yield* tryOp(() => linkSkillSync(repo, manifest, state, opts));
 });
 

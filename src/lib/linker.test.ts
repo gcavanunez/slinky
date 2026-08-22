@@ -4,20 +4,42 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Cause, Effect, Exit, Layer, Schema } from "effect";
 import { Manifest, ProjectLink, State, version } from "./manifest.ts";
-import { applyUnlink, checkLink, linkSkill, prepareUnlink, unlinkSkill } from "./linker.ts";
-import { HostRepo, hostRepoPaths } from "./paths.ts";
+import { applyUnlink, checkLink, isGlobalStoreProject, linkSkill, prepareUnlink, unlinkSkill } from "./linker.ts";
+import { HostRepo, hostRepoPaths, Paths, RepoResolution } from "./paths.ts";
 
 const REPO = "/repo";
+const HOME = "/home/slinky-test";
 const hostLayer = Layer.succeed(HostRepo, HostRepo.of(hostRepoPaths(REPO)));
 
-const run = <A, E>(effect: Effect.Effect<A, E, HostRepo>): A => Effect.runSync(effect.pipe(Effect.provide(hostLayer)));
+const pathsLayer = (home: string) =>
+  Layer.succeed(
+    Paths,
+    Paths.of({
+      home,
+      slinkyConfig: join(home, ".config", "slinky", "config.json"),
+      agentsSkills: join(home, ".agents", "skills"),
+      claudeSkills: join(home, ".claude", "skills"),
+      opencodeSkills: join(home, ".opencode", "skills"),
+      skillLock: join(home, ".agents", ".skill-lock.json"),
+      resolution: RepoResolution.Found({ repo: REPO }),
+      saveHostConfig: () => Effect.void,
+    }),
+  );
 
-const failureMessage = <A, E>(effect: Effect.Effect<A, E, HostRepo>): string => {
-  const exit = Effect.runSyncExit(effect.pipe(Effect.provide(hostLayer)));
+const layersFor = (home: string) => Layer.mergeAll(hostLayer, pathsLayer(home));
+
+const runWithHome = <A, E>(home: string, effect: Effect.Effect<A, E, HostRepo | Paths>): A => Effect.runSync(effect.pipe(Effect.provide(layersFor(home))));
+
+const run = <A, E>(effect: Effect.Effect<A, E, HostRepo | Paths>): A => runWithHome(HOME, effect);
+
+const failureMessageWithHome = <A, E>(home: string, effect: Effect.Effect<A, E, HostRepo | Paths>): string => {
+  const exit = Effect.runSyncExit(effect.pipe(Effect.provide(layersFor(home))));
   if (Exit.isSuccess(exit)) throw new Error("expected failure");
   const error = Cause.squash(exit.cause);
   return error instanceof Error ? error.message : String(error);
 };
+
+const failureMessage = <A, E>(effect: Effect.Effect<A, E, HostRepo | Paths>): string => failureMessageWithHome(HOME, effect);
 
 const roots: string[] = [];
 const linkExists = (path: string): boolean => {
@@ -122,6 +144,62 @@ describe("link construction", () => {
     expect(exclude).toContain("/.agents/skills/foo\n");
     expect(exclude).not.toContain("/.agents/skills/foo/\n");
     expect(Bun.spawnSync(["git", "-C", project, "check-ignore", ".agents/skills/foo"]).exitCode).toBe(0);
+  });
+});
+
+describe("link safety", () => {
+  function emptyState() {
+    return Schema.decodeUnknownSync(State)({
+      version,
+      disabledSkills: [],
+      activeProfile: null,
+      projectLinks: [],
+      recentProjects: [],
+    });
+  }
+
+  test("refuses a project whose .agents/skills is the global store", () => {
+    // $HOME: linking here would copy the skill over its own global entry.
+    const home = mkdtempSync(join(tmpdir(), "slinky-home-"));
+    roots.push(home);
+    const { manifest } = fixtures(home);
+
+    const message = failureMessageWithHome(home, linkSkill(manifest, emptyState(), { skill: "foo", project: home, mode: "copy", gitExclude: false, claude: false }));
+
+    expect(message).toContain("is the global skill store");
+    expect(linkExists(join(home, ".agents", "skills", "foo"))).toBe(false);
+  });
+
+  test("refuses the skills repo itself", () => {
+    const { manifest } = fixtures(REPO);
+
+    const message = failureMessage(linkSkill(manifest, emptyState(), { skill: "foo", project: REPO, mode: "copy", gitExclude: false, claude: false }));
+
+    expect(message).toContain("skills repo itself");
+  });
+
+  test("allows an ordinary project under the same home", () => {
+    const home = mkdtempSync(join(tmpdir(), "slinky-home-"));
+    roots.push(home);
+    const project = join(home, "work", "app");
+    mkdirSync(project, { recursive: true });
+    const { manifest } = fixtures(project);
+
+    const result = runWithHome(home, linkSkill(manifest, emptyState(), { skill: "foo", project, mode: "symlink", gitExclude: false, claude: false }));
+
+    expect(result.link.project).toBe(resolve(project));
+    expect(linkExists(join(project, ".agents", "skills", "foo"))).toBe(true);
+  });
+
+  test("identifies the global store regardless of a symlinked home", () => {
+    const real = mkdtempSync(join(tmpdir(), "slinky-realhome-"));
+    roots.push(real);
+    const alias = join(real, "alias");
+    mkdirSync(join(real, "home", ".agents", "skills"), { recursive: true });
+    symlinkSync(join(real, "home"), alias);
+
+    expect(isGlobalStoreProject(alias, join(real, "home", ".agents", "skills"))).toBe(true);
+    expect(isGlobalStoreProject(join(real, "home", "project"), join(real, "home", ".agents", "skills"))).toBe(false);
   });
 });
 
