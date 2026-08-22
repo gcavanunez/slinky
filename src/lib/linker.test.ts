@@ -23,8 +23,11 @@ const pathsLayer = (home: string) =>
       skillLock: join(home, ".agents", ".skill-lock.json"),
       resolution: RepoResolution.Found({ repo: REPO }),
       diffPager: undefined,
+      editor: undefined,
+      editorCommand: ["nvim"],
       saveHostConfig: () => Effect.void,
       saveDiffPager: () => Effect.void,
+      saveEditor: () => Effect.void,
     }),
   );
 

@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
-import { editableHostSkillPath, editSkillInNvim, withSuspendedRenderer } from "./external.ts";
+import { editableHostSkillPath, editSkillInEditor, withSuspendedRenderer } from "./external.ts";
 
 describe("TUI external tools", () => {
   test("edits only local host skills from an explicit skill context", () => {
@@ -11,15 +11,29 @@ describe("TUI external tools", () => {
     expect(editableHostSkillPath(false, { origin: "local", path: "skills/hidden" }, undefined)).toBeNull();
   });
 
-  test("runs nvim for a host-relative skill path from the skills repository", () => {
+  test("runs the resolved editor for a host-relative skill path from the skills repository", () => {
     const spawn = mock(() => ({ status: 0 }));
 
-    editSkillInNvim("/home/user/my-agent-skills", "skills/my-skill", spawn);
+    editSkillInEditor(["nvim"], "/home/user/my-agent-skills", "skills/my-skill", spawn);
 
     expect(spawn).toHaveBeenCalledWith("nvim", ["skills/my-skill"], {
       cwd: "/home/user/my-agent-skills",
       stdio: "inherit",
     });
+  });
+
+  test("passes editor flags before the skill path", () => {
+    const spawn = mock(() => ({ status: 0 }));
+
+    editSkillInEditor(["code", "-w"], "/repo", "skills/my-skill", spawn);
+
+    expect(spawn).toHaveBeenCalledWith("code", ["-w", "skills/my-skill"], { cwd: "/repo", stdio: "inherit" });
+  });
+
+  test("reports the failing editor by name", () => {
+    const spawn = mock(() => ({ status: 1 }));
+
+    expect(() => editSkillInEditor(["code", "-w"], "/repo", "skills/my-skill", spawn)).toThrow("code exited with 1");
   });
 
   test("always resumes the renderer after an external tool exits", () => {

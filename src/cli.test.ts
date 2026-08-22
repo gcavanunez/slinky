@@ -304,6 +304,53 @@ describe("config", () => {
     expect(configAt(f.home)).not.toHaveProperty("diffPager");
   });
 
+  test("records an editor and reports it alongside the pager", () => {
+    const f = fixture();
+    expect(runCli(f.host, f.home, ["init", f.host]).exitCode).toBe(0);
+
+    const set = runCli(f.host, f.home, ["config", "editor", "code -w"]);
+
+    expect(set.exitCode).toBe(0);
+    expect(configAt(f.home).editor).toBe("code -w");
+    expect(runCli(f.host, f.home, ["config"]).stdout.toString()).toContain("code -w");
+    // A recorded editor beats both environment variables.
+    expect(runCli(f.host, f.home, ["config", "editor"], { VISUAL: "vim", EDITOR: "nano" }).stdout.toString().trim()).toBe("code -w");
+  });
+
+  test("falls back through $VISUAL, $EDITOR, then nvim", () => {
+    const f = fixture();
+    expect(runCli(f.host, f.home, ["init", f.host]).exitCode).toBe(0);
+    const read = (env: Record<string, string | undefined>) => runCli(f.host, f.home, ["config", "editor"], env).stdout.toString().trim();
+
+    expect(read({ VISUAL: "vim", EDITOR: "nano" })).toBe("vim");
+    expect(read({ VISUAL: undefined, EDITOR: "nano" })).toBe("nano");
+    expect(read({ VISUAL: undefined, EDITOR: undefined })).toBe("nvim");
+  });
+
+  test("clears the editor back to the environment fallback", () => {
+    const f = fixture();
+    expect(runCli(f.host, f.home, ["init", f.host]).exitCode).toBe(0);
+    expect(runCli(f.host, f.home, ["config", "editor", "code -w"]).exitCode).toBe(0);
+
+    const cleared = runCli(f.host, f.home, ["config", "editor", "none"]);
+
+    expect(cleared.exitCode).toBe(0);
+    expect(configAt(f.home)).not.toHaveProperty("editor");
+    expect(runCli(f.host, f.home, ["config", "editor"], { VISUAL: "vim", EDITOR: undefined }).stdout.toString().trim()).toBe("vim");
+  });
+
+  test("keeps the pager and editor independent when setting either", () => {
+    const f = fixture();
+    expect(runCli(f.host, f.home, ["init", f.host]).exitCode).toBe(0);
+    expect(runCli(f.host, f.home, ["config", "diff-pager", "delta"]).exitCode).toBe(0);
+    expect(runCli(f.host, f.home, ["config", "editor", "code -w"]).exitCode).toBe(0);
+
+    expect(configAt(f.home).diffPager).toBe("delta");
+    expect(configAt(f.home).editor).toBe("code -w");
+    expect(runCli(f.host, f.home, ["config", "diff-pager", "none"]).exitCode).toBe(0);
+    expect(configAt(f.home).editor).toBe("code -w");
+  });
+
   test("diff uses the configured pager without a flag, and --no-pager opts out", () => {
     const f = fixture();
     addDriftingVendor(f);

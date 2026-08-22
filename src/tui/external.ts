@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import type { EditorCommand } from "../lib/editor.ts";
 
 export interface SuspendableRenderer {
   readonly suspend: () => void;
@@ -31,8 +32,14 @@ export function withSuspendedRenderer<A>(renderer: SuspendableRenderer, action: 
   }
 }
 
-export function editSkillInNvim(repo: string, skillPath: string, spawn: EditorSpawner = (command, args, options) => spawnSync(command, [...args], options)): void {
-  const result = spawn("nvim", [skillPath], { cwd: repo, stdio: "inherit" });
+export function editSkillInEditor(
+  editor: EditorCommand,
+  repo: string,
+  skillPath: string,
+  spawn: EditorSpawner = (command, args, options) => spawnSync(command, [...args], options),
+): void {
+  const [command, ...args] = editor;
+  const result = spawn(command, [...args, skillPath], { cwd: repo, stdio: "inherit" });
   if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(`nvim exited with ${result.status ?? "unknown"}`);
+  if (result.status !== 0) throw new Error(`${command} exited with ${result.status ?? "unknown"}`);
 }

@@ -8,6 +8,7 @@ import { diffDirs } from "../lib/diff.ts";
 import { findUnindexedSkills } from "../lib/adopt.ts";
 import type { UnindexedSkill } from "../lib/adopt.ts";
 import type { DirDiff } from "../lib/diff.ts";
+import type { EditorCommand } from "../lib/editor.ts";
 import { isGlobalStoreProject } from "../lib/linker.ts";
 import { isSkillEnabled, ManifestStore } from "../lib/manifest.ts";
 import type { Manifest, ProjectLink, Skill, State } from "../lib/manifest.ts";
@@ -41,6 +42,7 @@ export interface Catalog {
   /** Host context snapshot so render helpers stay synchronous. */
   repo: string;
   agentsSkills: string;
+  editorCommand: EditorCommand;
 }
 
 export interface ProjectSkill {
@@ -140,7 +142,7 @@ export const loadCatalog = Effect.fn("Tui.loadCatalog")(function* () {
       meta,
     };
   });
-  return { manifest, state, project, projectSkills, unindexedSkills, rows, repo, agentsSkills: paths.agentsSkills } satisfies Catalog;
+  return { manifest, state, project, projectSkills, unindexedSkills, rows, repo, agentsSkills: paths.agentsSkills, editorCommand: paths.editorCommand } satisfies Catalog;
 });
 
 /** Hash-verify one vendor row (the slow part, run incrementally). */

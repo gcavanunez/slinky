@@ -210,6 +210,8 @@ export const SlinkyConfig = Schema.Struct({
   host: HostPath,
   /** Absent means "no pager": diffs print inline. */
   diffPager: Schema.optional(DiffPager),
+  /** Editor command spec, flags included. Absent falls back to $VISUAL, $EDITOR, then nvim. */
+  editor: Schema.optional(Schema.NonEmptyString.check(Schema.makeFilter((value) => value.trim() !== "", { expected: "a non-blank editor command" }))),
 });
 export type SlinkyConfig = typeof SlinkyConfig.Type;
 

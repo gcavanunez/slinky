@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import { Config, Context, Data, Effect, Layer, Option, Schema } from "effect";
 import { ConfigFileError, errorDetail, isMissingFile, SlinkyConfig, version } from "../domain/model.ts";
 import type { DiffPager } from "../domain/model.ts";
+import { resolveEditor } from "./editor.ts";
+import type { EditorCommand } from "./editor.ts";
 
 /** A directory qualifies as the skills repo when the manifest is present. */
 export function isRepoDir(dir: string): boolean {
@@ -44,10 +46,18 @@ interface LoadedConfig {
   readonly error?: ConfigFileError;
 }
 
-/** Build a config value, omitting the pager entirely when unset rather than writing a null. */
-function configWith(host: string, diffPager: DiffPager | undefined): SlinkyConfig {
-  const base = { version, host };
-  return Schema.decodeUnknownSync(SlinkyConfig)(diffPager === undefined ? base : { ...base, diffPager });
+interface ConfigFields {
+  readonly host: string;
+  readonly diffPager?: DiffPager | undefined;
+  readonly editor?: string | undefined;
+}
+
+/** Build a config value, omitting unset optional fields rather than writing nulls. */
+function configWith(fields: ConfigFields): SlinkyConfig {
+  const base = { version, host: fields.host };
+  const withPager = fields.diffPager === undefined ? base : { ...base, diffPager: fields.diffPager };
+  const withEditor = fields.editor === undefined ? withPager : { ...withPager, editor: fields.editor };
+  return Schema.decodeUnknownSync(SlinkyConfig)(withEditor);
 }
 
 /** Read and decode the config file. Absent is not an error; the caller falls back to discovery. */
@@ -114,9 +124,15 @@ export interface PathsInterface {
   readonly resolution: RepoResolution;
   /** Preferred interactive diff pager; undefined means diffs print inline. */
   readonly diffPager: DiffPager | undefined;
+  /** Configured editor spec, before $VISUAL/$EDITOR fallback. */
+  readonly editor: string | undefined;
+  /** Editor argv actually spawned: config, then $VISUAL, then $EDITOR, then nvim. */
+  readonly editorCommand: EditorCommand;
   readonly saveHostConfig: (repo: string) => Effect.Effect<void, ConfigFileError>;
   /** Persist the preferred diff pager; null clears it. */
   readonly saveDiffPager: (pager: DiffPager | null) => Effect.Effect<void, ConfigFileError>;
+  /** Persist the preferred editor command; null clears it. */
+  readonly saveEditor: (editor: string | null) => Effect.Effect<void, ConfigFileError>;
 }
 
 export class Paths extends Context.Service<Paths, PathsInterface>()("slinky/Paths") {
@@ -126,6 +142,8 @@ export class Paths extends Context.Service<Paths, PathsInterface>()("slinky/Path
       const home = yield* Config.string("HOME").pipe(Config.withDefault(homedir()), Effect.orDie);
       const xdgStateHome = yield* Config.option(Config.string("XDG_STATE_HOME")).pipe(Effect.map(Option.filter((value) => value !== "")), Effect.orDie);
       const envRepo = yield* Config.option(Config.string("SLINKY_REPO")).pipe(Effect.map(Option.filter((value) => value !== "")), Effect.orDie);
+      const visual = yield* Config.option(Config.string("VISUAL")).pipe(Effect.map(Option.filter((value) => value !== "")), Effect.orDie);
+      const envEditor = yield* Config.option(Config.string("EDITOR")).pipe(Effect.map(Option.filter((value) => value !== "")), Effect.orDie);
       const slinkyConfig = join(home, ".config", "slinky", "config.json");
 
       const loaded = readConfigFile(slinkyConfig);
@@ -147,14 +165,22 @@ export class Paths extends Context.Service<Paths, PathsInterface>()("slinky/Path
         });
 
       const saveHostConfig = Effect.fn("Paths.saveHostConfig")(function* (repo: string) {
-        yield* writeConfig((current) => configWith(resolve(repo), current?.diffPager));
+        yield* writeConfig((current) => configWith({ ...current, host: resolve(repo) }));
       });
 
-      const saveDiffPager = Effect.fn("Paths.saveDiffPager")(function* (pager: DiffPager | null) {
-        yield* writeConfig((current) => {
+      /** Change one field of an existing config; there is no host to preserve without one. */
+      const changeConfig = (change: (current: SlinkyConfig) => ConfigFields) =>
+        writeConfig((current) => {
           if (!current) throw new ConfigFileError(slinkyConfig, "write", "no skills repo recorded yet; run `slinky init <path>` first");
-          return configWith(current.host, pager ?? undefined);
+          return configWith(change(current));
         });
+
+      const saveDiffPager = Effect.fn("Paths.saveDiffPager")(function* (pager: DiffPager | null) {
+        yield* changeConfig((current) => ({ ...current, diffPager: pager ?? undefined }));
+      });
+
+      const saveEditor = Effect.fn("Paths.saveEditor")(function* (editor: string | null) {
+        yield* changeConfig((current) => ({ ...current, editor: editor ?? undefined }));
       });
 
       return Paths.of({
@@ -169,8 +195,15 @@ export class Paths extends Context.Service<Paths, PathsInterface>()("slinky/Path
         }),
         resolution: resolveRepo(slinkyConfig, envRepo, loaded),
         diffPager: loaded.config?.diffPager,
+        editor: loaded.config?.editor,
+        editorCommand: resolveEditor({
+          configured: loaded.config?.editor,
+          visual: Option.getOrUndefined(visual),
+          env: Option.getOrUndefined(envEditor),
+        }),
         saveHostConfig,
         saveDiffPager,
+        saveEditor,
       });
     }),
   );

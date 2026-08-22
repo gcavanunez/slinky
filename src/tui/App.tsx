@@ -20,7 +20,7 @@ import { clamp, fileTreeRows, fitCell, markdownBody, markdownHeadingLines, print
 import { scrollRowForLine } from "./docNav.ts";
 import type { DocRenderable } from "./docNav.ts";
 import { copySelection, handleSelectionKey } from "./clipboard.ts";
-import { editableHostSkillPath, editSkillInNvim, withSuspendedRenderer } from "./external.ts";
+import { editableHostSkillPath, editSkillInEditor, withSuspendedRenderer } from "./external.ts";
 import { cycleLayout, primaryPanel, resizeFocusedSplit } from "./layout.ts";
 import type { Panel, PrimaryPanel, TwoPanePair } from "./layout.ts";
 import {
@@ -643,13 +643,13 @@ export function App() {
       return;
     }
     try {
-      withSuspendedRenderer(renderer, () => editSkillInNvim(catalog.repo, editableSkillPath));
+      withSuspendedRenderer(renderer, () => editSkillInEditor(catalog.editorCommand, catalog.repo, editableSkillPath));
       refresh();
       notify(
         current ? `edited ${current.name} · run slinky rehash ${current.name} before saving` : `edited ${currentUnindexedSkill?.name ?? "skill"} · press a to index it when ready`,
       );
     } catch (error) {
-      notify(`nvim failed: ${error instanceof Error ? error.message : String(error)}`, true);
+      notify(`${catalog.editorCommand[0]} failed: ${error instanceof Error ? error.message : String(error)}`, true);
     }
   };
 
@@ -1157,7 +1157,7 @@ export function App() {
         ) : null}
       </box>
       {footer}
-      {mode === "help" ? <HelpModal cols={cols} /> : null}
+      {mode === "help" ? <HelpModal cols={cols} editor={catalog.editorCommand[0]} /> : null}
       {mode === "detail" && current ? <DetailModal cols={cols} row={current} catalog={catalog} /> : null}
       {mode === "detail" && currentProjectSkill ? <ProjectSkillModal cols={cols} skill={currentProjectSkill} catalog={catalog} /> : null}
       {mode === "detail" && currentUnindexedSkill ? <UnindexedSkillModal cols={cols} skill={currentUnindexedSkill} /> : null}
@@ -1328,7 +1328,7 @@ function PreviewPanel({
 
 // ---- overlays ------------------------------------------------------------
 
-function HelpModal({ cols }: { cols: number }) {
+function HelpModal({ cols, editor }: { cols: number; editor: string }) {
   const lines: Array<[string, string]> = [
     ["h/l, left/right", "focus the previous or next panel"],
     ["tab", "focus the next panel, wrapping at the end"],
@@ -1347,7 +1347,7 @@ function HelpModal({ cols }: { cols: number }) {
     ["n / N", "next / previous document search match"],
     ["enter", "enter the next panel; from document, show details"],
     ["i", "show skill details"],
-    ["e", "edit a local or unindexed host skill in nvim"],
+    ["e", `edit a local or unindexed host skill in ${editor}`],
     ["1 / 2", "available here / all skills view"],
     ["a", "index selected unindexed .agents skill"],
     ["space", "toggle a skill or every skill by the focused author"],

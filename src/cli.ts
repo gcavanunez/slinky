@@ -16,6 +16,7 @@ import type { ActionResult } from "./lib/catalogActions.ts";
 import { contentHash, findSymlinks, walkFiles } from "./lib/hash.ts";
 import { diffDirs, isClean, pagePatch, unifiedDiff } from "./lib/diff.ts";
 import type { DiffPager } from "./lib/diff.ts";
+import { parseCommand } from "./lib/editor.ts";
 import { layerRepo } from "./lib/layers.ts";
 import { checkLink } from "./lib/linker.ts";
 import { alignStateWithManifest, getSkill, isSkillEnabled, Manifest, ManifestStore, withSkillEnabled } from "./lib/manifest.ts";
@@ -962,6 +963,8 @@ const configShow = Effect.gen(function* () {
   });
   console.log(`${pad("host", 12)}${host}`);
   console.log(`${pad("diff-pager", 12)}${paths.diffPager ?? c.dim("(none: diffs print inline)")}`);
+  const editorSource = paths.editor !== undefined ? "" : c.dim(`  (from ${process.env["VISUAL"] ? "$VISUAL" : process.env["EDITOR"] ? "$EDITOR" : "default"})`);
+  console.log(`${pad("editor", 12)}${paths.editorCommand.join(" ")}${editorSource}`);
   console.log(c.dim(`\n${paths.slinkyConfig}`));
 });
 
@@ -978,9 +981,28 @@ const configDiffPagerCommand = Command.make("diff-pager", { value: Argument.choi
   }),
 ).pipe(Command.withDescription("Show or set the pager used by diff and update (hunk, delta, or none)"));
 
+const configEditorCommand = Command.make("editor", { value: Argument.string("command").pipe(Argument.optional) }, ({ value }) =>
+  Effect.gen(function* () {
+    const paths = yield* Paths;
+    if (Option.isNone(value)) {
+      console.log(paths.editorCommand.join(" "));
+      return;
+    }
+    const spec = value.value.trim();
+    if (spec === "none") {
+      yield* paths.saveEditor(null);
+      console.log("editor cleared; falling back to $VISUAL, $EDITOR, then nvim");
+      return;
+    }
+    if (parseCommand(spec).length === 0) return yield* bail("editor command cannot be blank");
+    yield* paths.saveEditor(spec);
+    console.log(`editor set to ${spec}`);
+  }),
+).pipe(Command.withDescription('Show or set the editor for the TUI (e.g. "code -w", or none to fall back to $VISUAL/$EDITOR)'));
+
 const configCommand = Command.make("config", {}, () => configShow).pipe(
-  Command.withDescription("Show Slinky configuration or set the diff pager"),
-  Command.withSubcommands([configDiffPagerCommand]),
+  Command.withDescription("Show Slinky configuration or set the diff pager and editor"),
+  Command.withSubcommands([configDiffPagerCommand, configEditorCommand]),
 );
 
 const linkCommand = Command.make(

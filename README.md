@@ -264,10 +264,13 @@ Record a pager once instead of passing a flag every time:
 
 ```bash
 slinky config diff-pager delta   # or hunk, or none to print inline
-slinky config                    # show the recorded host and pager
+slinky config editor "code -w"   # or none to fall back to $VISUAL/$EDITOR
+slinky config                    # show the recorded host, pager, and editor
 ```
 
 `diff` and `update` both use it. `update` collects every changed skill into a single patch and opens that one session before asking about each skill, so the whole update is reviewable in one pass. A flag overrides the recorded pager for one run, and `--no-pager` forces inline output.
+
+Pressing `e` in the TUI edits a local or unindexed host skill. The editor resolves in order: the recorded `editor`, then `$VISUAL`, then `$EDITOR`, then `nvim`. The spec may carry flags and is tokenised with quotes respected (`"/Applications/My Editor" --wait`), then spawned directly — no shell is involved, so a skill path is never interpreted as shell syntax.
 
 In the TUI, author and category rows show a yellow `⚠` when any of their visible skills has confirmed drift. Select a drifting vendor skill and press `d`. From the drift review, press `a` to accept the live global copy as the repository baseline, `r` to restore the global copy from the baseline, `h` to review in Hunk, or `d` to review in Delta.
 
@@ -298,8 +301,9 @@ slinky enable <skill...>
 slinky disable <skill...> [--force]
 slinky profile list
 slinky profile apply <name> [--force]
-slinky config                         # show recorded host and diff pager
+slinky config                         # show recorded host, diff pager, and editor
 slinky config diff-pager [hunk|delta|none]
+slinky config editor [<command>|none] # e.g. "code -w"; falls back to $VISUAL, $EDITOR, nvim
 slinky update --check
 slinky update [skill...] [--yes] [--hunk|--delta|--pager <hunk|delta>|--no-pager]
 slinky skills add <source> [--skill <name>...]
