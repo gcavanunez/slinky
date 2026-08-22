@@ -20,7 +20,7 @@ import { layerRepo } from "./lib/layers.ts";
 import { checkLink } from "./lib/linker.ts";
 import { alignStateWithManifest, getSkill, isSkillEnabled, Manifest, ManifestStore, withSkillEnabled } from "./lib/manifest.ts";
 import type { ManifestStoreInterface, State } from "./lib/manifest.ts";
-import { HostRepo, isRepoDir, Paths, RepoNotFoundError } from "./lib/paths.ts";
+import { HostRepo, isRepoDir, Paths, RepoNotFoundError, RepoResolution } from "./lib/paths.ts";
 import { apply, observe, observeAndPlan, planSync } from "./lib/reconcile.ts";
 import type { Plan } from "./lib/reconcile.ts";
 import { refreshLocalHashes } from "./lib/rehash.ts";
@@ -169,6 +169,43 @@ const cmdStatus = Effect.fn("Cli.status")(function* (manifest: Manifest, state: 
   }
 });
 
+const renderPatch = Effect.fn("Cli.renderPatch")(function* (baseline: string, live: string) {
+  return yield* Effect.try({
+    try: () => unifiedDiff(baseline, live),
+    catch: (error) => new ExternalToolError({ tool: "diff", message: errorDetail(error) }),
+  });
+});
+
+const openPager = Effect.fn("Cli.openPager")(function* (patch: string, pager: DiffPager) {
+  yield* Effect.try({
+    try: () => pagePatch(patch, pager),
+    catch: (error) => new ExternalToolError({ tool: pager, message: errorDetail(error) }),
+  });
+});
+
+interface PagerChoice {
+  readonly pager: Option.Option<DiffPager>;
+  readonly hunk: boolean;
+  readonly delta: boolean;
+  readonly noPager: boolean;
+}
+
+/** Resolve the pager for one invocation: explicit flags win, otherwise the configured default. */
+const selectPager = Effect.fn("Cli.selectPager")(function* (choice: PagerChoice) {
+  const requested: DiffPager[] = [];
+  if (Option.isSome(choice.pager)) requested.push(choice.pager.value);
+  if (choice.hunk) requested.push("hunk");
+  if (choice.delta) requested.push("delta");
+  const selected = [...new Set(requested)];
+  if (selected.length > 1) return yield* bail("choose only one diff pager: --hunk, --delta, or --pager");
+  if (choice.noPager) {
+    if (selected.length > 0) return yield* bail("--no-pager cannot be combined with a pager flag");
+    return undefined;
+  }
+  const paths = yield* Paths;
+  return selected[0] ?? paths.diffPager;
+});
+
 interface DiffOptions {
   readonly patch: boolean;
   readonly pager?: DiffPager;
@@ -205,13 +242,7 @@ const cmdDiff = Effect.fn("Cli.diff")(function* (manifest: Manifest, names: Read
       continue;
     }
     dirty++;
-    const rendered =
-      options.patch || pager
-        ? yield* Effect.try({
-            try: () => unifiedDiff(repoPath, live),
-            catch: (error) => new ExternalToolError({ tool: "diff", message: errorDetail(error) }),
-          })
-        : "";
+    const rendered = options.patch || pager ? yield* renderPatch(repoPath, live) : "";
     if (pager) {
       patches.push(rendered);
     } else {
@@ -223,10 +254,7 @@ const cmdDiff = Effect.fn("Cli.diff")(function* (manifest: Manifest, names: Read
     }
   }
   if (pager && patches.length > 0) {
-    yield* Effect.try({
-      try: () => pagePatch(patches.join("\n"), pager),
-      catch: (error) => new ExternalToolError({ tool: pager, message: errorDetail(error) }),
-    });
+    yield* openPager(patches.join("\n"), pager);
   } else if (names.length === 0) {
     console.log(dirty === 0 ? c.green("\nall vendored skills in sync") : c.yellow(`\n${dirty} skill(s) differ`));
   }
@@ -685,6 +713,12 @@ const forceFlag = Flag.boolean("force").pipe(Flag.withDescription("Override drif
 const pullFlag = Flag.boolean("pull").pipe(Flag.withDescription("Fetch and fast-forward the configured upstream before syncing"));
 const skillsArg = Argument.string("skill").pipe(Argument.variadic({ min: 1 }));
 const optionalSkillsArg = Argument.string("skill").pipe(Argument.variadic({ min: 0 }));
+const pagerFlags = {
+  pager: Flag.choice("pager", ["hunk", "delta"] as const).pipe(Flag.optional, Flag.withDescription("Open the patch in hunk or delta")),
+  hunk: Flag.boolean("hunk").pipe(Flag.withDescription("Open the patch in Hunk")),
+  delta: Flag.boolean("delta").pipe(Flag.withDescription("Open the patch in Delta")),
+  noPager: Flag.boolean("no-pager").pipe(Flag.withDescription("Print inline, ignoring the configured diff pager")),
+};
 
 // --- commands -------------------------------------------------------------
 
@@ -919,6 +953,36 @@ const profileCommand = Command.make("profile", {}, () => profileList).pipe(
   Command.withSubcommands([profileListCommand, profileApplyCommand]),
 );
 
+const configShow = Effect.gen(function* () {
+  const paths = yield* Paths;
+  const host = RepoResolution.$match(paths.resolution, {
+    Found: ({ repo }) => repo,
+    NotFound: () => c.dim("(not recorded)"),
+    Invalid: ({ error }) => c.red(error.message),
+  });
+  console.log(`${pad("host", 12)}${host}`);
+  console.log(`${pad("diff-pager", 12)}${paths.diffPager ?? c.dim("(none: diffs print inline)")}`);
+  console.log(c.dim(`\n${paths.slinkyConfig}`));
+});
+
+const configDiffPagerCommand = Command.make("diff-pager", { value: Argument.choice("value", ["hunk", "delta", "none"] as const).pipe(Argument.optional) }, ({ value }) =>
+  Effect.gen(function* () {
+    const paths = yield* Paths;
+    if (Option.isNone(value)) {
+      console.log(paths.diffPager ?? c.dim("(none: diffs print inline)"));
+      return;
+    }
+    const next = value.value === "none" ? null : value.value;
+    yield* paths.saveDiffPager(next);
+    console.log(next === null ? "diff pager cleared; diffs print inline" : `diff pager set to ${next}`);
+  }),
+).pipe(Command.withDescription("Show or set the pager used by diff and update (hunk, delta, or none)"));
+
+const configCommand = Command.make("config", {}, () => configShow).pipe(
+  Command.withDescription("Show Slinky configuration or set the diff pager"),
+  Command.withSubcommands([configDiffPagerCommand]),
+);
+
 const linkCommand = Command.make(
   "link",
   {
@@ -994,21 +1058,14 @@ const diffCommand = Command.make(
   {
     names: Argument.string("skill").pipe(Argument.variadic()),
     patch: Flag.boolean("patch").pipe(Flag.withDescription("Print the full unified diff")),
-    pager: Flag.choice("pager", ["hunk", "delta"] as const).pipe(Flag.optional, Flag.withDescription("Open the patch in hunk or delta")),
-    hunk: Flag.boolean("hunk").pipe(Flag.withDescription("Open the patch in Hunk")),
-    delta: Flag.boolean("delta").pipe(Flag.withDescription("Open the patch in Delta")),
+    ...pagerFlags,
   },
-  ({ names, patch, pager, hunk, delta }) =>
+  ({ names, patch, ...choice }) =>
     withRepo(
       Effect.gen(function* () {
-        const requested: DiffPager[] = [];
-        if (Option.isSome(pager)) requested.push(pager.value);
-        if (hunk) requested.push("hunk");
-        if (delta) requested.push("delta");
-        const selected = [...new Set(requested)];
-        if (selected.length > 1) return yield* bail("choose only one diff pager: --hunk, --delta, or --pager");
+        const pager = yield* selectPager(choice);
         const { manifest } = yield* loadHostState;
-        yield* cmdDiff(manifest, names, { patch, pager: selected[0] });
+        yield* cmdDiff(manifest, names, { patch, pager });
       }),
     ),
 ).pipe(Command.withDescription("Repo baseline vs live global copy (vendor skills)"));
@@ -1193,6 +1250,7 @@ const updateCommand = Command.make(
     check: Flag.boolean("check").pipe(Flag.withDescription("Compare installed skills against upstream (no changes)")),
     yes: Flag.boolean("yes").pipe(Flag.withAlias("y"), Flag.withDescription("Accept every changed skill without prompting")),
     force: forceFlag,
+    ...pagerFlags,
   },
   (input) =>
     withRepo(
@@ -1255,14 +1313,30 @@ const updateCommand = Command.make(
           return;
         }
 
-        // 4. review + decide per skill
+        // 4. review: one aggregate session over every change, then decide per skill
+        const pager = yield* selectPager(input);
+        const pathsFor = (name: string) => {
+          const meta = getSkill(manifest, name);
+          return meta ? { repoPath: join(repo, meta.path), live: join(paths.agentsSkills, name) } : undefined;
+        };
+        if (pager && !input.yes) {
+          const patches: string[] = [];
+          for (const name of outcome.changed) {
+            const target = pathsFor(name);
+            if (target) patches.push(yield* renderPatch(target.repoPath, target.live));
+          }
+          if (patches.length > 0) {
+            console.log(c.dim(`\nreviewing ${outcome.changed.length} changed skill(s) in ${pager}\u2026`));
+            yield* openPager(patches.join("\n"), pager);
+          }
+        }
+
         const accepted: string[] = [];
         const rejected: string[] = [];
         for (const name of outcome.changed) {
-          const meta = getSkill(manifest, name);
-          if (!meta) continue;
-          const repoPath = join(repo, meta.path);
-          const live = join(paths.agentsSkills, name);
+          const target = pathsFor(name);
+          if (!target) continue;
+          const { repoPath, live } = target;
           const d = diffDirs(repoPath, live);
           console.log(c.bold(`\n\u2500\u2500 ${name} \u2500\u2500`));
           for (const f of d.added) console.log(c.green(`  + ${f}`));
@@ -1273,7 +1347,9 @@ const updateCommand = Command.make(
           while (!["a", "r", "s"].includes(decision)) {
             decision = (prompt(`accept [a] / reject [r] / skip [s] / show diff [d] >`) ?? "s").trim().toLowerCase();
             if (decision === "d") {
-              console.log(unifiedDiff(repoPath, live));
+              const rendered = yield* renderPatch(repoPath, live);
+              if (pager) yield* openPager(rendered, pager);
+              else console.log(rendered);
               decision = "";
             }
           }
@@ -1427,6 +1503,7 @@ const root = Command.make("slinky").pipe(
     enableCommand,
     disableCommand,
     profileCommand,
+    configCommand,
     linkCommand,
     unlinkCommand,
     linksCommand,

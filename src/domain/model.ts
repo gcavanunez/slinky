@@ -201,9 +201,15 @@ export const State = Schema.Struct({
 );
 export type State = typeof State.Type;
 
+/** Interactive diff pagers Slinky knows how to drive. */
+export const DiffPager = Schema.Literals(["hunk", "delta"]);
+export type DiffPager = typeof DiffPager.Type;
+
 export const SlinkyConfig = Schema.Struct({
   version: Schema.Literal(version),
   host: HostPath,
+  /** Absent means "no pager": diffs print inline. */
+  diffPager: Schema.optional(DiffPager),
 });
 export type SlinkyConfig = typeof SlinkyConfig.Type;
 

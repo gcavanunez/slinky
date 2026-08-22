@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Config, Context, Data, Effect, Layer, Option, Schema } from "effect";
 import { ConfigFileError, errorDetail, isMissingFile, SlinkyConfig, version } from "../domain/model.ts";
+import type { DiffPager } from "../domain/model.ts";
 
 /** A directory qualifies as the skills repo when the manifest is present. */
 export function isRepoDir(dir: string): boolean {
@@ -38,7 +39,35 @@ export type RepoResolution = Data.TaggedEnum<{
 }>;
 export const RepoResolution = Data.taggedEnum<RepoResolution>();
 
-function resolveRepo(slinkyConfig: string, envRepo: Option.Option<string>): RepoResolution {
+interface LoadedConfig {
+  readonly config?: SlinkyConfig;
+  readonly error?: ConfigFileError;
+}
+
+/** Build a config value, omitting the pager entirely when unset rather than writing a null. */
+function configWith(host: string, diffPager: DiffPager | undefined): SlinkyConfig {
+  const base = { version, host };
+  return Schema.decodeUnknownSync(SlinkyConfig)(diffPager === undefined ? base : { ...base, diffPager });
+}
+
+/** Read and decode the config file. Absent is not an error; the caller falls back to discovery. */
+function readConfigFile(slinkyConfig: string): LoadedConfig {
+  let raw: string;
+  try {
+    raw = readFileSync(slinkyConfig, "utf8");
+  } catch (error) {
+    if (isMissingFile(error)) return {};
+    return { error: new ConfigFileError(slinkyConfig, "read", errorDetail(error)) };
+  }
+  try {
+    return { config: Schema.decodeUnknownSync(SlinkyConfig)(JSON.parse(raw), { errors: "all", onExcessProperty: "error" }) };
+  } catch (error) {
+    if (error instanceof ConfigFileError) return { error };
+    return { error: new ConfigFileError(slinkyConfig, "decode", errorDetail(error)) };
+  }
+}
+
+function resolveRepo(slinkyConfig: string, envRepo: Option.Option<string>, loaded: LoadedConfig): RepoResolution {
   if (Option.isSome(envRepo)) {
     const repo = resolve(envRepo.value);
     return isRepoDir(repo)
@@ -48,31 +77,14 @@ function resolveRepo(slinkyConfig: string, envRepo: Option.Option<string>): Repo
         });
   }
 
-  let configRaw: string | undefined;
-  try {
-    configRaw = readFileSync(slinkyConfig, "utf8");
-  } catch (error) {
-    if (!isMissingFile(error)) {
-      return RepoResolution.Invalid({ error: new ConfigFileError(slinkyConfig, "read", errorDetail(error)) });
-    }
-  }
-  if (configRaw !== undefined) {
-    try {
-      const input = JSON.parse(configRaw);
-      const config = Schema.decodeUnknownSync(SlinkyConfig)(input, {
-        errors: "all",
-        onExcessProperty: "error",
+  if (loaded.error) return RepoResolution.Invalid({ error: loaded.error });
+  if (loaded.config !== undefined) {
+    if (!isRepoDir(loaded.config.host)) {
+      return RepoResolution.Invalid({
+        error: new ConfigFileError(slinkyConfig, "decode", `configured host has no skills.manifest.json: ${loaded.config.host}`),
       });
-      if (!isRepoDir(config.host)) {
-        return RepoResolution.Invalid({
-          error: new ConfigFileError(slinkyConfig, "decode", `configured host has no skills.manifest.json: ${config.host}`),
-        });
-      }
-      return RepoResolution.Found({ repo: config.host });
-    } catch (error) {
-      if (error instanceof ConfigFileError) return RepoResolution.Invalid({ error });
-      return RepoResolution.Invalid({ error: new ConfigFileError(slinkyConfig, "decode", errorDetail(error)) });
     }
+    return RepoResolution.Found({ repo: loaded.config.host });
   }
 
   if (import.meta.url.startsWith("file:")) {
@@ -100,7 +112,11 @@ export interface PathsInterface {
   /** Machine-global skills.sh lock file. */
   readonly skillLock: string;
   readonly resolution: RepoResolution;
+  /** Preferred interactive diff pager; undefined means diffs print inline. */
+  readonly diffPager: DiffPager | undefined;
   readonly saveHostConfig: (repo: string) => Effect.Effect<void, ConfigFileError>;
+  /** Persist the preferred diff pager; null clears it. */
+  readonly saveDiffPager: (pager: DiffPager | null) => Effect.Effect<void, ConfigFileError>;
 }
 
 export class Paths extends Context.Service<Paths, PathsInterface>()("slinky/Paths") {
@@ -112,17 +128,32 @@ export class Paths extends Context.Service<Paths, PathsInterface>()("slinky/Path
       const envRepo = yield* Config.option(Config.string("SLINKY_REPO")).pipe(Effect.map(Option.filter((value) => value !== "")), Effect.orDie);
       const slinkyConfig = join(home, ".config", "slinky", "config.json");
 
-      const saveHostConfig = Effect.fn("Paths.saveHostConfig")(function* (repo: string) {
-        yield* Effect.try({
+      const loaded = readConfigFile(slinkyConfig);
+
+      // Merge against whatever is on disk now rather than the snapshot taken at layer construction,
+      // so writing one field never drops another that changed in between.
+      const writeConfig = (change: (current: SlinkyConfig | undefined) => SlinkyConfig) =>
+        Effect.try({
           try: () => {
-            const config = Schema.decodeUnknownSync(SlinkyConfig)({ version, host: resolve(repo) });
-            const encoded = Schema.encodeSync(SlinkyConfig)(config, { onExcessProperty: "error" });
+            const current = readConfigFile(slinkyConfig);
+            if (current.error) throw current.error;
+            const encoded = Schema.encodeSync(SlinkyConfig)(change(current.config), { onExcessProperty: "error" });
             const tmp = `${slinkyConfig}.${process.pid}.tmp`;
             mkdirSync(dirname(slinkyConfig), { recursive: true });
             writeFileSync(tmp, `${JSON.stringify(encoded, null, 2)}\n`);
             renameSync(tmp, slinkyConfig);
           },
           catch: (error) => (error instanceof ConfigFileError ? error : new ConfigFileError(slinkyConfig, "write", errorDetail(error))),
+        });
+
+      const saveHostConfig = Effect.fn("Paths.saveHostConfig")(function* (repo: string) {
+        yield* writeConfig((current) => configWith(resolve(repo), current?.diffPager));
+      });
+
+      const saveDiffPager = Effect.fn("Paths.saveDiffPager")(function* (pager: DiffPager | null) {
+        yield* writeConfig((current) => {
+          if (!current) throw new ConfigFileError(slinkyConfig, "write", "no skills repo recorded yet; run `slinky init <path>` first");
+          return configWith(current.host, pager ?? undefined);
         });
       });
 
@@ -136,8 +167,10 @@ export class Paths extends Context.Service<Paths, PathsInterface>()("slinky/Path
           onNone: () => join(home, ".agents", ".skill-lock.json"),
           onSome: (stateHome) => join(stateHome, "skills", ".skill-lock.json"),
         }),
-        resolution: resolveRepo(slinkyConfig, envRepo),
+        resolution: resolveRepo(slinkyConfig, envRepo, loaded),
+        diffPager: loaded.config?.diffPager,
         saveHostConfig,
+        saveDiffPager,
       });
     }),
   );

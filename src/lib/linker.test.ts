@@ -22,7 +22,9 @@ const pathsLayer = (home: string) =>
       opencodeSkills: join(home, ".opencode", "skills"),
       skillLock: join(home, ".agents", ".skill-lock.json"),
       resolution: RepoResolution.Found({ repo: REPO }),
+      diffPager: undefined,
       saveHostConfig: () => Effect.void,
+      saveDiffPager: () => Effect.void,
     }),
   );
 

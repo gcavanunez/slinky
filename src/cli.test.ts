@@ -264,6 +264,78 @@ describe("CLI options", () => {
   });
 });
 
+describe("config", () => {
+  const configAt = (home: string) => JSON.parse(readFileSync(join(home, ".config", "slinky", "config.json"), "utf8"));
+
+  test("records a diff pager and keeps it across a re-init", () => {
+    const f = fixture();
+    expect(runCli(f.host, f.home, ["init", f.host]).exitCode).toBe(0);
+
+    const set = runCli(f.host, f.home, ["config", "diff-pager", "delta"]);
+
+    expect(set.exitCode).toBe(0);
+    expect(set.stdout.toString()).toContain("diff pager set to delta");
+    expect(configAt(f.home).diffPager).toBe("delta");
+    // Re-running init must not drop the pager: it rewrites the whole file.
+    expect(runCli(f.host, f.home, ["init", f.host]).exitCode).toBe(0);
+    expect(configAt(f.home).diffPager).toBe("delta");
+    expect(runCli(f.host, f.home, ["config"]).stdout.toString()).toContain("delta");
+  });
+
+  test("clears the diff pager with none", () => {
+    const f = fixture();
+    expect(runCli(f.host, f.home, ["init", f.host]).exitCode).toBe(0);
+    expect(runCli(f.host, f.home, ["config", "diff-pager", "hunk"]).exitCode).toBe(0);
+
+    const cleared = runCli(f.host, f.home, ["config", "diff-pager", "none"]);
+
+    expect(cleared.exitCode).toBe(0);
+    expect(configAt(f.home)).not.toHaveProperty("diffPager");
+    expect(runCli(f.host, f.home, ["config", "diff-pager"]).stdout.toString()).toContain("none");
+  });
+
+  test("rejects a pager it cannot drive", () => {
+    const f = fixture();
+    expect(runCli(f.host, f.home, ["init", f.host]).exitCode).toBe(0);
+
+    const result = runCli(f.host, f.home, ["config", "diff-pager", "bat"]);
+
+    expect(result.exitCode).toBe(1);
+    expect(configAt(f.home)).not.toHaveProperty("diffPager");
+  });
+
+  test("diff uses the configured pager without a flag, and --no-pager opts out", () => {
+    const f = fixture();
+    addDriftingVendor(f);
+    expect(runCli(f.host, f.home, ["init", f.host]).exitCode).toBe(0);
+    expect(runCli(f.host, f.home, ["config", "diff-pager", "delta"]).exitCode).toBe(0);
+    const bin = recordingPager(f.root, "delta");
+    const path = { PATH: `${bin}:${process.env.PATH ?? ""}` };
+
+    const paged = runCli(f.host, f.home, ["diff", "drifting"], path);
+
+    if (paged.exitCode !== 0) throw new Error(`${paged.stderr.toString()}\n${paged.stdout.toString()}`);
+    expect(readFileSync(join(f.home, "delta-input"), "utf8")).toContain("+# live");
+    rmSync(join(f.home, "delta-invocations"));
+
+    const inline = runCli(f.host, f.home, ["diff", "drifting", "--no-pager"], path);
+
+    expect(inline.exitCode).toBe(0);
+    expect(existsSync(join(f.home, "delta-invocations"))).toBe(false);
+    expect(inline.stdout.toString()).toContain("differs from repo baseline");
+  });
+
+  test("refuses a pager flag combined with --no-pager", () => {
+    const f = fixture();
+    addDriftingVendor(f);
+
+    const result = runCli(f.host, f.home, ["diff", "drifting", "--delta", "--no-pager"]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain("--no-pager cannot be combined");
+  });
+});
+
 describe("save", () => {
   test("verifies and commits catalog paths without including unrelated staged files", () => {
     const f = fixture();
@@ -876,6 +948,71 @@ printf '%s\n' '${lock}' > "$HOME/.agents/.skill-lock.json"
       skillFolderHash: "a".repeat(40),
       ref: "main",
     });
+  });
+
+  /** A vendor skill with committed provenance, ready for `slinky update`. */
+  function addUpdatableVendor(f: ReturnType<typeof fixture>, name: string): void {
+    const baseline = join(f.host, "vendor", "kitlangton", name);
+    const live = join(f.home, ".agents", "skills", name);
+    mkdirSync(baseline, { recursive: true });
+    mkdirSync(live, { recursive: true });
+    writeFileSync(join(baseline, "SKILL.md"), `# ${name}\n`);
+    writeFileSync(join(live, "SKILL.md"), `# ${name}\n`);
+    const manifest = JSON.parse(readFileSync(join(f.host, "skills.manifest.json"), "utf8"));
+    manifest.skills[name] = {
+      origin: "vendor",
+      path: `vendor/kitlangton/${name}`,
+      contentHash: contentHash(baseline),
+      upstream: {
+        kind: "github",
+        repository: "kitlangton/skills",
+        url: "https://github.com/kitlangton/skills.git",
+        tracking: { kind: "tree", path: `skills/${name}/SKILL.md`, hash: "a".repeat(40) },
+      },
+      vendoredAt: null,
+    };
+    writeFileSync(join(f.host, "skills.manifest.json"), `${JSON.stringify(manifest)}\n`);
+    const lockPath = join(f.host, ".skill-lock.json");
+    const lock = existsSync(lockPath) ? JSON.parse(readFileSync(lockPath, "utf8")) : { version: 3, skills: {} };
+    lock.skills[name] = {
+      source: "kitlangton/skills",
+      sourceType: "github",
+      sourceUrl: "https://github.com/kitlangton/skills.git",
+      skillPath: `skills/${name}/SKILL.md`,
+      skillFolderHash: "a".repeat(40),
+    };
+    writeFileSync(lockPath, `${JSON.stringify(lock)}\n`);
+  }
+
+  test("update reviews every changed skill in one pager session", () => {
+    const f = fixture();
+    addUpdatableVendor(f, "alpha");
+    addUpdatableVendor(f, "beta");
+    initializeGitFixture(f.host, f.home);
+    const pagerBin = recordingPager(f.root, "delta");
+    const npxBin = join(f.root, "update-bin");
+    mkdirSync(npxBin);
+    // skills.sh "updates" both live copies; the vendored baselines stay put.
+    writeFileSync(
+      join(npxBin, "npx"),
+      `#!/bin/sh
+printf '%s\\n' '# alpha upstream' > "$HOME/.agents/skills/alpha/SKILL.md"
+printf '%s\\n' '# beta upstream' > "$HOME/.agents/skills/beta/SKILL.md"
+`,
+    );
+    chmodSync(join(npxBin, "npx"), 0o755);
+
+    const result = runCli(f.host, f.home, ["update", "--delta"], { PATH: `${pagerBin}:${npxBin}:${process.env.PATH ?? ""}` });
+
+    if (result.exitCode !== 0) throw new Error(`${result.stderr.toString()}\n${result.stdout.toString()}`);
+    // One session, both skills in it.
+    expect(readFileSync(join(f.home, "delta-invocations"), "utf8")).toBe("x");
+    const input = readFileSync(join(f.home, "delta-input"), "utf8");
+    expect(input).toContain("-# alpha");
+    expect(input).toContain("+# alpha upstream");
+    expect(input).toContain("-# beta");
+    expect(input).toContain("+# beta upstream");
+    expect(result.stdout.toString()).toContain("reviewing 2 changed skill(s) in delta");
   });
 
   test("update seeds skills.sh from the committed host lock", () => {

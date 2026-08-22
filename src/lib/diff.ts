@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { closeSync, mkdtempSync, openSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { DiffPager } from "../domain/model.ts";
 import { walkFiles } from "./hash.ts";
 
 export interface DirDiff {
@@ -11,7 +12,7 @@ export interface DirDiff {
   unchanged: number;
 }
 
-export type DiffPager = "hunk" | "delta";
+export type { DiffPager };
 
 /** Compare two directory trees. `a` is the baseline (repo copy), `b` the live copy. */
 export function diffDirs(a: string, b: string): DirDiff {

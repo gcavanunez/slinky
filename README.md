@@ -243,7 +243,7 @@ Drag across text to copy it automatically. `Ctrl-C` copies an active text select
 1. Require a clean `vendor/`, `skills/`, manifest, and `.skill-lock.json` baseline.
 2. Seed selected entries in the machine's skills.sh lock from the committed host lock.
 3. Run the upstream update against the live global store.
-4. Show each changed skill.
+4. Open every changed skill in one aggregate pager session, then show each change in turn.
 5. Accept the new content and provenance baseline, restore the old baseline, or leave the change for later.
 
 This makes update source selection consistent across machines sharing the same host commit. On an older host, `slinky save` creates `.skill-lock.json` from manifest provenance and compatible machine metadata before committing it.
@@ -259,6 +259,15 @@ slinky restore frontend-design  # reject and restore the baseline
 ```
 
 `--patch` prints a unified patch. `--hunk` opens an interactive review in Hunk, while `--delta` streams the patch through Delta. The generic `--pager hunk|delta` form is equivalent. Pager mode sends one clean patch stream for all selected drifting skills and requires the selected executable on `PATH`.
+
+Record a pager once instead of passing a flag every time:
+
+```bash
+slinky config diff-pager delta   # or hunk, or none to print inline
+slinky config                    # show the recorded host and pager
+```
+
+`diff` and `update` both use it. `update` collects every changed skill into a single patch and opens that one session before asking about each skill, so the whole update is reviewable in one pass. A flag overrides the recorded pager for one run, and `--no-pager` forces inline output.
 
 In the TUI, author and category rows show a yellow `⚠` when any of their visible skills has confirmed drift. Select a drifting vendor skill and press `d`. From the drift review, press `a` to accept the live global copy as the repository baseline, `r` to restore the global copy from the baseline, `h` to review in Hunk, or `d` to review in Delta.
 
@@ -289,10 +298,12 @@ slinky enable <skill...>
 slinky disable <skill...> [--force]
 slinky profile list
 slinky profile apply <name> [--force]
+slinky config                         # show recorded host and diff pager
+slinky config diff-pager [hunk|delta|none]
 slinky update --check
-slinky update [skill...] [--yes]
+slinky update [skill...] [--yes] [--hunk|--delta|--pager <hunk|delta>|--no-pager]
 slinky skills add <source> [--skill <name>...]
-slinky diff [skill...] [--patch|--hunk|--delta|--pager <hunk|delta>]
+slinky diff [skill...] [--patch|--hunk|--delta|--pager <hunk|delta>|--no-pager]
 slinky vendor <skill...>
 slinky restore <skill...>
 slinky rehash [local-skill...]        # no names: every stale local skill
