@@ -172,7 +172,11 @@ export function expandHome(path: string): string {
 
 function filesAt(root: string): string[] {
   try {
-    return walkFiles(root).sort((a, b) => (a === "SKILL.md" ? -1 : b === "SKILL.md" ? 1 : a < b ? -1 : 1));
+    return walkFiles(root).sort((a, b) => {
+      if (a === "SKILL.md") return -1;
+      if (b === "SKILL.md") return 1;
+      return a < b ? -1 : 1;
+    });
   } catch {
     return [];
   }

@@ -196,7 +196,11 @@ export function App() {
       if (bucket) bucket.push(row);
       else byOwner.set(key, [row]);
     }
-    const keys = [...byOwner.keys()].sort((a, b) => (a === "local" ? -1 : b === "local" ? 1 : a < b ? -1 : 1));
+    const keys = [...byOwner.keys()].sort((a, b) => {
+      if (a === "local") return -1;
+      if (b === "local") return 1;
+      return a < b ? -1 : 1;
+    });
     for (const key of keys) {
       const rows = byOwner.get(key) ?? [];
       out.push({
@@ -226,26 +230,23 @@ export function App() {
   const previewRestore = previewState.skill === currentName ? previewState.restore : 0;
 
   const previewData = useMemo(() => {
-    if (!current && !currentProjectSkill && !currentUnindexedSkill) return null;
-    const files = current
-      ? skillFiles(catalog.repo, current.meta)
-      : currentProjectSkill
-        ? projectSkillFiles(catalog.project, currentProjectSkill)
-        : currentUnindexedSkill
-          ? unindexedSkillFiles(currentUnindexedSkill)
-          : [];
+    const files = Match.value(currentItem).pipe(
+      Match.when({ kind: "skill" }, ({ row }) => skillFiles(catalog.repo, row.meta)),
+      Match.when({ kind: "project-skill" }, ({ skill }) => projectSkillFiles(catalog.project, skill)),
+      Match.when({ kind: "unindexed-skill" }, ({ skill }) => unindexedSkillFiles(skill)),
+      Match.orElse(() => []),
+    );
     if (files.length === 0) return null;
     const idx = clamp(previewFile, 0, files.length - 1);
     const file = files[idx] ?? "SKILL.md";
-    const content = current
-      ? readSkillFile(catalog.repo, current.meta, file)
-      : currentProjectSkill
-        ? readProjectSkillFile(catalog.project, currentProjectSkill, file)
-        : currentUnindexedSkill
-          ? readUnindexedSkillFile(currentUnindexedSkill, file)
-          : "";
+    const content = Match.value(currentItem).pipe(
+      Match.when({ kind: "skill" }, ({ row }) => readSkillFile(catalog.repo, row.meta, file)),
+      Match.when({ kind: "project-skill" }, ({ skill }) => readProjectSkillFile(catalog.project, skill, file)),
+      Match.when({ kind: "unindexed-skill" }, ({ skill }) => readUnindexedSkillFile(skill, file)),
+      Match.orElse(() => ""),
+    );
     return { files, idx, file, content };
-  }, [current, currentProjectSkill, currentUnindexedSkill, catalog.project, catalog.repo, previewFile]);
+  }, [currentItem, catalog.project, catalog.repo, previewFile]);
 
   const docLines = useMemo(() => {
     if (!previewData) return null;
@@ -631,14 +632,11 @@ export function App() {
   };
   const editCurrentSkill = () => {
     if (!editableSkillPath) {
-      const reason =
-        panel === "authors"
-          ? "focus the skill or document pane first"
-          : current?.origin === "vendor" || currentUnindexedSkill?.origin === "vendor"
-            ? "vendor baselines must be changed through update and vendor"
-            : currentUnindexedSkill?.origin === "agent"
-              ? "the staging inbox can be overwritten; index the skill before editing"
-              : "project-only skills are outside the skills host";
+      let reason: string;
+      if (panel === "authors") reason = "focus the skill or document pane first";
+      else if (current?.origin === "vendor" || currentUnindexedSkill?.origin === "vendor") reason = "vendor baselines must be changed through update and vendor";
+      else if (currentUnindexedSkill?.origin === "agent") reason = "the staging inbox can be overwritten; index the skill before editing";
+      else reason = "project-only skills are outside the skills host";
       notify(`cannot edit here: ${reason}`, true);
       return;
     }
@@ -654,16 +652,13 @@ export function App() {
   };
 
   const handleList = (key: KeyEvent): void => {
-    const panelOrder: Panel[] =
-      twoPane === "catalog"
-        ? ["authors", "skills"]
-        : twoPane === "document"
-          ? previewData
-            ? ["skills", "content", "files"]
-            : ["skills", "content"]
-          : previewData
-            ? ["authors", "skills", "content", "files"]
-            : ["authors", "skills", "content"];
+    const panelOrder = Match.value({ twoPane, hasPreview: previewData !== null }).pipe(
+      Match.when({ twoPane: "catalog" }, (): Panel[] => ["authors", "skills"]),
+      Match.when({ twoPane: "document", hasPreview: true }, (): Panel[] => ["skills", "content", "files"]),
+      Match.when({ twoPane: "document" }, (): Panel[] => ["skills", "content"]),
+      Match.when({ hasPreview: true }, (): Panel[] => ["authors", "skills", "content", "files"]),
+      Match.orElse((): Panel[] => ["authors", "skills", "content"]),
+    );
     const movePanel = (delta: number) => {
       const index = Math.max(0, panelOrder.indexOf(panel));
       focusPanel(panelOrder[clamp(index + delta, 0, panelOrder.length - 1)] ?? panel);
@@ -911,7 +906,10 @@ export function App() {
   const skillViewport = Math.max(1, viewport - 2);
   const skillWin = windowOf(0, skillIndex, currentGroup?.skills.length ?? 0, skillViewport);
   const authorsWidth = expanded === "authors" || narrow ? cols : twoPane === "catalog" ? catalogAuthorW : authorW;
-  const skillsWidth = expanded === "skills" || narrow ? cols : twoPane === "catalog" ? catalogSkillW : twoPane === "document" ? documentSkillW : skillW;
+  let skillsWidth = skillW;
+  if (expanded === "skills" || narrow) skillsWidth = cols;
+  else if (twoPane === "catalog") skillsWidth = catalogSkillW;
+  else if (twoPane === "document") skillsWidth = documentSkillW;
   const authorLabelW = Math.max(4, authorsWidth - 10);
   const skillLabelW = Math.max(4, skillsWidth - 29);
 
