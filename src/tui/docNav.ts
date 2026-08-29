@@ -25,6 +25,13 @@ function rowInCode(code: CodeRenderable, line: number): number {
  * the preview scrollbox. Exact for code files and for markdown blocks backed by
  * code renderables (paragraphs, headings, fences); block-level precision for
  * tables/lists; proportional fallback when block metadata is unavailable.
+ *
+ * This reads `_parseState` and `_blockStates`, which OpenTUI types as public but
+ * does not document, and it only gets block metadata when the caller sets the
+ * experimental `internalBlockMode="top-level"`. Both are why @opentui/core is
+ * pinned to an exact version rather than a caret range: a bump can silently
+ * degrade `/`, `n`, `{` and `}` to the proportional fallback below instead of
+ * failing loudly. src/tui/docNav.test.ts guards the mapping across upgrades.
  */
 export function scrollRowForLine(doc: DocRenderable, scroll: ScrollBoxRenderable, line: number, totalLines: number): number {
   const contentTop = scroll.content.y;
