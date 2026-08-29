@@ -27,11 +27,19 @@ function rowInCode(code: CodeRenderable, line: number): number {
  * tables/lists; proportional fallback when block metadata is unavailable.
  *
  * This reads `_parseState` and `_blockStates`, which OpenTUI types as public but
- * does not document, and it only gets block metadata when the caller sets the
- * experimental `internalBlockMode="top-level"`. Both are why @opentui/core is
- * pinned to an exact version rather than a caret range: a bump can silently
- * degrade `/`, `n`, `{` and `}` to the proportional fallback below instead of
- * failing loudly. src/tui/docNav.test.ts guards the mapping across upgrades.
+ * does not document, and it only gets per-block metadata when the caller sets
+ * the experimental `internalBlockMode="top-level"`.
+ *
+ * That flag is not decoration. Tables and lists render as something other than a
+ * code renderable, and under the default "coalesced" mode the whole document
+ * collapses into one block, so a jump to the first heading after a table lands
+ * two rows short. Both modes look identical on documents made only of headings
+ * and paragraphs, which is why docNav.test.tsx pins a fixture containing a table
+ * and a list.
+ *
+ * Together they are why @opentui/core is pinned exactly rather than by range: a
+ * bump can silently degrade `/`, `n`, `{` and `}` to the proportional fallback
+ * below instead of failing loudly.
  */
 export function scrollRowForLine(doc: DocRenderable, scroll: ScrollBoxRenderable, line: number, totalLines: number): number {
   const contentTop = scroll.content.y;

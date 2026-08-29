@@ -38,6 +38,12 @@ process.env.SLINKY_REPO = host;
 const { act } = await import("react");
 const { testRender } = await import("@opentui/react/test-utils");
 const { App } = await import("./App.tsx");
+const { rendererOptions } = await import("./index.tsx");
+
+/** Stand in for the real service so tests never touch the host clipboard. */
+const clipboard = {
+  writeText: async () => ({ host: { status: "written" }, terminal: { status: "not-attempted", capability: "unknown" } }) as const,
+};
 
 /**
  * mockInput drives the real parser, so the resulting KeyEvent lands outside
@@ -54,7 +60,7 @@ async function input(drive: () => void | Promise<void>): Promise<void> {
  * zero-delay timer, so that state update also has to land inside act.
  */
 async function mount() {
-  const setup = await testRender(<App />, size);
+  const setup = await testRender(<App clipboard={clipboard} />, { ...rendererOptions, ...size });
   await act(async () => {
     await Bun.sleep(10);
   });
@@ -120,6 +126,24 @@ test("? opens help and esc closes it", async () => {
     });
     const closed = await setup.waitForFrame((value) => !value.includes("focus the previous or next panel"));
     expect(closed).not.toContain("focus the previous or next panel");
+  } finally {
+    setup.renderer.destroy();
+  }
+});
+
+test("clicking a pane does not hand key bindings to a focused renderable", async () => {
+  const setup = await mount();
+  try {
+    await setup.waitForFrame((value) => value.includes("slinky"));
+    await input(() => setup.mockInput.pressKey("2"));
+    await setup.waitForFrame((value) => value.includes("alpha"));
+
+    // Inside the document pane, whose ScrollBox is focusable by default.
+    await input(() => setup.mockMouse.click(90, 10));
+
+    // With autofocus on, the ScrollBox would take focus here and then apply its
+    // own arrow/page/home bindings on top of App's, scrolling twice per press.
+    expect(setup.renderer.currentFocusedRenderable).toBeNull();
   } finally {
     setup.renderer.destroy();
   }

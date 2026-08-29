@@ -1,15 +1,21 @@
-import { spawn } from "node:child_process";
-import { platform, release } from "node:os";
+import type { ClipboardWriteOptions, ClipboardWriteResult } from "@opentui/core";
+import { errorDetail } from "../domain/model.ts";
 
 interface SelectionRenderer {
   readonly getSelection: () => { readonly getSelectedText: () => string } | null;
-  readonly copyToClipboardOSC52: (text: string) => boolean;
   readonly clearSelection: () => void;
+}
+
+/**
+ * The slice of OpenTUI's ClipboardService this module needs. Narrow so tests
+ * can substitute a recorder without a native host clipboard.
+ */
+export interface SelectionClipboard {
+  readonly writeText: (text: string, options: ClipboardWriteOptions) => Promise<ClipboardWriteResult>;
 }
 
 interface CopySelectionOptions {
   readonly notify: (message: string, error: boolean) => void;
-  readonly writeNative?: (text: string) => Promise<boolean>;
 }
 
 interface SelectionKeyEvent {
@@ -19,104 +25,63 @@ interface SelectionKeyEvent {
   readonly stopPropagation: () => void;
 }
 
-function runClipboardCommand(command: string, args: ReadonlyArray<string>, input: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (copied: boolean) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      resolve(copied);
-    };
-    const child = spawn(command, args, { stdio: ["pipe", "ignore", "ignore"] });
-    const timeout = setTimeout(() => {
-      child.kill();
-      finish(false);
-    }, 5000);
-    child.on("error", () => finish(false));
-    child.on("close", (code) => finish(code === 0));
-    child.stdin.on("error", () => finish(false));
-    child.stdin.end(input);
-  });
+/**
+ * `best-available` writes to the host clipboard first and only falls back to
+ * OSC 52 when the host reports `unsupported` or `failed`. That ordering matters:
+ * a queued OSC 52 sequence says nothing about whether the terminal accepted it,
+ * and an undetected terminal reports its OSC 52 capability as `unknown`, so
+ * preferring the terminal path would report success on terminals that silently
+ * drop the sequence.
+ */
+const writeOptions: ClipboardWriteOptions = { destination: "best-available" };
+
+interface CopyOutcome {
+  readonly message: string;
+  readonly error: boolean;
 }
 
-async function writeNativeClipboardNow(text: string): Promise<boolean> {
-  const os = platform();
-  const commands: Array<readonly [string, ...string[]]> = [];
-  if (os === "darwin") commands.push(["pbcopy"]);
-  if (os === "linux") {
-    if (process.env.WAYLAND_DISPLAY) commands.push(["wl-copy"]);
-    commands.push(["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]);
-  }
-  if (os === "win32" || release().toLowerCase().includes("microsoft")) {
-    commands.push([
-      "powershell.exe",
-      "-NonInteractive",
-      "-NoProfile",
-      "-Command",
-      "[Console]::InputEncoding = [System.Text.Encoding]::UTF8; Set-Clipboard -Value ([Console]::In.ReadToEnd())",
-    ]);
-  }
-
-  for (const [command, ...args] of commands) {
-    if (await runClipboardCommand(command, args, text)) return true;
-  }
-  return false;
-}
-
-let nativeWriteQueue = Promise.resolve();
-
-/** Copy natively in selection order so an older process cannot overwrite a newer selection. */
-export function writeNativeClipboard(text: string): Promise<boolean> {
-  const result = nativeWriteQueue.then(() => writeNativeClipboardNow(text));
-  nativeWriteQueue = result.then(
-    () => undefined,
-    () => undefined,
-  );
-  return result;
+function describe(result: ClipboardWriteResult): CopyOutcome {
+  if (result.host.status === "written") return { message: "copied to clipboard", error: false };
+  if (result.terminal.status === "attempted") return { message: "copied to clipboard", error: false };
+  if (result.host.status === "timed-out") return { message: "clipboard timed out", error: true };
+  if (result.host.status === "failed") return { message: `clipboard failed: ${result.host.error.message}`, error: true };
+  return { message: "clipboard unavailable", error: true };
 }
 
 let latestCopy = 0;
 
-/** Copy the active OpenTUI text selection and clear its highlight. */
-export function copySelection(renderer: SelectionRenderer, options: CopySelectionOptions): boolean {
+/**
+ * Copy the active OpenTUI text selection and clear its highlight. Returns
+ * whether a selection existed, synchronously, so key handling can decide
+ * immediately whether it consumed the event; the write itself is asynchronous.
+ */
+export function copySelection(renderer: SelectionRenderer, clipboard: SelectionClipboard, options: CopySelectionOptions): boolean {
   const text = renderer.getSelection()?.getSelectedText();
   if (!text) return false;
+
   const copy = ++latestCopy;
-
-  let osc52 = false;
-  try {
-    osc52 = renderer.copyToClipboardOSC52(text);
-  } catch {
-    // Native clipboard utilities remain available when terminal capability detection fails.
-  }
-
-  let native: Promise<boolean>;
-  try {
-    native = (options.writeNative ?? writeNativeClipboard)(text);
-  } catch {
-    native = Promise.resolve(false);
-  }
   renderer.clearSelection();
 
-  if (osc52) options.notify("copied to clipboard", false);
-  else {
-    void native.then(
-      (copied) => {
-        if (copy === latestCopy) options.notify(copied ? "copied to clipboard" : "clipboard unavailable", !copied);
-      },
-      () => {
-        if (copy === latestCopy) options.notify("clipboard unavailable", true);
-      },
-    );
-  }
+  void clipboard.writeText(text, writeOptions).then(
+    (result) => {
+      // A newer selection already reported; do not overwrite its message.
+      if (copy !== latestCopy) return;
+      const { message, error } = describe(result);
+      options.notify(message, error);
+    },
+    // writeText rejects on invalid text or a payload over maxWriteBytes.
+    <Thrown>(error: Thrown) => {
+      if (copy !== latestCopy) return;
+      options.notify(`clipboard failed: ${errorDetail(error)}`, true);
+    },
+  );
   return true;
 }
 
 /** Let text-selection actions win before application-level key bindings. */
-export function handleSelectionKey(renderer: SelectionRenderer, key: SelectionKeyEvent, options: CopySelectionOptions): boolean {
+export function handleSelectionKey(renderer: SelectionRenderer, clipboard: SelectionClipboard, key: SelectionKeyEvent, options: CopySelectionOptions): boolean {
   if (key.ctrl && key.name === "c") {
-    if (!copySelection(renderer, options)) return false;
+    if (!copySelection(renderer, clipboard, options)) return false;
     key.preventDefault();
     key.stopPropagation();
     return true;

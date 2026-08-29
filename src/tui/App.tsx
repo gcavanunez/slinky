@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { existsSync } from "node:fs";
 import { basename, extname, join } from "node:path";
 import { Match } from "effect";
-import { useKeyboard, usePaste, useRenderer, useTerminalDimensions } from "@opentui/react";
+import { useKeyboard, usePaste, useRenderer, useSelectionHandler, useTerminalDimensions } from "@opentui/react";
 import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core";
 import { acceptVendorDrift, applyProfile, linkProjectSkill, restoreVendorDrift, setSkillsEnabled } from "../lib/catalogActions.ts";
 import type { ActionResult } from "../lib/catalogActions.ts";
@@ -20,6 +20,7 @@ import { clamp, fileTreeRows, fitCell, markdownBody, markdownHeadingLines, print
 import { scrollRowForLine } from "./docNav.ts";
 import type { DocRenderable } from "./docNav.ts";
 import { copySelection, handleSelectionKey } from "./clipboard.ts";
+import type { SelectionClipboard } from "./clipboard.ts";
 import { editableHostSkillPath, editSkillInEditor, withSuspendedRenderer } from "./external.ts";
 import { cycleLayout, primaryPanel, resizeFocusedSplit } from "./layout.ts";
 import type { Panel, PrimaryPanel, TwoPanePair } from "./layout.ts";
@@ -110,7 +111,7 @@ const placementCell = {
   unmanaged: { label: "unmanaged", fg: colors.yellow },
 } satisfies Record<ProjectPlacement, { label: string; fg: string }>;
 
-export function App() {
+export function App({ clipboard }: { clipboard: SelectionClipboard }) {
   const renderer = useRenderer();
   const { width: cols, height: rowsAvail } = useTerminalDimensions();
 
@@ -291,7 +292,11 @@ export function App() {
       setFlash((cur) => (cur?.text === snapshot ? null : cur));
     }, 3000);
   };
-  const copyActiveSelection = () => copySelection(renderer, { notify });
+  // The renderer emits `selection` exactly when a drag finishes, so this fires
+  // per completed selection rather than on every mouse release.
+  useSelectionHandler(() => {
+    copySelection(renderer, clipboard, { notify });
+  });
 
   const reportAction = (label: string, res: ActionResult) => {
     if (res.warnings.length > 0) notify(`${label}: ${res.warnings[0]}`, true);
@@ -863,8 +868,9 @@ export function App() {
   };
 
   useKeyboard((key) => {
-    if (key.eventType === "release" || (key.repeated === true && key.name === "g")) return;
-    if (handleSelectionKey(renderer, key, { notify })) return;
+    // gg is a timed prefix; a held key would otherwise satisfy it on its own.
+    if (key.repeated === true && key.name === "g") return;
+    if (handleSelectionKey(renderer, clipboard, key, { notify })) return;
     if (handleFilter(key)) return;
     if (handleFind(key)) return;
     if (handleOverlay(key)) return;
@@ -1094,7 +1100,7 @@ export function App() {
   );
 
   return (
-    <box width="100%" height="100%" flexDirection="column" onMouseUp={copyActiveSelection}>
+    <box width="100%" height="100%" flexDirection="column">
       {header}
       {tabs}
       {filterBar}
@@ -1257,6 +1263,14 @@ function PreviewPanel({
                 width="100%"
                 content={content}
                 syntaxStyle={syntaxStyle}
+                // Kept on deliberately, against the usual "finalize when the
+                // content stops arriving" advice. Content here arrives whole,
+                // but streaming is also what paints before tree-sitter returns:
+                // measured 6ms to first paint with it, 131ms without. Selecting
+                // a skill must not blank the pane for an eighth of a second.
+                // The documented cost is that the last two blocks stay marked
+                // unstable, which only affects _stableBlockCount and the
+                // scrollback commit APIs this pane does not use.
                 streaming
                 internalBlockMode="top-level"
                 tableOptions={{ style: "grid", widthMode: "full", wrapMode: "word" }}
