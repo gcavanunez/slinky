@@ -46,18 +46,37 @@ for (const target of selectedTargets()) {
   const assetPath = join(releaseDir, assetName);
 
   await mkdir(stageDir, { recursive: true });
-  run(["bun", "build", "--compile", "--bytecode", "--format=esm", `--target=${target.bunTarget}`, `--outfile=${binaryPath}`, "src/standalone.ts"]);
+  run([
+    "bun",
+    "build",
+    "--compile",
+    "--bytecode",
+    "--format=esm",
+    `--target=${target.bunTarget}`,
+    // OpenTUI picks its native package from OPENTUI_LIBC while its module graph
+    // evaluates. Defining it at build time lets Bun drop the branch it does not
+    // need; leaving it undefined keeps both, so a glibc build also wants the
+    // musl native package present. We publish glibc only.
+    ...(target.os === "linux" ? ["--define", `process.env.OPENTUI_LIBC=${JSON.stringify(target.libc)}`] : []),
+    `--outfile=${binaryPath}`,
+    "src/standalone.ts",
+  ]);
   await chmod(binaryPath, 0o755);
 
   if (target.id === hostTargetId) {
-    const version = Bun.spawnSync({
-      cmd: [binaryPath, "--version"],
-      cwd: root,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    if (version.exitCode !== 0) {
-      throw new Error(`Standalone smoke failed for ${target.id}: ${version.stderr.toString()}`);
+    // --version returns before the CLI is imported, so on its own it proves
+    // nothing about the embedded native library, parser worker or grammars.
+    // --selftest drives the renderer the TUI actually uses.
+    for (const argv of [["--version"], ["--selftest"]]) {
+      const smoke = Bun.spawnSync({
+        cmd: [binaryPath, ...argv],
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      if (smoke.exitCode !== 0) {
+        throw new Error(`Standalone smoke ${argv[0]} failed for ${target.id}: ${smoke.stderr.toString()}`);
+      }
     }
   }
 

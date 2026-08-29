@@ -3,13 +3,15 @@ export interface ReleaseTarget {
   readonly bunTarget: string;
   readonly os: "darwin" | "linux";
   readonly cpu: "arm64" | "x64";
+  /** Which OpenTUI native package to embed; Linux glibc and musl are separate targets. */
+  readonly libc?: "glibc" | "musl";
 }
 
 export const releaseTargets: ReadonlyArray<ReleaseTarget> = [
   { id: "darwin-arm64", bunTarget: "bun-darwin-arm64", os: "darwin", cpu: "arm64" },
   { id: "darwin-x64", bunTarget: "bun-darwin-x64", os: "darwin", cpu: "x64" },
-  { id: "linux-arm64", bunTarget: "bun-linux-arm64", os: "linux", cpu: "arm64" },
-  { id: "linux-x64", bunTarget: "bun-linux-x64", os: "linux", cpu: "x64" },
+  { id: "linux-arm64", bunTarget: "bun-linux-arm64", os: "linux", cpu: "arm64", libc: "glibc" },
+  { id: "linux-x64", bunTarget: "bun-linux-x64", os: "linux", cpu: "x64", libc: "glibc" },
 ];
 
 export function currentReleaseTargetId(): string | null {

@@ -48,8 +48,15 @@ async function assertInstalledPackage(projectDir: string): Promise<void> {
   assert(binaryPackageDir !== null && (await Bun.file(join(binaryPackageDir, "bin", "slinky")).exists()), "Installed package must include the platform binary");
   assert(!(await Bun.file(join(packageDir, "src", "cli.ts")).exists()), "Published package must not rely on TypeScript sources");
 
-  const version = run([join(projectDir, "node_modules", ".bin", "slinky"), "--version"], projectDir);
+  const slinky = join(projectDir, "node_modules", ".bin", "slinky");
+  const version = run([slinky, "--version"], projectDir);
   assert(version.stdout.trim() === rootPackage.version, `Expected slinky --version to print ${rootPackage.version}, got ${JSON.stringify(version.stdout.trim())}`);
+
+  // --version short-circuits before OpenTUI is imported, so it would pass even
+  // if the published binary could not load its native library. Exercise the
+  // renderer through the npm wrapper the way a user reaches it.
+  const selftest = run([slinky, "--selftest"], projectDir);
+  assert(selftest.stdout.includes("ok  native renderer"), `Expected slinky --selftest to reach the native renderer, got ${JSON.stringify(selftest.stdout)}`);
 }
 
 async function pack(cwd: string, packDir: string): Promise<string> {
