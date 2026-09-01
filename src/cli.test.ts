@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Schema } from "effect";
@@ -598,6 +598,10 @@ describe("remote catalog sync", () => {
     expect(runCli(publisher.host, publisher.home, ["save"], gitIdentity).exitCode).toBe(0);
     expect(runGit(publisher.host, ["push"]).exitCode).toBe(0);
 
+    const preview = runCli(subscriber, subscriberHome, ["sync", "--dry-run"]);
+    if (preview.exitCode !== 0) throw new Error(`${preview.stderr.toString()}\n${preview.stdout.toString()}`);
+    expect(preview.stdout.toString()).toContain("would ensure-agents-symlink baz");
+
     const pulled = runCli(subscriber, subscriberHome, ["pull"]);
 
     if (pulled.exitCode !== 0) throw new Error(`${pulled.stderr.toString()}\n${pulled.stdout.toString()}`);
@@ -607,16 +611,86 @@ describe("remote catalog sync", () => {
     expect(stateAt(join(subscriber, ".local", "state.json")).disabledSkills).toEqual(["foo"]);
   });
 
-  test("sync --pull uses the remote workflow while plain sync stays offline", () => {
+  test("sync --dry-run previews the remote workflow without changing the catalog", () => {
     const f = fixture();
     initializeGitFixture(f.host, f.home);
     attachRemote(f);
 
-    const result = runCli(f.host, f.home, ["sync", "--pull", "--dry-run"]);
+    const result = runCli(f.host, f.home, ["sync", "--dry-run"]);
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout.toString()).toContain("already up to date");
     expect(runGit(f.host, ["status", "--porcelain"]).stdout.toString()).toBe("");
+  });
+
+  test("sync --dry-run projects a missing host lock without writing it", () => {
+    const f = fixture();
+    initializeGitFixture(f.host, f.home);
+    const lock = join(f.host, ".skill-lock.json");
+    expect(existsSync(lock)).toBe(false);
+
+    const result = runCli(f.host, f.home, ["sync", "--dry-run"]);
+
+    if (result.exitCode !== 0) throw new Error(`${result.stderr.toString()}\n${result.stdout.toString()}`);
+    expect(result.stdout.toString()).toContain("would verify and save catalog-managed changes");
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  test("sync previews and then restores all live vendor drift", () => {
+    const f = fixture();
+    addDriftingVendor(f);
+    initializeGitFixture(f.host, f.home);
+    attachRemote(f);
+    const live = join(f.home, ".agents", "skills", "drifting", "SKILL.md");
+
+    const preview = runCli(f.host, f.home, ["sync", "--dry-run"]);
+
+    if (preview.exitCode !== 0) throw new Error(`${preview.stderr.toString()}\n${preview.stdout.toString()}`);
+    expect(preview.stdout.toString()).toContain("would restore drifting live copy from repo baseline");
+    expect(readFileSync(live, "utf8")).toBe("# live drifting\n");
+
+    const synced = runCli(f.host, f.home, ["sync"]);
+
+    if (synced.exitCode !== 0) throw new Error(`${synced.stderr.toString()}\n${synced.stdout.toString()}`);
+    expect(synced.stdout.toString()).toContain("drifting: live copy restored from repo baseline");
+    expect(readFileSync(live, "utf8")).toBe("# baseline drifting\n");
+  }, 30_000);
+
+  test("sync removes a disabled vendor after restoring its drift", () => {
+    const f = fixture();
+    addDriftingVendor(f);
+    const state = JSON.parse(readFileSync(f.statePath, "utf8"));
+    state.disabledSkills.push("drifting");
+    writeFileSync(f.statePath, `${JSON.stringify(state)}\n`);
+    const live = join(f.home, ".agents", "skills", "drifting");
+
+    const synced = runCli(f.host, f.home, ["sync"]);
+
+    if (synced.exitCode !== 0) throw new Error(`${synced.stderr.toString()}\n${synced.stdout.toString()}`);
+    expect(existsSync(live)).toBe(false);
+  });
+
+  test("sync retires a locally removed catalog skill while saving", () => {
+    const f = fixture();
+    initializeGitFixture(f.host, f.home);
+    expect(runCli(f.host, f.home, ["sync"], gitIdentity).exitCode).toBe(0);
+    const live = join(f.home, ".agents", "skills", "bar");
+    expect(lstatSync(live).isSymbolicLink()).toBe(true);
+    const manifestPath = join(f.host, "skills.manifest.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    delete manifest.skills.bar;
+    writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
+    rmSync(join(f.host, "skills", "bar"), { recursive: true });
+
+    const preview = runCli(f.host, f.home, ["sync", "--dry-run"]);
+    if (preview.exitCode !== 0) throw new Error(`${preview.stderr.toString()}\n${preview.stdout.toString()}`);
+    expect(preview.stdout.toString()).toContain("would remove-agents retired skill bar");
+    expect(lstatSync(live).isSymbolicLink()).toBe(true);
+
+    const synced = runCli(f.host, f.home, ["sync"], gitIdentity);
+    if (synced.exitCode !== 0) throw new Error(`${synced.stderr.toString()}\n${synced.stdout.toString()}`);
+    expect(existsSync(live)).toBe(false);
+    expect(JSON.parse(readFileSync(f.statePath, "utf8")).disabledSkills).not.toContain("bar");
   });
 
   function divergedSubscriber(label: string) {
@@ -692,6 +766,23 @@ describe("remote catalog sync", () => {
     expect(runGit(subscriber, ["rev-parse", "HEAD"]).stdout.toString()).toBe(before);
   }, 30_000);
 
+  test("pull verifies a diverged merge before rewriting the branch", () => {
+    const { publisher, subscriber, subscriberHome } = divergedSubscriber("invalid-merge");
+    writeFileSync(join(publisher.host, "skills", "foo", "SKILL.md"), "# unverified publisher edit\n");
+    expect(runGit(publisher.host, ["add", "skills/foo/SKILL.md"]).exitCode).toBe(0);
+    expect(runGit(publisher.host, ["commit", "-qm", "Invalid publisher catalog"]).exitCode).toBe(0);
+    expect(runGit(publisher.host, ["push"]).exitCode).toBe(0);
+    commitFile(subscriber, "subscriber-note.txt", "subscriber\n", "Subscriber commit");
+    const before = runGit(subscriber, ["rev-parse", "HEAD"]).stdout.toString();
+
+    const pulled = runCli(subscriber, subscriberHome, ["pull"]);
+
+    expect(pulled.exitCode).toBe(1);
+    expect(pulled.stdout.toString()).toContain("hash mismatch");
+    expect(runGit(subscriber, ["rev-parse", "HEAD"]).stdout.toString()).toBe(before);
+    expect(runGit(subscriber, ["status", "--porcelain"]).stdout.toString().trim()).toBe("");
+  }, 30_000);
+
   test("pull --dry-run reports a replay without touching the branch", () => {
     const { publisher, subscriber, subscriberHome } = divergedSubscriber("dry-diverged");
     commitFile(publisher.host, "publisher-note.txt", "publisher\n", "Publisher commit");
@@ -737,7 +828,7 @@ describe("remote catalog sync", () => {
     expect(runGit(subscriber, ["rev-parse", "HEAD"]).stdout.toString()).toBe(before);
   });
 
-  test("pull detects retired global drift before changing Git or other globals", () => {
+  test("pull and sync refuse to retire a local skill replaced by a real directory", () => {
     const publisher = fixture();
     initializeGitFixture(publisher.host, publisher.home);
     const remote = attachRemote(publisher);
@@ -758,7 +849,38 @@ describe("remote catalog sync", () => {
     expect(pulled.stderr.toString()).toContain("live dir drifted from repo copy");
     expect(runGit(subscriber, ["rev-parse", "HEAD"]).stdout.toString()).toBe(before);
     expect(lstatSync(join(subscriberHome, ".claude", "skills", "bar")).isSymbolicLink()).toBe(true);
-  });
+
+    const synced = runCli(subscriber, subscriberHome, ["sync"]);
+    expect(synced.exitCode).toBe(1);
+    expect(synced.stderr.toString()).toContain("live dir drifted from repo copy");
+    expect(readFileSync(join(subscriberHome, ".agents", "skills", "bar", "SKILL.md"), "utf8")).toBe("# unrelated bar\n");
+  }, 30_000);
+
+  test("sync authorizes retiring a drifting vendor while pulling", () => {
+    const publisher = fixture();
+    addDriftingVendor(publisher);
+    initializeGitFixture(publisher.host, publisher.home);
+    const remote = attachRemote(publisher);
+    const subscriber = join(publisher.root, "sync-drift-subscriber");
+    const subscriberHome = join(publisher.root, "sync-drift-home");
+    expect(Bun.spawnSync(["git", "clone", "-q", remote, subscriber]).exitCode).toBe(0);
+    mkdirSync(subscriberHome, { recursive: true });
+    const live = join(subscriberHome, ".agents", "skills", "drifting");
+    mkdirSync(live, { recursive: true });
+    writeFileSync(join(live, "SKILL.md"), "# unrelated drifting vendor\n");
+    const manifest = JSON.parse(readFileSync(join(publisher.host, "skills.manifest.json"), "utf8"));
+    delete manifest.skills.drifting;
+    writeFileSync(join(publisher.host, "skills.manifest.json"), `${JSON.stringify(manifest)}\n`);
+    rmSync(join(publisher.host, "vendor", "acme", "drifting"), { recursive: true });
+    expect(runCli(publisher.host, publisher.home, ["save"], gitIdentity).exitCode).toBe(0);
+    expect(runGit(publisher.host, ["push"]).exitCode).toBe(0);
+
+    const synced = runCli(subscriber, subscriberHome, ["sync"]);
+
+    if (synced.exitCode !== 0) throw new Error(`${synced.stderr.toString()}\n${synced.stdout.toString()}`);
+    expect(existsSync(live)).toBe(false);
+    expect(runGit(subscriber, ["rev-parse", "HEAD"]).stdout.toString()).toBe(runGit(publisher.host, ["rev-parse", "HEAD"]).stdout.toString());
+  }, 30_000);
 });
 
 describe("diff pagers", () => {
@@ -932,7 +1054,7 @@ printf '%s\\n' '${lock}' > "$PWD/skills-lock.json"
       "effect",
       "--yes",
     ]);
-    expect(readFileSync(join(f.home, "npx-cwd"), "utf8").trim()).toBe(f.host);
+    expect(realpathSync(readFileSync(join(f.home, "npx-cwd"), "utf8").trim())).toBe(realpathSync(f.host));
     expect(manifest.skills.effect).toEqual({
       origin: "vendor",
       path: "vendor/kitlangton/effect",

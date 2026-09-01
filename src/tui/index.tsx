@@ -4,6 +4,8 @@
 // this file's JSX at that project's runtime. Pin it per file.
 import { createClipboard, createCliRenderer, createHostClipboard, createRendererClipboardAdapter } from "@opentui/core";
 import type { CliRenderer, CliRendererConfig, ClipboardService, HostClipboardService } from "@opentui/core";
+import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui";
+import { KeymapProvider } from "@opentui/keymap/react";
 import { createRoot } from "@opentui/react";
 import { App } from "./App.tsx";
 import { runtime } from "./runtime.ts";
@@ -47,7 +49,12 @@ export async function runTui(): Promise<void> {
     host = undefined; // createClipboard() owns it from here.
 
     const root = createRoot(renderer);
-    root.render(<App clipboard={clipboard} />);
+    const keymap = createDefaultOpenTuiKeymap(renderer);
+    root.render(
+      <KeymapProvider keymap={keymap}>
+        <App clipboard={clipboard} />
+      </KeymapProvider>,
+    );
 
     // render() returns as soon as the tree mounts, so hold the process here
     // until something destroys the renderer. Quitting, a signal, and a crash

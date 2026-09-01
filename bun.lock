@@ -7,6 +7,7 @@
       "dependencies": {
         "@effect/platform-bun": "4.0.0-beta.102",
         "@opentui/core": "0.5.9",
+        "@opentui/keymap": "0.5.9",
         "@opentui/react": "0.5.9",
         "effect": "4.0.0-beta.102",
         "react": "^19.2.7",
@@ -64,6 +65,8 @@
     "@opentui/core-win32-arm64": ["@opentui/core-win32-arm64@0.5.9", "", { "os": "win32", "cpu": "arm64" }, "sha512-OnmEsGLWwsHrm6sTsWSSesu4LGjSV1JNWqCsEItbuitWaqH6rXdSahSc5jMFsS57bZxUyaRz01yAqiZzUSXnVQ=="],
 
     "@opentui/core-win32-x64": ["@opentui/core-win32-x64@0.5.9", "", { "os": "win32", "cpu": "x64" }, "sha512-/CnAIfKL7+ZeGLyZoXV5zS71Nd8Zn97RUir2DAIY05MJozmfg5s7XOAdUNYuK1cg5mbwlAuqeAsfbuWUAEe15g=="],
+
+    "@opentui/keymap": ["@opentui/keymap@0.5.9", "", { "dependencies": { "@opentui/core": "0.5.9" }, "peerDependencies": { "@opentui/react": "0.5.9", "@opentui/solid": "0.5.9", "react": ">=19.2.0", "solid-js": "1.9.12" }, "optionalPeers": ["@opentui/react", "@opentui/solid", "react", "solid-js"] }, "sha512-ZcRNeuCDv+LJ89BS5xBw90e0S1Etn6j41jflg6LZlWj4bnqjCU55dq0+zERUdkkC4rqD4SikM8q7V3ZfkwzyyQ=="],
 
     "@opentui/react": ["@opentui/react@0.5.9", "", { "dependencies": { "@opentui/core": "0.5.9", "react-reconciler": "^0.33.0" }, "peerDependencies": { "react": ">=19.2.0", "react-devtools-core": "^7.0.1", "ws": "^8.18.0" } }, "sha512-MrJ0sIDmBOhF4q85yZABEfpd2mOPfSj3jA8WS/MPtySEOGy/0Aw3XZTh9wgFvivGk/qGVJK0s4YY+iLwudIYQg=="],
 

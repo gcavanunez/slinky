@@ -36,7 +36,10 @@ process.env.HOME = home;
 process.env.SLINKY_REPO = host;
 
 const { act } = await import("react");
-const { testRender } = await import("@opentui/react/test-utils");
+const { createTestRenderer } = await import("@opentui/core/testing");
+const { createDefaultOpenTuiKeymap } = await import("@opentui/keymap/opentui");
+const { KeymapProvider } = await import("@opentui/keymap/react");
+const { createRoot } = await import("@opentui/react");
 const { App } = await import("./App.tsx");
 const { rendererOptions } = await import("./index.tsx");
 
@@ -60,7 +63,26 @@ async function input(drive: () => void | Promise<void>): Promise<void> {
  * zero-delay timer, so that state update also has to land inside act.
  */
 async function mount() {
-  const setup = await testRender(<App clipboard={clipboard} />, { ...rendererOptions, ...size });
+  let root: ReturnType<typeof createRoot> | null = null;
+  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { value: true, configurable: true, writable: true });
+  const setup = await createTestRenderer({
+    ...rendererOptions,
+    ...size,
+    onDestroy() {
+      act(() => root?.unmount());
+      root = null;
+      Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { value: false, configurable: true, writable: true });
+    },
+  });
+  const keymap = createDefaultOpenTuiKeymap(setup.renderer);
+  root = createRoot(setup.renderer);
+  act(() => {
+    root?.render(
+      <KeymapProvider keymap={keymap}>
+        <App clipboard={clipboard} />
+      </KeymapProvider>,
+    );
+  });
   await act(async () => {
     await Bun.sleep(10);
   });
@@ -162,6 +184,71 @@ test("/ filters the catalog down to matching skills", async () => {
     const filtered = await setup.waitForFrame((value) => value.includes("1 match"));
     expect(filtered).toContain("alpha");
     expect(filtered).not.toContain("beta");
+  } finally {
+    setup.renderer.destroy();
+  }
+});
+
+test("Ctrl+C does not quit while filter input is active", async () => {
+  const setup = await mount();
+  try {
+    await setup.waitForFrame((value) => value.includes("slinky"));
+    await input(() => setup.mockInput.pressKey("2"));
+    await input(() => setup.mockInput.pressKey("/"));
+    await input(() => setup.mockInput.typeText("alph"));
+    await setup.waitForFrame((value) => value.includes("1 match"));
+
+    await input(() => setup.mockInput.pressCtrlC());
+
+    expect(setup.renderer.isDestroyed).toBe(false);
+    expect(await setup.waitForFrame((value) => value.includes("1 match"))).toContain("alpha");
+  } finally {
+    setup.renderer.destroy();
+  }
+});
+
+test("keymap routes list movement and the gg sequence", async () => {
+  const setup = await mount();
+  try {
+    await setup.waitForFrame((value) => value.includes("slinky"));
+    await input(() => setup.mockInput.pressKey("2"));
+    await input(() => setup.mockInput.pressKey("j"));
+    await input(() => setup.mockInput.pressKey("i"));
+    expect(await setup.waitForFrame((value) => value.includes("beta fixture skill."))).toContain("beta fixture skill.");
+
+    await input(async () => {
+      setup.mockInput.pressEscape();
+      await Bun.sleep(60);
+    });
+    await setup.waitForFrame((value) => !value.includes("beta fixture skill."));
+    await input(async () => {
+      setup.mockInput.pressKey("g");
+      await Bun.sleep(550);
+    });
+    await input(() => setup.mockInput.pressKey("i"));
+    expect(await setup.waitForFrame((value) => value.includes("beta fixture skill."))).toContain("beta fixture skill.");
+    await input(async () => {
+      setup.mockInput.pressEscape();
+      await Bun.sleep(60);
+    });
+    await setup.waitForFrame((value) => !value.includes("beta fixture skill."));
+    await input(() => {
+      setup.mockInput.pressKey("g");
+      setup.mockInput.pressKey("j");
+    });
+    await input(() => setup.mockInput.pressKey("i"));
+    expect(await setup.waitForFrame((value) => value.includes("beta fixture skill."))).toContain("beta fixture skill.");
+    await input(async () => {
+      setup.mockInput.pressEscape();
+      await Bun.sleep(60);
+    });
+    await setup.waitForFrame((value) => !value.includes("beta fixture skill."));
+    await input(() => {
+      setup.mockInput.pressKey("g");
+      setup.mockInput.pressKey("g");
+    });
+    await input(() => setup.mockInput.pressKey("i"));
+    expect(await setup.waitForFrame((value) => value.includes("alpha fixture skill."))).toContain("alpha fixture skill.");
   } finally {
     setup.renderer.destroy();
   }

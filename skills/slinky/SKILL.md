@@ -200,14 +200,20 @@ Share that commit through the branch's configured upstream:
 slinky push
 ```
 
-On another machine, fast-forward and reconcile with either form:
+On another machine, fast-forward and reconcile without discarding unrelated live vendor drift:
 
 ```bash
 slinky pull
-slinky sync --pull
 ```
 
-These commands require a clean host worktree and a configured upstream. Pull is fast-forward only and preserves local disabled skills, project links, recent projects, and profiles that still exist. It blocks removal of a skill that has a local project link. Use `pull --dry-run` or `sync --pull --dry-run` to fetch and inspect whether an update would be applied without changing the checked-out catalog or global skills.
+Use the complete convergence workflow when reviewed catalog changes should be saved and every live vendor should be reset to the resulting baseline:
+
+```bash
+slinky sync --dry-run
+slinky sync
+```
+
+`sync` saves, pulls or rebases, reconciles global stores, and restores all live vendor drift. The command itself authorizes that restore, including deletion of a drifting vendor retired by the incoming catalog. Always inspect the dry-run or `slinky diff` first. `pull` remains the narrower operation and refuses destructive retirement drift. Both preserve local disabled skills, project links, recent projects, and profiles that still exist. They block removal of a skill that has a local project link. `sync --pull` remains accepted as a compatibility alias but is no longer required.
 
 ## Project Links
 
@@ -255,7 +261,7 @@ Bootstrap backs up global skill directories before mutation. If it reports forei
 ## Safety Rules
 
 - Prefer preview commands: `sync --dry-run`, `bootstrap --dry-run`, and `update --check`.
-- Treat `--force`, `--adopt-all`, `adopt all`, `restore all`, and `update --yes` as explicit user decisions.
+- Treat `--force`, `--adopt-all`, `adopt all`, `restore all`, `sync`, and `update --yes` as explicit user decisions. Plain `sync` restores all vendor drift.
 - Do not edit `.local/state.json` or global skill directories by hand.
 - Do not delete vendor drift before showing `slinky diff` or explaining the restore/vendor choice.
 - Keep the skills host under Git and review its diff after adoption or accepted updates.

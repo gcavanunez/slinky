@@ -76,6 +76,8 @@ slinky sync --dry-run
 slinky sync
 ```
 
+`sync` is the complete convergence workflow: it saves reviewed catalog changes, pulls and rebases the configured upstream when present, reconciles global stores, and restores every live vendor copy to the resulting catalog baseline. Because that final step discards live vendor drift, run `slinky diff` or `slinky sync --dry-run` first when the drift has not already been reviewed. A host without Git or an upstream still runs the local reconcile and restore phases.
+
 For a fresh machine, clone and initialize a host in one step:
 
 ```bash
@@ -193,19 +195,19 @@ Push a saved catalog through the current branch's configured Git upstream:
 slinky push
 ```
 
-On another machine, fast-forward the host and reconcile its global skills in one step:
+On another machine, use `pull` when you only want to update the host and reconcile its global skills:
 
 ```bash
 slinky pull
-# Equivalent when sync is already part of the workflow:
-slinky sync --pull
 ```
+
+Use `slinky sync` for the full save, pull, reconcile, and restore workflow. `slinky sync --pull` remains accepted as a compatibility alias, but `sync` now pulls automatically.
 
 `push` requires a clean worktree and verifies the catalog before running `git push`. `pull` also requires a clean worktree, fetches the configured upstream, and updates the branch by fast-forward. It refuses catalog removals that still have project links on the current machine.
 
 Saving on two machines diverges the branch, so `pull` replays local commits onto the upstream tip rather than stopping. It only does so when it can prove the result first: the two sides must merge without conflict, and the merged catalog must not retire a skill. Anything else is reported with the conflicting paths or the retired skill names and left for you to resolve with `git rebase`. A replay that cannot be completed is aborted, leaving the branch where it was found.
 
-Pulling preserves machine-local state: disabled skills, recent projects, project links, and an active profile that still exists upstream. Removed skills are dropped from local disabled state and removed profiles are deactivated. Retired global copies and machine provenance are pruned only when their content still matches the old committed baseline; drift requires review or an explicit `--force`. `slinky pull --dry-run` and `slinky sync --pull --dry-run` fetch remote refs but do not fast-forward or reconcile files.
+Pulling preserves machine-local state: disabled skills, recent projects, project links, and an active profile that still exists upstream. Removed skills are dropped from local disabled state and removed profiles are deactivated. Standalone `pull` prunes retired global copies and machine provenance only when their content still matches the old committed baseline; drift requires review or an explicit `--force`. `sync` instead treats the command itself as authorization to discard vendor drift, including a drifting skill retired by the incoming catalog. `slinky pull --dry-run` and `slinky sync --dry-run` do not fast-forward, commit, reconcile, or restore files. Sync dry-run fetches remote details when the catalog is already saved; when a save is pending, it reports that the pull preview follows the save.
 
 ## Project Links
 

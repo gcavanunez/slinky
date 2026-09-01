@@ -245,8 +245,8 @@ export const restoreHostSkillLock = Effect.fn("SkillLock.restoreHost")(function*
   });
 });
 
-/** Create or complete the committed host lock from manifest authority. */
-export const ensureHostSkillLock = Effect.fn("SkillLock.ensureHost")(function* (manifest: Manifest) {
+/** Project the committed host lock after filling entries from manifest and machine authority. */
+export const previewHostSkillLock = Effect.fn("SkillLock.previewHost")(function* (manifest: Manifest) {
   const host = yield* loadHostSkillLock();
   const paths = yield* Paths;
   const global = readSkillLockFile(paths.skillLock);
@@ -268,8 +268,17 @@ export const ensureHostSkillLock = Effect.fn("SkillLock.ensureHost")(function* (
 
   const encoded = JSON.stringify(sortedEntries(next));
   const changed = !host.exists || encoded !== JSON.stringify(sortedEntries(host.entries));
-  if (changed) yield* saveHostSkillLock(next);
-  return { entries: next, changed };
+  return {
+    snapshot: { ...host, exists: true, version: skillLockVersion, root: { version: skillLockVersion, skills: sortedEntries(next) }, entries: next },
+    changed,
+  };
+});
+
+/** Create or complete the committed host lock from manifest authority. */
+export const ensureHostSkillLock = Effect.fn("SkillLock.ensureHost")(function* (manifest: Manifest) {
+  const projected = yield* previewHostSkillLock(manifest);
+  if (projected.changed) yield* saveHostSkillLock(projected.snapshot.entries);
+  return { entries: projected.snapshot.entries, changed: projected.changed };
 });
 
 export const validateHostSkillLock = Effect.fn("SkillLock.validateHost")(function* (manifest: Manifest) {

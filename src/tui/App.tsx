@@ -24,6 +24,8 @@ import type { SelectionClipboard } from "./clipboard.ts";
 import { editableHostSkillPath, editSkillInEditor, withSuspendedRenderer } from "./external.ts";
 import { cycleLayout, primaryPanel, resizeFocusedSplit } from "./layout.ts";
 import type { Panel, PrimaryPanel, TwoPanePair } from "./layout.ts";
+import { useAppKeybindings } from "./useAppKeybindings.ts";
+import type { AppCommand } from "./useAppKeybindings.ts";
 import {
   diffSkill,
   expandHome,
@@ -136,7 +138,6 @@ export function App({ clipboard }: { clipboard: SelectionClipboard }) {
   const [previewState, setPreviewState] = useState<{ skill: string | null; file: number; restore: number }>({ skill: null, file: 0, restore: 0 });
 
   const quitting = useRef(false);
-  const pendingG = useRef(0);
   const previewScroll = useRef<ScrollBoxRenderable | null>(null);
   const previewDoc = useRef<DocRenderable | null>(null);
   const findPos = useRef(-1);
@@ -396,80 +397,6 @@ export function App({ clipboard }: { clipboard: SelectionClipboard }) {
     return true;
   };
 
-  const handleOverlay = (key: KeyEvent): boolean => {
-    if (mode === "list") return false;
-    if (mode === "link" && linkFlow) return handleLink(key);
-    if (mode === "index" && indexFlow) return handleIndex(key);
-    if (key.name === "escape" || key.name === "q") {
-      setMode("list");
-      return true;
-    }
-    if (mode === "diff" && current && diffResult?.kind === "diff" && !isClean(diffResult.diff)) {
-      if (key.name === "a") {
-        const outcome = runSyncResult(acceptVendorDrift(current.name));
-        if (outcome.ok) {
-          const warning = outcome.value.warning;
-          notify(warning ? `accepted ${current.name}: ${warning.message}` : `accepted global ${current.name} as the repo baseline`, warning !== undefined);
-          refresh();
-          setMode("list");
-        } else {
-          notify(outcome.message, true);
-        }
-        return true;
-      }
-      if (key.name === "r") {
-        const outcome = runSyncResult(restoreVendorDrift(current.name));
-        if (outcome.ok) {
-          notify(`restored global ${current.name} from the repo baseline`);
-          refresh();
-          setMode("list");
-        } else {
-          notify(outcome.message, true);
-        }
-        return true;
-      }
-      const pager: DiffPager | undefined = key.name === "h" ? "hunk" : key.name === "d" ? "delta" : undefined;
-      if (pager) {
-        let suspended = false;
-        try {
-          const patch = unifiedDiff(join(catalog.repo, current.meta.path), join(catalog.agentsSkills, current.name));
-          renderer.suspend();
-          suspended = true;
-          pagePatch(patch, pager);
-        } catch (error) {
-          notify(`${pager} failed: ${error instanceof Error ? error.message : String(error)}`, true);
-        } finally {
-          if (suspended) renderer.resume();
-        }
-        return true;
-      }
-    }
-    if (mode === "profiles") {
-      if (key.name === "j" || key.name === "down") {
-        setProfileIndex((i) => clamp(i + 1, 0, profileNames.length - 1));
-        return true;
-      }
-      if (key.name === "k" || key.name === "up") {
-        setProfileIndex((i) => clamp(i - 1, 0, profileNames.length - 1));
-        return true;
-      }
-      if (key.name === "return" || key.name === "enter") {
-        const name = profileNames[profileIndex];
-        if (name) {
-          reportAction(`profile ${name}`, runSync(applyProfile(name)));
-          refresh();
-        }
-        setMode("list");
-        return true;
-      }
-    }
-    if (key.name === "?" && mode === "help") {
-      setMode("list");
-      return true;
-    }
-    return true; // overlays swallow everything else
-  };
-
   const patchFlow = (fn: (prev: LinkFlow) => LinkFlow) => setLinkFlow((prev) => (prev ? fn(prev) : prev));
 
   const patchIndexFlow = (fn: (prev: IndexFlow) => IndexFlow) => setIndexFlow((prev) => (prev ? fn(prev) : prev));
@@ -656,225 +583,325 @@ export function App({ clipboard }: { clipboard: SelectionClipboard }) {
     }
   };
 
-  const handleList = (key: KeyEvent): void => {
-    const panelOrder = Match.value({ twoPane, hasPreview: previewData !== null }).pipe(
-      Match.when({ twoPane: "catalog" }, (): Panel[] => ["authors", "skills"]),
-      Match.when({ twoPane: "document", hasPreview: true }, (): Panel[] => ["skills", "content", "files"]),
-      Match.when({ twoPane: "document" }, (): Panel[] => ["skills", "content"]),
-      Match.when({ hasPreview: true }, (): Panel[] => ["authors", "skills", "content", "files"]),
-      Match.orElse((): Panel[] => ["authors", "skills", "content"]),
-    );
-    const movePanel = (delta: number) => {
-      const index = Math.max(0, panelOrder.indexOf(panel));
-      focusPanel(panelOrder[clamp(index + delta, 0, panelOrder.length - 1)] ?? panel);
-    };
-    const focusedPrimary = primaryPanel(panel);
+  const panelOrder = Match.value({ twoPane, hasPreview: previewData !== null }).pipe(
+    Match.when({ twoPane: "catalog" }, (): Panel[] => ["authors", "skills"]),
+    Match.when({ twoPane: "document", hasPreview: true }, (): Panel[] => ["skills", "content", "files"]),
+    Match.when({ twoPane: "document" }, (): Panel[] => ["skills", "content"]),
+    Match.when({ hasPreview: true }, (): Panel[] => ["authors", "skills", "content", "files"]),
+    Match.orElse((): Panel[] => ["authors", "skills", "content"]),
+  );
 
-    if (key.name === "q" || (key.ctrl && key.name === "c")) return quit();
-    if (key.name === "1") return switchCatalogView("available");
-    if (key.name === "2") return switchCatalogView("all");
-    if (key.name === "tab") {
-      const index = Math.max(0, panelOrder.indexOf(panel));
-      focusPanel(panelOrder[(index + 1) % panelOrder.length] ?? "authors");
-      return;
-    }
-    if (key.name === "left" || (key.name === "h" && !key.shift)) return movePanel(-1);
-    if (key.name === "right" || (key.name === "l" && !key.shift)) return movePanel(1);
-    if (key.name === "0") {
-      focusPanel("authors");
-      return;
-    }
-    if (key.name === "$" || (key.name === "4" && key.shift)) {
-      focusPanel(panelOrder.at(-1) ?? "skills");
-      return;
-    }
-    if (key.name === "x") {
-      setExpanded((value) => (value === focusedPrimary ? null : focusedPrimary));
-      return;
-    }
-    if (key.name === "v") {
-      cyclePaneLayout(key.shift ? -1 : 1);
-      return;
-    }
-    if (key.name === "escape") {
-      if (expanded) setExpanded(null);
-      else if (twoPane) setTwoPane(null);
-      else if (docFind.query) setDocFind({ typing: false, query: "" });
-      else if (filterText) setFilterText("");
-      return;
-    }
-    const shrinkFocusedPane = key.name === "<" || (key.name === "," && key.shift);
-    const growFocusedPane = key.name === ">" || (key.name === "." && key.shift);
-    if (twoPane && !expanded && (shrinkFocusedPane || growFocusedPane)) {
-      const grow = growFocusedPane;
-      if (twoPane === "catalog") setCatalogSplit((split) => resizeFocusedSplit(split, twoPane, panel, grow));
-      else setDocumentSplit((split) => resizeFocusedSplit(split, twoPane, panel, grow));
-      return;
-    }
-    if (key.name === "}" || (key.name === "]" && key.shift)) return jumpHeading(1);
-    if (key.name === "{" || (key.name === "[" && key.shift)) return jumpHeading(-1);
-    if (previewData && key.name === "]" && !key.shift) return moveFile(1);
-    if (previewData && key.name === "[" && !key.shift) return moveFile(-1);
-    if ((key.name === "j" && key.shift) || key.name === "pagedown") {
-      previewScroll.current?.scrollBy(key.name === "pagedown" ? viewport - 3 : 3);
-      return;
-    }
-    if ((key.name === "k" && key.shift) || key.name === "pageup") {
-      previewScroll.current?.scrollBy(key.name === "pageup" ? -(viewport - 3) : -3);
-      return;
-    }
-    if (key.ctrl && key.name === "e") {
-      previewScroll.current?.scrollBy(1);
-      return;
-    }
-    if (key.ctrl && key.name === "y") {
-      previewScroll.current?.scrollBy(-1);
-      return;
-    }
+  const movePanel = (delta: number) => {
+    const index = Math.max(0, panelOrder.indexOf(panel));
+    focusPanel(panelOrder[clamp(index + delta, 0, panelOrder.length - 1)] ?? panel);
+  };
 
-    const moveFocused = (delta: number) => {
-      if (panel === "authors") moveAuthor(delta);
-      else if (panel === "skills") moveSkill(delta);
-      else if (panel === "files") moveFile(delta);
-      else previewScroll.current?.scrollBy(delta);
-    };
-    if ((key.name === "j" && !key.shift) || key.name === "down") return moveFocused(1);
-    if ((key.name === "k" && !key.shift) || key.name === "up") return moveFocused(-1);
-    if (key.ctrl && key.name === "d") return moveFocused(Math.floor(viewport / 2));
-    if (key.ctrl && key.name === "u") return moveFocused(-Math.floor(viewport / 2));
-    if (key.ctrl && key.name === "f") return moveFocused(Math.max(1, viewport - 2));
-    if (key.ctrl && key.name === "b") return moveFocused(-Math.max(1, viewport - 2));
-    if (key.name === "g" && !key.shift) {
-      const now = Date.now();
-      if (now - pendingG.current < 500) {
-        if (panel === "authors") setSelectedAuthor(0);
-        else if (panel === "skills") setSelectedSkill(0);
-        else if (panel === "files") setPreviewState({ skill: currentName ?? null, file: 0, restore: 0 });
-        else previewScroll.current?.scrollTo(0);
-        pendingG.current = 0;
-      } else {
-        pendingG.current = now;
-      }
-      return;
-    }
-    if (key.name === "g" && key.shift) {
-      if (panel === "authors") setSelectedAuthor(Math.max(0, groups.length - 1));
-      else if (panel === "skills") setSelectedSkill(Math.max(0, (currentGroup?.skills.length ?? 1) - 1));
-      else if (panel === "files") setPreviewState({ skill: currentName ?? null, file: Math.max(0, (previewData?.files.length ?? 1) - 1), restore: 0 });
-      else previewScroll.current?.scrollTo(previewScroll.current.scrollHeight);
-      return;
-    }
-    if (key.name === "/") {
-      if (panel === "content" && previewData) {
-        setDocFind({ typing: true, query: "" });
+  const moveFocused = (delta: number) => {
+    if (panel === "authors") moveAuthor(delta);
+    else if (panel === "skills") moveSkill(delta);
+    else if (panel === "files") moveFile(delta);
+    else previewScroll.current?.scrollBy(delta);
+  };
+
+  const moveToBoundary = (last: boolean) => {
+    if (panel === "authors") setSelectedAuthor(last ? Math.max(0, groups.length - 1) : 0);
+    else if (panel === "skills") setSelectedSkill(last ? Math.max(0, (currentGroup?.skills.length ?? 1) - 1) : 0);
+    else if (panel === "files") {
+      setPreviewState({ skill: currentName ?? null, file: last ? Math.max(0, (previewData?.files.length ?? 1) - 1) : 0, restore: 0 });
+    } else previewScroll.current?.scrollTo(last ? previewScroll.current.scrollHeight : 0);
+  };
+
+  const runAppCommand = (command: AppCommand, key: KeyEvent): void => {
+    switch (command) {
+      case "app.copy-or-quit":
+        if (!handleSelectionKey(renderer, clipboard, key, { notify }) && mode === "list") quit();
+        return;
+      case "app.quit":
+        quit();
+        return;
+      case "overlay.close":
+      case "help.close":
+        setMode("list");
+        return;
+      case "diff.accept": {
+        if (!current || diffResult?.kind !== "diff" || isClean(diffResult.diff)) return;
+        const outcome = runSyncResult(acceptVendorDrift(current.name));
+        if (outcome.ok) {
+          const warning = outcome.value.warning;
+          notify(warning ? `accepted ${current.name}: ${warning.message}` : `accepted global ${current.name} as the repo baseline`, warning !== undefined);
+          refresh();
+          setMode("list");
+        } else notify(outcome.message, true);
         return;
       }
-      setFilterMode(true);
-      setFilterText("");
-      return;
-    }
-    if (key.name === "n" && !key.shift) return jumpMatch(1);
-    if (key.name === "n" && key.shift) return jumpMatch(-1);
-    if (key.name === "r") {
-      refresh();
-      notify("refreshed");
-      return;
-    }
-    if (key.name === "e") {
-      editCurrentSkill();
-      return;
-    }
-    if (key.name === "?") return setMode("help");
-    if (key.name === "u") {
-      notify("checking upstream\u2026");
-      void (async () => {
-        const outcome = await runPromiseResult(checkUpstream(runSync(loadCatalog()).manifest));
-        if (!outcome.ok) {
-          notify(`upstream check failed: ${outcome.message}`, true);
+      case "diff.restore": {
+        if (!current || diffResult?.kind !== "diff" || isClean(diffResult.diff)) return;
+        const outcome = runSyncResult(restoreVendorDrift(current.name));
+        if (outcome.ok) {
+          notify(`restored global ${current.name} from the repo baseline`);
+          refresh();
+          setMode("list");
+        } else notify(outcome.message, true);
+        return;
+      }
+      case "diff.hunk":
+      case "diff.delta": {
+        if (!current || diffResult?.kind !== "diff" || isClean(diffResult.diff)) return;
+        const pager: DiffPager = command === "diff.hunk" ? "hunk" : "delta";
+        let suspended = false;
+        try {
+          const patch = unifiedDiff(join(catalog.repo, current.meta.path), join(catalog.agentsSkills, current.name));
+          renderer.suspend();
+          suspended = true;
+          pagePatch(patch, pager);
+        } catch (error) {
+          notify(`${pager} failed: ${error instanceof Error ? error.message : String(error)}`, true);
+        } finally {
+          if (suspended) renderer.resume();
+        }
+        return;
+      }
+      case "profiles.next":
+        setProfileIndex((index) => clamp(index + 1, 0, profileNames.length - 1));
+        return;
+      case "profiles.previous":
+        setProfileIndex((index) => clamp(index - 1, 0, profileNames.length - 1));
+        return;
+      case "profiles.apply": {
+        const name = profileNames[profileIndex];
+        if (name) {
+          reportAction(`profile ${name}`, runSync(applyProfile(name)));
+          refresh();
+        }
+        setMode("list");
+        return;
+      }
+      case "view.available":
+        switchCatalogView("available");
+        return;
+      case "view.all":
+        switchCatalogView("all");
+        return;
+      case "panel.next-wrap": {
+        const index = Math.max(0, panelOrder.indexOf(panel));
+        focusPanel(panelOrder[(index + 1) % panelOrder.length] ?? "authors");
+        return;
+      }
+      case "panel.next":
+        movePanel(1);
+        return;
+      case "panel.previous":
+        movePanel(-1);
+        return;
+      case "panel.first":
+        focusPanel("authors");
+        return;
+      case "panel.last":
+        focusPanel(panelOrder.at(-1) ?? "skills");
+        return;
+      case "layout.zoom": {
+        const focusedPrimary = primaryPanel(panel);
+        setExpanded((value) => (value === focusedPrimary ? null : focusedPrimary));
+        return;
+      }
+      case "layout.next":
+        cyclePaneLayout(1);
+        return;
+      case "layout.previous":
+        cyclePaneLayout(-1);
+        return;
+      case "layout.shrink":
+      case "layout.grow": {
+        if (!twoPane || expanded) return;
+        const grow = command === "layout.grow";
+        if (twoPane === "catalog") setCatalogSplit((split) => resizeFocusedSplit(split, twoPane, panel, grow));
+        else setDocumentSplit((split) => resizeFocusedSplit(split, twoPane, panel, grow));
+        return;
+      }
+      case "app.escape":
+        if (expanded) setExpanded(null);
+        else if (twoPane) setTwoPane(null);
+        else if (docFind.query) setDocFind({ typing: false, query: "" });
+        else if (filterText) setFilterText("");
+        return;
+      case "document.next-heading":
+        jumpHeading(1);
+        return;
+      case "document.previous-heading":
+        jumpHeading(-1);
+        return;
+      case "document.next-file":
+        if (previewData) moveFile(1);
+        return;
+      case "document.previous-file":
+        if (previewData) moveFile(-1);
+        return;
+      case "document.scroll-three-down":
+        previewScroll.current?.scrollBy(3);
+        return;
+      case "document.scroll-three-up":
+        previewScroll.current?.scrollBy(-3);
+        return;
+      case "document.page-down":
+        previewScroll.current?.scrollBy(viewport - 3);
+        return;
+      case "document.page-up":
+        previewScroll.current?.scrollBy(-(viewport - 3));
+        return;
+      case "document.scroll-line-down":
+        previewScroll.current?.scrollBy(1);
+        return;
+      case "document.scroll-line-up":
+        previewScroll.current?.scrollBy(-1);
+        return;
+      case "selection.next":
+        moveFocused(1);
+        return;
+      case "selection.previous":
+        moveFocused(-1);
+        return;
+      case "selection.half-page-down":
+        moveFocused(Math.floor(viewport / 2));
+        return;
+      case "selection.half-page-up":
+        moveFocused(-Math.floor(viewport / 2));
+        return;
+      case "selection.page-down":
+        moveFocused(Math.max(1, viewport - 2));
+        return;
+      case "selection.page-up":
+        moveFocused(-Math.max(1, viewport - 2));
+        return;
+      case "selection.first":
+        if (key.repeated !== true) moveToBoundary(false);
+        return;
+      case "selection.last":
+        moveToBoundary(true);
+        return;
+      case "search.open":
+        if (panel === "content" && previewData) setDocFind({ typing: true, query: "" });
+        else {
+          setFilterMode(true);
+          setFilterText("");
+        }
+        return;
+      case "search.next":
+        jumpMatch(1);
+        return;
+      case "search.previous":
+        jumpMatch(-1);
+        return;
+      case "catalog.refresh":
+        refresh();
+        notify("refreshed");
+        return;
+      case "skill.edit":
+        editCurrentSkill();
+        return;
+      case "help.open":
+        setMode("help");
+        return;
+      case "upstream.check":
+        notify("checking upstream\u2026");
+        void (async () => {
+          const outcome = await runPromiseResult(checkUpstream(runSync(loadCatalog()).manifest));
+          if (!outcome.ok) {
+            notify(`upstream check failed: ${outcome.message}`, true);
+            return;
+          }
+          const statuses = outcome.value;
+          const byName = new Map(statuses.map((status) => [status.name, status.state]));
+          setCatalog((previous) => ({
+            ...previous,
+            rows: previous.rows.map((row) => {
+              const state = byName.get(row.name);
+              return state ? { ...row, upstream: state } : row;
+            }),
+          }));
+          const updates = statuses.filter((status) => status.state === "update").length;
+          const gone = statuses.filter((status) => status.state === "gone").length;
+          notify(updates + gone === 0 ? "upstream: everything current" : `upstream: ${updates} update(s), ${gone} gone \u2014 run slinky update`);
+        })();
+        return;
+      case "profiles.open":
+        if (profileNames.length === 0) {
+          notify("no profiles defined in skills.manifest.json", true);
           return;
         }
-        const statuses = outcome.value;
-        const byName = new Map(statuses.map((s) => [s.name, s.state]));
-        setCatalog((prev) => ({
-          ...prev,
-          rows: prev.rows.map((r) => {
-            const state = byName.get(r.name);
-            return state ? { ...r, upstream: state } : r;
-          }),
-        }));
-        const updates = statuses.filter((s) => s.state === "update").length;
-        const gone = statuses.filter((s) => s.state === "gone").length;
-        notify(updates + gone === 0 ? "upstream: everything current" : `upstream: ${updates} update(s), ${gone} gone \u2014 run slinky update`);
-      })();
-      return;
-    }
-    if (key.name === "p") {
-      if (profileNames.length === 0) return notify("no profiles defined in skills.manifest.json", true);
-      setProfileIndex(Math.max(0, profileNames.indexOf(catalog.state.activeProfile ?? "")));
-      return setMode("profiles");
-    }
-
-    if (key.name === "return" || key.name === "enter") {
-      if (panel === "authors") setPanel("skills");
-      else if (panel === "skills" && twoPane === "catalog" && (current || currentProjectSkill || currentUnindexedSkill)) setMode("detail");
-      else if (panel === "skills" || panel === "files") setPanel("content");
-      else if (current || currentProjectSkill || currentUnindexedSkill) setMode("detail");
-      return;
-    }
-    if (key.name === "space") {
-      if (panel === "authors" && currentGroup?.rows) {
-        const enable = !currentGroup.rows.some((row) => row.enabled);
-        const result = runSync(
-          setSkillsEnabled(
-            currentGroup.rows.map((row) => row.name),
-            enable,
-          ),
-        );
-        reportAction(`${enable ? "enabled" : "disabled"} ${currentGroup.label}`, result);
-        refresh();
+        setProfileIndex(Math.max(0, profileNames.indexOf(catalog.state.activeProfile ?? "")));
+        setMode("profiles");
         return;
-      }
-      if (panel !== "skills") return;
-      if (!current) return;
-      const res = runSync(setSkillsEnabled([current.name], !current.enabled));
-      reportAction(`${current.enabled ? "disabled" : "enabled"} ${current.name}`, res);
-      refresh();
-      return;
-    }
-    if (key.name === "i" && (current || currentProjectSkill || currentUnindexedSkill)) return setMode("detail");
-    if (key.name === "a" && currentUnindexedSkill) {
-      setIndexFlow({ input: "", running: false });
-      return setMode("index");
-    }
-    if (!current) return;
-    if (key.name === "d") {
-      setDiffResult(diffSkill(catalog, current));
-      return setMode("diff");
-    }
-    if (key.name === "l" && key.shift) {
-      // prefer the directory Slinky was launched from (unless it's the skills repo)
-      const cwd = process.cwd();
-      const defaultProject = cwd !== catalog.repo ? cwd : (catalog.state.recentProjects[0] ?? "");
-      setLinkFlow({
-        step: "project",
-        input: defaultProject,
-        recentIndex: -1,
-        mode: "copy",
-        exclude: true,
-        claude: true,
-      });
-      return setMode("link");
+      case "selection.open":
+        if (panel === "authors") setPanel("skills");
+        else if (panel === "skills" && twoPane === "catalog" && (current || currentProjectSkill || currentUnindexedSkill)) setMode("detail");
+        else if (panel === "skills" || panel === "files") setPanel("content");
+        else if (current || currentProjectSkill || currentUnindexedSkill) setMode("detail");
+        return;
+      case "selection.toggle":
+        if (panel === "authors" && currentGroup?.rows) {
+          const enable = !currentGroup.rows.some((row) => row.enabled);
+          const result = runSync(
+            setSkillsEnabled(
+              currentGroup.rows.map((row) => row.name),
+              enable,
+            ),
+          );
+          reportAction(`${enable ? "enabled" : "disabled"} ${currentGroup.label}`, result);
+          refresh();
+        } else if (panel === "skills" && current) {
+          const result = runSync(setSkillsEnabled([current.name], !current.enabled));
+          reportAction(`${current.enabled ? "disabled" : "enabled"} ${current.name}`, result);
+          refresh();
+        }
+        return;
+      case "skill.details":
+        if (current || currentProjectSkill || currentUnindexedSkill) setMode("detail");
+        return;
+      case "skill.index":
+        if (currentUnindexedSkill) {
+          setIndexFlow({ input: "", running: false });
+          setMode("index");
+        }
+        return;
+      case "skill.diff":
+        if (current) {
+          setDiffResult(diffSkill(catalog, current));
+          setMode("diff");
+        }
+        return;
+      case "skill.link":
+        if (!current) return;
+        setLinkFlow({
+          step: "project",
+          input: process.cwd() !== catalog.repo ? process.cwd() : (catalog.state.recentProjects[0] ?? ""),
+          recentIndex: -1,
+          mode: "copy",
+          exclude: true,
+          claude: true,
+        });
+        setMode("link");
+        return;
     }
   };
 
+  const textInputActive = filterMode || docFind.typing || mode === "link" || mode === "index";
+  useAppKeybindings(
+    {
+      listActive: mode === "list" && !textInputActive,
+      overlayActive: mode !== "list" && mode !== "link" && mode !== "index",
+      diffActive: mode === "diff",
+      profilesActive: mode === "profiles",
+      helpActive: mode === "help",
+      textInputActive,
+    },
+    runAppCommand,
+  );
+
   useKeyboard((key) => {
-    // gg is a timed prefix; a held key would otherwise satisfy it on its own.
-    if (key.repeated === true && key.name === "g") return;
-    if (handleSelectionKey(renderer, clipboard, key, { notify })) return;
     if (handleFilter(key)) return;
     if (handleFind(key)) return;
-    if (handleOverlay(key)) return;
-    handleList(key);
+    if (mode === "link" && linkFlow) handleLink(key);
+    else if (mode === "index" && indexFlow) handleIndex(key);
   });
 
   usePaste((event) => {
