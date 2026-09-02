@@ -55,6 +55,7 @@ export interface SkillLockSnapshot {
   readonly root: SkillLockEntry;
   readonly entries: Readonly<Record<string, SkillLockEntry>>;
   readonly skills: Readonly<Record<string, LockMeta>>;
+  readonly raw?: string;
   readonly warning?: SkillLockDecodeError;
 }
 
@@ -82,7 +83,7 @@ export function readSkillLockFile(path: string): SkillLockSnapshot {
   try {
     root = decodeJsonObject(JSON.parse(raw));
   } catch (error) {
-    return { ...emptySnapshot(true), warning: new SkillLockDecodeError(path, "parse", errorDetail(error)) };
+    return { ...emptySnapshot(true), raw, warning: new SkillLockDecodeError(path, "parse", errorDetail(error)) };
   }
 
   try {
@@ -99,9 +100,9 @@ export function readSkillLockFile(path: string): SkillLockSnapshot {
         // Preserve unrelated skills.sh providers even though Slinky cannot vendor them.
       }
     }
-    return { exists: true, version, root, entries, skills };
+    return { exists: true, version, root, entries, skills, raw };
   } catch (error) {
-    return { ...emptySnapshot(true), root, warning: new SkillLockDecodeError(path, "decode", errorDetail(error)) };
+    return { ...emptySnapshot(true), root, raw, warning: new SkillLockDecodeError(path, "decode", errorDetail(error)) };
   }
 }
 
@@ -195,16 +196,28 @@ function sortedEntries(entries: Readonly<Record<string, SkillLockEntry>>): Recor
   return Object.fromEntries(Object.entries(entries).sort(([a], [b]) => a.localeCompare(b)));
 }
 
-function writeLockFile(path: string, root: SkillLockEntry): void {
+function writeRawLockFile(path: string, raw: string): void {
   const tmp = `${path}.${process.pid}.tmp`;
   try {
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(tmp, `${JSON.stringify(root, null, 2)}\n`);
+    writeFileSync(tmp, raw);
     renameSync(tmp, path);
   } catch (error) {
     rmSync(tmp, { force: true });
     throw new SkillLockDecodeError(path, "write", errorDetail(error));
   }
+}
+
+function writeLockFile(path: string, root: SkillLockEntry): void {
+  writeRawLockFile(path, `${JSON.stringify(root, null, 2)}\n`);
+}
+
+function restoreSkillLockFile(path: string, snapshot: SkillLockSnapshot): void {
+  if (!snapshot.exists) {
+    rmSync(path, { force: true });
+    return;
+  }
+  writeRawLockFile(path, snapshot.raw ?? `${JSON.stringify(snapshot.root, null, 2)}\n`);
 }
 
 export const loadHostSkillLock = Effect.fn("SkillLock.loadHost")(function* () {
@@ -235,13 +248,17 @@ export const saveHostSkillLock = Effect.fn("SkillLock.saveHost")(function* (entr
 
 export const restoreHostSkillLock = Effect.fn("SkillLock.restoreHost")(function* (snapshot: SkillLockSnapshot) {
   const { catalogLock } = yield* HostRepo;
-  if (!snapshot.exists) {
-    yield* Effect.sync(() => rmSync(catalogLock, { force: true }));
-    return;
-  }
   yield* Effect.try({
-    try: () => writeLockFile(catalogLock, snapshot.root),
+    try: () => restoreSkillLockFile(catalogLock, snapshot),
     catch: (error) => (error instanceof SkillLockDecodeError ? error : new SkillLockDecodeError(catalogLock, "write", errorDetail(error))),
+  });
+});
+
+export const restoreGlobalSkillLock = Effect.fn("SkillLock.restoreGlobal")(function* (snapshot: SkillLockSnapshot) {
+  const paths = yield* Paths;
+  yield* Effect.try({
+    try: () => restoreSkillLockFile(paths.skillLock, snapshot),
+    catch: (error) => (error instanceof SkillLockDecodeError ? error : new SkillLockDecodeError(paths.skillLock, "write", errorDetail(error))),
   });
 });
 
@@ -268,8 +285,9 @@ export const previewHostSkillLock = Effect.fn("SkillLock.previewHost")(function*
 
   const encoded = JSON.stringify(sortedEntries(next));
   const changed = !host.exists || encoded !== JSON.stringify(sortedEntries(host.entries));
+  const root = { version: skillLockVersion, skills: sortedEntries(next) };
   return {
-    snapshot: { ...host, exists: true, version: skillLockVersion, root: { version: skillLockVersion, skills: sortedEntries(next) }, entries: next },
+    snapshot: { ...host, exists: true, version: skillLockVersion, root, entries: next, raw: `${JSON.stringify(root, null, 2)}\n` },
     changed,
   };
 });
@@ -366,11 +384,11 @@ export const pruneGlobalSkillLockEntries = Effect.fn("SkillLock.pruneGlobal")(fu
 });
 
 /** Copy selected, source-compatible global entries into the committed host lock. */
-export const absorbGlobalSkillLockEntries = Effect.fn("SkillLock.absorbGlobal")(function* (manifest: Manifest, names: ReadonlyArray<string>) {
+export const absorbGlobalSkillLockEntries = Effect.fn("SkillLock.absorbGlobal")(function* (manifest: Manifest, names: ReadonlyArray<string>, globalSnapshot?: SkillLockSnapshot) {
   if (names.length === 0) return;
   const paths = yield* Paths;
   const host = yield* loadHostSkillLock();
-  const global = readSkillLockFile(paths.skillLock);
+  const global = globalSnapshot ?? readSkillLockFile(paths.skillLock);
   if (global.warning) return yield* Effect.fail(global.warning);
   const next = { ...host.entries };
   for (const name of names) {

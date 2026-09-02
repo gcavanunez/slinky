@@ -22,4 +22,5 @@ const fromExit = <A, E>(exit: Exit.Exit<A, E>): RunResult<A> => {
 export const runSyncResult = <A, E>(effect: Effect.Effect<A, E, AppEnv>): RunResult<A> => fromExit(runtime.runSyncExit(effect));
 
 /** Run an async app effect, reporting any failure as a message. */
-export const runPromiseResult = async <A, E>(effect: Effect.Effect<A, E, AppEnv>): Promise<RunResult<A>> => fromExit(await runtime.runPromiseExit(effect));
+export const runPromiseResult = async <A, E>(effect: Effect.Effect<A, E, AppEnv>, options?: Effect.RunOptions): Promise<RunResult<A>> =>
+  fromExit(await runtime.runPromiseExit(effect, options));

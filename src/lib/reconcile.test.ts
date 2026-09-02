@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { resolve } from "node:path";
 import { Schema } from "effect";
-import { Manifest, State, version, withManifestSkill } from "./manifest.ts";
+import { Manifest, State, stateVersion, version, withManifestSkill } from "./manifest.ts";
 import type { Observation } from "./reconcile.ts";
 import { planSync } from "./reconcile.ts";
 import { claudeRelTarget } from "./paths.ts";
@@ -36,11 +36,13 @@ function manifest(): Manifest {
 
 function state(enabled: Record<string, boolean>): State {
   return Schema.decodeUnknownSync(State)({
-    version,
-    disabledSkills: Object.entries(enabled)
-      .filter(([, value]) => !value)
-      .map(([name]) => name),
-    activeProfile: null,
+    version: stateVersion,
+    selection: {
+      kind: "custom",
+      disabledSkills: Object.entries(enabled)
+        .filter(([, value]) => !value)
+        .map(([name]) => name),
+    },
     projectLinks: [],
     recentProjects: [],
   });
@@ -83,26 +85,30 @@ describe("planSync", () => {
         theirs: { kind: "dir" },
       },
       claude: {
-        mine: { kind: "symlink", resolved: `${REPO}/skills/mine` },
-        theirs: { kind: "symlink", resolved: "/home/x/.agents/skills/theirs" },
+        mine: { kind: "symlink", resolved: claudeTarget("mine") },
+        theirs: { kind: "symlink", resolved: claudeTarget("theirs") },
       },
     };
     const plan = planSync(manifest(), state({ mine: false, theirs: false }), obs, { repo: REPO, claudeSkills: CLAUDE_SKILLS });
     expect(plan.actions).toEqual([
-      { type: "remove-claude", skill: "mine" },
-      { type: "remove-claude", skill: "theirs" },
-      { type: "remove-agents", skill: "mine" },
+      { type: "remove-claude", skill: "mine", expectedTarget: claudeTarget("mine") },
+      { type: "remove-claude", skill: "theirs", expectedTarget: claudeTarget("theirs") },
+      { type: "remove-agents", skill: "mine", expectedTarget: `${REPO}/skills/mine` },
       { type: "remove-agents", skill: "theirs", verifyHash: THEIRS_HASH },
     ]);
   });
 
-  test("wrong symlink target is corrected", () => {
+  test("wrong symlink target requires force to replace", () => {
     const obs: Observation = {
       agents: { mine: { kind: "symlink", resolved: "/elsewhere/mine" } },
-      claude: { mine: { kind: "symlink", resolved: claudeTarget("mine") } },
+      claude: {},
     };
     const plan = planSync(manifest(), state({ mine: true, theirs: false }), obs, { repo: REPO, claudeSkills: CLAUDE_SKILLS });
-    expect(plan.actions).toContainEqual({
+    expect(plan.actions.filter((action) => action.skill === "mine")).toEqual([]);
+    expect(plan.warnings.some((warning) => warning.includes("use --force to replace"))).toBe(true);
+
+    const forced = planSync(manifest(), state({ mine: true, theirs: false }), obs, { repo: REPO, claudeSkills: CLAUDE_SKILLS, force: true });
+    expect(forced.actions).toContainEqual({
       type: "ensure-agents-symlink",
       skill: "mine",
       target: `${REPO}/skills/mine`,
@@ -141,7 +147,7 @@ describe("planSync", () => {
       claude: { theirs: { kind: "symlink", resolved: claudeTarget("theirs") } },
     };
     const plan = planSync(manifest(), state({ mine: false, theirs: true }), obs, { repo: REPO, claudeSkills: CLAUDE_SKILLS });
-    expect(plan.actions).toContainEqual({ type: "remove-agents", skill: "theirs" });
+    expect(plan.actions).toContainEqual({ type: "remove-agents", skill: "theirs", expectedTarget: `${REPO}/vendor/acme/theirs` });
     expect(plan.actions).toContainEqual({
       type: "restore-agents-dir",
       skill: "theirs",
@@ -159,19 +165,37 @@ describe("planSync", () => {
   test("broken claude symlink is repaired", () => {
     const obs: Observation = {
       agents: { mine: { kind: "symlink", resolved: `${REPO}/skills/mine` } },
-      claude: { mine: { kind: "broken-symlink" } },
+      claude: { mine: { kind: "broken-symlink", resolved: claudeTarget("mine") } },
     };
     const plan = planSync(manifest(), state({ mine: true, theirs: false }), obs, { repo: REPO, claudeSkills: CLAUDE_SKILLS });
     expect(plan.actions).toContainEqual({ type: "ensure-claude-symlink", skill: "mine" });
   });
 
-  test("claude symlink pointing elsewhere is repaired", () => {
+  test("claude symlink pointing elsewhere requires force to replace", () => {
     const obs: Observation = {
       agents: { mine: { kind: "symlink", resolved: `${REPO}/skills/mine` } },
       claude: { mine: { kind: "symlink", resolved: "/elsewhere/mine" } },
     };
     const plan = planSync(manifest(), state({ mine: true, theirs: false }), obs, { repo: REPO, claudeSkills: CLAUDE_SKILLS });
-    expect(plan.actions).toContainEqual({ type: "ensure-claude-symlink", skill: "mine" });
+    expect(plan.actions).not.toContainEqual({ type: "ensure-claude-symlink", skill: "mine" });
+    expect(plan.warnings.some((warning) => warning.includes("use --force to replace"))).toBe(true);
+
+    const forced = planSync(manifest(), state({ mine: true, theirs: false }), obs, { repo: REPO, claudeSkills: CLAUDE_SKILLS, force: true });
+    expect(forced.actions).toContainEqual({ type: "ensure-claude-symlink", skill: "mine" });
+  });
+
+  test("disabling does not remove wrong-target symlinks without force", () => {
+    const obs: Observation = {
+      agents: { mine: { kind: "symlink", resolved: "/elsewhere/agents-mine" } },
+      claude: { mine: { kind: "symlink", resolved: "/elsewhere/claude-mine" } },
+    };
+    const plan = planSync(manifest(), state({ mine: false, theirs: false }), obs, { repo: REPO, claudeSkills: CLAUDE_SKILLS });
+    expect(plan.actions.filter((action) => action.skill === "mine")).toEqual([]);
+    expect(plan.warnings).toHaveLength(2);
+
+    const forced = planSync(manifest(), state({ mine: false, theirs: false }), obs, { repo: REPO, claudeSkills: CLAUDE_SKILLS, force: true });
+    expect(forced.actions).toContainEqual({ type: "remove-claude", skill: "mine" });
+    expect(forced.actions).toContainEqual({ type: "remove-agents", skill: "mine" });
   });
 
   test("disabling does not remove an unowned real claude directory without force", () => {
@@ -186,6 +210,16 @@ describe("planSync", () => {
       force: true,
     });
     expect(forced.actions).toContainEqual({ type: "remove-claude", skill: "mine" });
+  });
+
+  test("disabling does not remove a real directory in place of a local symlink without force", () => {
+    const obs: Observation = { agents: { mine: { kind: "dir" } }, claude: {} };
+    const plan = planSync(manifest(), state({ mine: false, theirs: false }), obs, { repo: REPO, claudeSkills: CLAUDE_SKILLS });
+    expect(plan.actions).not.toContainEqual({ type: "remove-agents", skill: "mine" });
+    expect(plan.warnings.some((warning) => warning.includes("not removing without --force"))).toBe(true);
+
+    const forced = planSync(manifest(), state({ mine: false, theirs: false }), obs, { repo: REPO, claudeSkills: CLAUDE_SKILLS, force: true });
+    expect(forced.actions).toContainEqual({ type: "remove-agents", skill: "mine" });
   });
 
   test("prototype-like skill names observe as missing", () => {

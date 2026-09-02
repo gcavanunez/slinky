@@ -2,17 +2,13 @@ import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, re
 import { dirname, join, resolve } from "node:path";
 import { Effect, Match } from "effect";
 import { isSkillEnabled } from "../domain/model.ts";
+import { classifyPlacement } from "./catalogInspection.ts";
+import type { LiveEntry } from "./catalogInspection.ts";
 import { contentHash } from "./hash.ts";
 import type { Manifest, State } from "./manifest.ts";
 import { claudeRelTarget, HostRepo, Paths } from "./paths.ts";
 
-export type LiveKind = "missing" | "symlink" | "broken-symlink" | "dir" | "file";
-
-export interface LiveEntry {
-  kind: LiveKind;
-  /** Direct symlink target as an absolute path, including for broken symlinks. */
-  resolved?: string;
-}
+export type { LiveEntry, LiveKind } from "./catalogInspection.ts";
 
 export interface Observation {
   agents: Record<string, LiveEntry>;
@@ -31,26 +27,28 @@ export interface Plan {
   warnings: string[];
 }
 
+export function observeEntry(path: string): LiveEntry {
+  if (!existsSync(path)) {
+    try {
+      const stat = lstatSync(path);
+      if (stat.isSymbolicLink()) return { kind: "broken-symlink", resolved: resolve(dirname(path), readlinkSync(path)) };
+    } catch {
+      return { kind: "missing" };
+    }
+  }
+  const stat = lstatSync(path);
+  if (stat.isSymbolicLink()) {
+    const resolved = resolve(dirname(path), readlinkSync(path));
+    realpathSync(path);
+    return { kind: "symlink", resolved };
+  }
+  return stat.isDirectory() ? { kind: "dir" } : { kind: "file" };
+}
+
 function observeDir(dir: string): Record<string, LiveEntry> {
   const out: Record<string, LiveEntry> = Object.create(null);
   if (!existsSync(dir)) return out;
-  for (const name of readdirSync(dir)) {
-    const p = join(dir, name);
-    const st = lstatSync(p);
-    if (st.isSymbolicLink()) {
-      const resolved = resolve(dir, readlinkSync(p));
-      try {
-        realpathSync(p);
-        out[name] = { kind: "symlink", resolved };
-      } catch {
-        out[name] = { kind: "broken-symlink", resolved };
-      }
-    } else if (st.isDirectory()) {
-      out[name] = { kind: "dir" };
-    } else {
-      out[name] = { kind: "file" };
-    }
-  }
+  for (const name of readdirSync(dir)) out[name] = observeEntry(join(dir, name));
   return out;
 }
 
@@ -86,35 +84,50 @@ export function planSync(manifest: Manifest, state: State, obs: Observation, opt
   const warnings: string[] = [];
 
   for (const [name, meta] of Object.entries(manifest.skills)) {
-    const enabled = isSkillEnabled(state, name);
+    const enabled = isSkillEnabled(manifest, state, name);
     const live: LiveEntry = Object.hasOwn(obs.agents, name) ? obs.agents[name]! : { kind: "missing" };
     const claude: LiveEntry = Object.hasOwn(obs.claude, name) ? obs.claude[name]! : { kind: "missing" };
     const repoPath = resolve(repo, meta.path);
     const claudeTarget = resolve(claudeSkills, claudeRelTarget(name));
+    const placement = classifyPlacement(live, repoPath);
+    const claudePlacement = classifyPlacement(claude, claudeTarget);
 
     if (enabled) {
       // canonical store
       if (meta.origin === "local") {
-        if (live.kind === "missing" || live.kind === "broken-symlink") {
+        if (placement === "missing" || placement === "broken-symlink") {
           actions.push({ type: "ensure-agents-symlink", skill: name, target: repoPath });
-        } else if (live.kind === "symlink" && live.resolved !== repoPath) {
-          actions.push({ type: "ensure-agents-symlink", skill: name, target: repoPath });
-        } else if (live.kind === "dir" || live.kind === "file") {
+        } else if (placement === "wrong-symlink") {
+          if (force) actions.push({ type: "ensure-agents-symlink", skill: name, target: repoPath });
+          else {
+            warnings.push(`${name}: symlink points outside the catalog (use --force to replace)`);
+            continue;
+          }
+        } else if (placement === "dir" || placement === "file") {
           if (force) {
             actions.push({ type: "remove-agents", skill: name, verifyHash: meta.contentHash });
             actions.push({ type: "ensure-agents-symlink", skill: name, target: repoPath });
           } else {
             warnings.push(`${name}: real ${live.kind} where symlink to repo expected (use --force to replace)`);
+            continue;
           }
         }
       } else {
-        if (live.kind === "missing" || live.kind === "broken-symlink") {
+        if (placement === "missing" || placement === "broken-symlink") {
           actions.push({ type: "restore-agents-dir", skill: name, from: repoPath });
-        } else if (live.kind === "symlink") {
+        } else if (placement === "expected-symlink") {
           // normalize to a real dir so skills.sh can update in place
-          actions.push({ type: "remove-agents", skill: name });
+          actions.push({ type: "remove-agents", skill: name, expectedTarget: live.kind === "symlink" ? live.resolved : repoPath });
           actions.push({ type: "restore-agents-dir", skill: name, from: repoPath });
-        } else if (live.kind === "file") {
+        } else if (placement === "wrong-symlink") {
+          if (force) {
+            actions.push({ type: "remove-agents", skill: name });
+            actions.push({ type: "restore-agents-dir", skill: name, from: repoPath });
+          } else {
+            warnings.push(`${name}: symlink points outside the catalog (use --force to replace)`);
+            continue;
+          }
+        } else if (placement === "file") {
           if (force) {
             actions.push({ type: "remove-agents", skill: name });
             actions.push({ type: "restore-agents-dir", skill: name, from: repoPath });
@@ -126,11 +139,12 @@ export function planSync(manifest: Manifest, state: State, obs: Observation, opt
         // dir: leave as-is; drift is surfaced by `status`/`diff`, not sync
       }
       // claude visibility
-      if (claude.kind === "missing" || claude.kind === "broken-symlink") {
+      if (claudePlacement === "missing" || claudePlacement === "broken-symlink") {
         actions.push({ type: "ensure-claude-symlink", skill: name });
-      } else if (claude.kind === "symlink" && claude.resolved !== claudeTarget) {
-        actions.push({ type: "ensure-claude-symlink", skill: name });
-      } else if (claude.kind === "dir" || claude.kind === "file") {
+      } else if (claudePlacement === "wrong-symlink") {
+        if (force) actions.push({ type: "ensure-claude-symlink", skill: name });
+        else warnings.push(`${name}: claude symlink points outside the catalog (use --force to replace)`);
+      } else if (claudePlacement === "dir" || claudePlacement === "file") {
         if (force) {
           actions.push({ type: "remove-claude", skill: name });
           actions.push({ type: "ensure-claude-symlink", skill: name });
@@ -139,17 +153,25 @@ export function planSync(manifest: Manifest, state: State, obs: Observation, opt
         }
       }
     } else {
-      if (claude.kind === "symlink" || claude.kind === "broken-symlink") {
-        actions.push({ type: "remove-claude", skill: name });
-      } else if (claude.kind === "dir" || claude.kind === "file") {
+      if (claudePlacement === "expected-symlink" || claudePlacement === "broken-symlink") {
+        actions.push({ type: "remove-claude", skill: name, expectedTarget: claude.kind === "symlink" || claude.kind === "broken-symlink" ? claude.resolved : claudeTarget });
+      } else if (claudePlacement === "wrong-symlink") {
+        if (force) actions.push({ type: "remove-claude", skill: name });
+        else warnings.push(`${name}: claude symlink points outside the catalog; not removing without --force`);
+      } else if (claudePlacement === "dir" || claudePlacement === "file") {
         if (force) actions.push({ type: "remove-claude", skill: name });
         else warnings.push(`${name}: real ${claude.kind} in ~/.claude/skills; not removing without --force`);
       }
-      if (live.kind === "symlink" || live.kind === "broken-symlink") {
-        actions.push({ type: "remove-agents", skill: name });
-      } else if (live.kind === "dir") {
-        actions.push({ type: "remove-agents", skill: name, verifyHash: meta.contentHash });
-      } else if (live.kind === "file") {
+      if (placement === "expected-symlink" || placement === "broken-symlink") {
+        actions.push({ type: "remove-agents", skill: name, expectedTarget: live.kind === "symlink" || live.kind === "broken-symlink" ? live.resolved : repoPath });
+      } else if (placement === "wrong-symlink") {
+        if (force) actions.push({ type: "remove-agents", skill: name });
+        else warnings.push(`${name}: symlink points outside the catalog; not removing without --force`);
+      } else if (placement === "dir") {
+        if (meta.origin === "vendor") actions.push({ type: "remove-agents", skill: name, verifyHash: meta.contentHash });
+        else if (force) actions.push({ type: "remove-agents", skill: name });
+        else warnings.push(`${name}: real directory replaced the catalog symlink; not removing without --force`);
+      } else if (placement === "file") {
         if (force) actions.push({ type: "remove-agents", skill: name });
         else warnings.push(`${name}: unexpected plain file in ~/.agents/skills; not touching it without --force`);
       }
@@ -193,6 +215,18 @@ function applySync(agentsSkills: string, claudeSkills: string, plan: Plan, opts:
       return false;
     }
   };
+  const canReplace = (path: string, target: string): boolean => {
+    if (opts.force) return true;
+    const current = observeEntry(path);
+    return current.kind === "missing" || ((current.kind === "symlink" || current.kind === "broken-symlink") && current.resolved === target);
+  };
+  const hideOwnedClaudeLink = (skill: string): void => {
+    const path = join(claudeSkills, skill);
+    const target = resolve(claudeSkills, claudeRelTarget(skill));
+    if (!stillExpectedSymlink(path, target)) return;
+    rmIfExists(path);
+    done.push(`removed ~/.claude/skills/${skill} after canonical replacement was refused`);
+  };
 
   const applyAction = Match.type<Action>().pipe(
     Match.discriminator("type")("remove-claude", (a) => {
@@ -227,23 +261,46 @@ function applySync(agentsSkills: string, claudeSkills: string, plan: Plan, opts:
     }),
     Match.discriminator("type")("ensure-agents-symlink", (a) => {
       const agentsPath = join(agentsSkills, a.skill);
+      if (!canReplace(agentsPath, a.target)) {
+        skipped.push(`${a.skill}: agents path changed after preflight; not replacing`);
+        hideOwnedClaudeLink(a.skill);
+        return;
+      }
       rmIfExists(agentsPath);
       symlinkSync(a.target, agentsPath);
       done.push(`linked ~/.agents/skills/${a.skill} -> ${a.target}`);
     }),
     Match.discriminator("type")("restore-agents-dir", (a) => {
       const agentsPath = join(agentsSkills, a.skill);
+      if (skipped.some((message) => message.startsWith(`${a.skill}:`))) {
+        skipped.push(`${a.skill}: skipped restore after canonical removal was refused`);
+        return;
+      }
+      if (!canReplace(agentsPath, a.from)) {
+        skipped.push(`${a.skill}: agents path changed after preflight; not replacing`);
+        hideOwnedClaudeLink(a.skill);
+        return;
+      }
       rmIfExists(agentsPath);
       cpSync(a.from, agentsPath, { recursive: true });
       done.push(`restored ~/.agents/skills/${a.skill} from repo`);
     }),
     Match.discriminator("type")("ensure-claude-symlink", (a) => {
       // Skip if canonical entry was skipped (avoid creating broken links).
+      if (skipped.some((message) => message.startsWith(`${a.skill}:`))) {
+        skipped.push(`${a.skill}: skipped claude symlink after canonical replacement was refused`);
+        return;
+      }
       if (!existsSync(join(agentsSkills, a.skill))) {
         skipped.push(`${a.skill}: skipped claude symlink (no canonical entry)`);
         return;
       }
       const claudePath = join(claudeSkills, a.skill);
+      const target = resolve(claudeSkills, claudeRelTarget(a.skill));
+      if (!canReplace(claudePath, target)) {
+        skipped.push(`${a.skill}: claude path changed after preflight; not replacing`);
+        return;
+      }
       rmIfExists(claudePath);
       symlinkSync(claudeRelTarget(a.skill), claudePath);
       done.push(`linked ~/.claude/skills/${a.skill}`);
@@ -267,4 +324,16 @@ export const observeAndPlan = Effect.fn("Reconcile.observeAndPlan")(function* (m
   const host = yield* HostRepo;
   const obs = yield* observe();
   return planSync(manifest, state, obs, { repo: host.repo, claudeSkills: paths.claudeSkills, ...opts });
+});
+
+export interface ReconcileOptions {
+  readonly dryRun?: boolean;
+  readonly force?: boolean;
+}
+
+/** Plan and, unless dry-running, apply one catalog reconciliation. */
+export const reconcileCatalog = Effect.fn("Reconcile.catalog")(function* (manifest: Manifest, state: State, options: ReconcileOptions = {}) {
+  const plan = yield* observeAndPlan(manifest, state, { force: options.force ?? false });
+  const applied = options.dryRun ? null : yield* apply(plan, { force: options.force ?? false });
+  return { plan, applied };
 });

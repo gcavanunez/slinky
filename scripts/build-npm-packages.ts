@@ -1,7 +1,8 @@
 import { chmod, cp, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Schema } from "effect";
-import { binaryPackageName, currentReleaseTargetId, findReleaseTarget, releaseTargets, type ReleaseTarget } from "./release-targets.ts";
+import { requireReleaseBinary } from "./release-artifact-identity.ts";
+import { binaryPackageName, currentReleaseTargetId, findReleaseTarget, releaseTargets, standaloneCompileCommand, type ReleaseTarget } from "./release-targets.ts";
 
 const root = process.cwd();
 const RootPackage = Schema.Struct({
@@ -73,12 +74,13 @@ async function buildBinaryPackage(target: ReleaseTarget): Promise<void> {
   const binaryPath = join(binDir, "slinky");
   const releaseBinaryPath = join(root, "dist", "release", target.id, "slinky");
 
+  if (reuseReleaseBinary) await requireReleaseBinary(releaseBinaryPath, target.id);
   await rm(packageDir, { recursive: true, force: true });
   await mkdir(binDir, { recursive: true });
-  if (reuseReleaseBinary && (await Bun.file(releaseBinaryPath).exists())) {
+  if (reuseReleaseBinary) {
     await cp(releaseBinaryPath, binaryPath);
   } else {
-    run(["bun", "build", "--compile", "--bytecode", "--format=esm", `--target=${target.bunTarget}`, `--outfile=${binaryPath}`, "src/standalone.ts"]);
+    run(standaloneCompileCommand(target, binaryPath));
   }
   await chmod(binaryPath, 0o755);
   await cp(join(root, "LICENSE"), join(packageDir, "LICENSE"));

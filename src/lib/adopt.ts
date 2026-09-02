@@ -1,13 +1,15 @@
-import { cpSync, existsSync, lstatSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join, posix } from "node:path";
-import { Effect, Schema } from "effect";
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, posix, resolve } from "node:path";
+import { Cause, Effect, Exit, Schema } from "effect";
 import { errorDetail, formatUtc, isMissingFile, nowUtc, OperationFailed, Skill, withManifestSkill } from "../domain/model.ts";
-import type { Manifest } from "../domain/model.ts";
+import type { Manifest, State } from "../domain/model.ts";
 import type { SkillLockDecodeError } from "../domain/model.ts";
 import { readdirIfExists } from "./fs.ts";
 import { contentHash } from "./hash.ts";
+import { alignStateWithManifest } from "./manifest.ts";
+import type { ManifestStoreInterface } from "./manifest.ts";
 import { HostRepo, Paths } from "./paths.ts";
-import { canonicalLockEntry, readSkillLockFile, upstreamFromLock } from "./skillLock.ts";
+import { canonicalLockEntry, ensureHostSkillLock, loadHostSkillLock, readSkillLockFile, restoreHostSkillLock, saveHostSkillLock, upstreamFromLock } from "./skillLock.ts";
 import type { LockMeta, SkillLockEntry } from "./skillLock.ts";
 import { GitHub } from "./update.ts";
 
@@ -204,18 +206,27 @@ function pathExists(path: string): boolean {
   }
 }
 
+function removeOwnedDirectory(path: string, expectedHash: string): void {
+  const stat = lstatSync(path);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || contentHash(path) !== expectedHash) {
+    throw new OperationFailed({ message: `${path} changed ownership; refusing to remove it` });
+  }
+  rmSync(path, { recursive: true });
+}
+
 /**
  * Drop what skills.sh leaves behind once a staged skill has moved into the repo:
  * the `.claude` symlink now dangles, and a stale lock entry would make a later
  * `npx skills add` believe the skill is still installed and skip re-fetching it.
  */
 export const clearStagingResidue = Effect.fn("Adopt.clearStagingResidue")(function* (name: string) {
-  const { repo, stagedClaudeSkills, stagedLock } = yield* HostRepo;
+  const { repo, stagedSkills, stagedClaudeSkills, stagedLock } = yield* HostRepo;
   const warnings: string[] = [];
 
   const link = join(stagedClaudeSkills, name);
   try {
-    if (lstatSync(link).isSymbolicLink() && !existsSync(link)) rmSync(link, { force: true });
+    const expected = resolve(stagedSkills, name);
+    if (lstatSync(link).isSymbolicLink() && resolve(stagedClaudeSkills, readlinkSync(link)) === expected && !existsSync(link)) rmSync(link, { force: true });
   } catch (error) {
     if (!isMissingFile(error)) warnings.push(`${name}: could not remove ${link}: ${errorDetail(error)}`);
   }
@@ -253,13 +264,43 @@ export interface AdoptOptions {
   readonly owner?: string;
 }
 
-export interface Adoption {
+interface Adoption {
   readonly manifest: Manifest;
   readonly meta: Skill;
   readonly destination: string;
   readonly sourceToRemove: string | null;
   readonly lockEntry?: SkillLockEntry;
 }
+
+export interface AdoptionRequest {
+  readonly candidate: ForeignSkill;
+  readonly options?: AdoptOptions;
+  /** Existing repo content to index in place after matching it to the candidate. */
+  readonly unindexedSkill?: UnindexedSkill;
+}
+
+export interface AdoptedRecord {
+  readonly name: string;
+  readonly path: string;
+}
+
+export interface AdoptionResult {
+  readonly manifest: Manifest;
+  readonly state: State;
+  readonly adopted: ReadonlyArray<AdoptedRecord>;
+  readonly warnings: ReadonlyArray<string>;
+}
+
+export type AdoptionPersistenceStage = "manifest-save" | "state-save" | "lock-save";
+
+/** Explicit fault seam for exercising compensation after durable writes. */
+export interface AdoptionTransactionHooks {
+  readonly afterPersist: (stage: AdoptionPersistenceStage) => Effect.Effect<void, OperationFailed, never>;
+}
+
+export const liveAdoptionTransactionHooks: AdoptionTransactionHooks = {
+  afterPersist: () => Effect.void,
+};
 
 /** Repo-relative destination for an adopted skill. */
 export function adoptDestination(candidate: ForeignSkill, opts: AdoptOptions): string {
@@ -269,11 +310,11 @@ export function adoptDestination(candidate: ForeignSkill, opts: AdoptOptions): s
 }
 
 /** Copy a foreign skill into the repo and return an updated manifest. */
-export const adoptSkill = Effect.fn("Adopt.adoptSkill")(function* (manifest: Manifest, candidate: ForeignSkill, opts: AdoptOptions = {}) {
+const adoptSkill = Effect.fn("Adopt.adoptSkill")(function* (manifest: Manifest, candidate: ForeignSkill, opts: AdoptOptions = {}) {
   const { repo } = yield* HostRepo;
   const rel = adoptDestination(candidate, opts);
   const dest = join(repo, rel);
-  if (existsSync(dest)) {
+  if (pathExists(dest)) {
     return yield* Effect.fail(new OperationFailed({ message: `destination already exists: ${rel}` }));
   }
 
@@ -289,8 +330,16 @@ export const adoptSkill = Effect.fn("Adopt.adoptSkill")(function* (manifest: Man
         },
   );
 
+  const parent = dirname(dest);
+  mkdirSync(parent, { recursive: true });
+  const staging = mkdtempSync(join(parent, ".slinky-adopt-"));
+  const prepared = join(staging, candidate.name);
+  let created = false;
   return yield* Effect.sync(() => {
-    cpSync(candidate.dir, dest, { recursive: true });
+    cpSync(candidate.dir, prepared, { recursive: true });
+    if (pathExists(dest)) throw new OperationFailed({ message: `destination already exists: ${rel}` });
+    renameSync(prepared, dest);
+    created = true;
     const keepLiveDir = candidate.location === "agents" && !opts.local;
     let adoption: Adoption = {
       manifest: withManifestSkill(manifest, candidate.name, meta),
@@ -304,15 +353,155 @@ export const adoptSkill = Effect.fn("Adopt.adoptSkill")(function* (manifest: Man
       lockEntry: canonicalLockEntry(candidate.lock, candidate.lockEntry, meta.vendoredAt === null ? undefined : formatUtc(meta.vendoredAt)),
     };
     return adoption;
-  }).pipe(Effect.onError(() => Effect.sync(() => rmSync(dest, { recursive: true, force: true }))));
+  }).pipe(
+    Effect.ensuring(Effect.sync(() => rmSync(staging, { recursive: true, force: true }))),
+    Effect.onError(() => (created ? Effect.sync(() => removeOwnedDirectory(dest, meta.contentHash)) : Effect.void)),
+  );
 });
 
-export function rollbackAdoption(adoption: Adoption): void {
-  rmSync(adoption.destination, { recursive: true, force: true });
+function rollbackAdoption(adoption: Adoption): void {
+  removeOwnedDirectory(adoption.destination, adoption.meta.contentHash);
 }
 
-export function finalizeAdoption(adoption: Adoption): void {
-  if (adoption.sourceToRemove) {
-    rmSync(adoption.sourceToRemove, { recursive: true, force: true });
+/**
+ * Prepare and durably adopt a batch as one transaction. File copies remain
+ * recoverable until manifest, state, and host lock have all committed.
+ */
+export const adoptSkills = Effect.fn("Adopt.adoptSkills")(function* (
+  store: ManifestStoreInterface,
+  initialManifest: Manifest,
+  initialState: State,
+  requests: ReadonlyArray<AdoptionRequest>,
+  hooks: AdoptionTransactionHooks = liveAdoptionTransactionHooks,
+) {
+  const previousLock = yield* loadHostSkillLock();
+  const previousManifestFile = yield* store.snapshotManifestFile();
+  const previousStateFile = yield* store.snapshotStateFile();
+  let manifest = initialManifest;
+  let state = initialState;
+  let lockTouched = false;
+  let manifestSaveAttempted = false;
+  let stateSaveAttempted = false;
+  const copies: Adoption[] = [];
+  const sourcesToRemove: Array<{ readonly name: string; readonly path: string; readonly contentHash: string }> = [];
+  const stagedNames: string[] = [];
+  const adopted: AdoptedRecord[] = [];
+
+  const persisted = yield* Effect.exit(
+    Effect.gen(function* () {
+      // ensureHostSkillLock can write, so it belongs inside the compensated region.
+      lockTouched = true;
+      const ensuredLock = yield* ensureHostSkillLock(initialManifest);
+      const lockEntries = { ...ensuredLock.entries };
+
+      for (const request of requests) {
+        const { candidate, unindexedSkill } = request;
+        if (Object.hasOwn(manifest.skills, candidate.name)) {
+          return yield* Effect.fail(new OperationFailed({ message: `${candidate.name} is already indexed in skills.manifest.json` }));
+        }
+        if (unindexedSkill && unindexedSkill.name !== candidate.name) {
+          return yield* Effect.fail(new OperationFailed({ message: `unindexed skill ${unindexedSkill.name} does not match ${candidate.name}` }));
+        }
+
+        const lock = candidate.lock ? yield* backfillTreeHash(candidate.lock) : undefined;
+        const prepared = lock === undefined ? candidate : { ...candidate, lock };
+        if (unindexedSkill && contentHash(unindexedSkill.dir) !== contentHash(prepared.dir)) {
+          return yield* Effect.fail(new OperationFailed({ message: `${candidate.name}: installed content differs from the unindexed host copy; both were left for review` }));
+        }
+
+        let path: string;
+        let lockEntry: SkillLockEntry | undefined;
+        if (unindexedSkill?.origin === "local" || unindexedSkill?.origin === "vendor") {
+          const meta = decodeSkill(
+            unindexedSkill.origin === "local"
+              ? { origin: "local", path: unindexedSkill.path, contentHash: contentHash(unindexedSkill.dir) }
+              : {
+                  origin: "vendor",
+                  path: unindexedSkill.path,
+                  contentHash: contentHash(unindexedSkill.dir),
+                  upstream: upstreamFromLock(prepared.lock),
+                  vendoredAt: formatUtc(nowUtc()),
+                },
+          );
+          manifest = withManifestSkill(manifest, candidate.name, meta);
+          path = meta.path;
+          sourcesToRemove.push({ name: candidate.name, path: prepared.dir, contentHash: meta.contentHash });
+          if (meta.origin === "vendor" && prepared.lock) {
+            lockEntry = canonicalLockEntry(prepared.lock, prepared.lockEntry, meta.vendoredAt === null ? undefined : formatUtc(meta.vendoredAt));
+          }
+        } else {
+          const adoption = yield* adoptSkill(manifest, prepared, request.options);
+          copies.push(adoption);
+          manifest = adoption.manifest;
+          path = adoption.meta.path;
+          lockEntry = adoption.lockEntry;
+          if (adoption.sourceToRemove) sourcesToRemove.push({ name: candidate.name, path: adoption.sourceToRemove, contentHash: adoption.meta.contentHash });
+        }
+
+        if (lockEntry) lockEntries[candidate.name] = lockEntry;
+        if (candidate.location === "staged") stagedNames.push(candidate.name);
+        adopted.push({ name: candidate.name, path });
+      }
+
+      state = alignStateWithManifest(manifest, state);
+      manifestSaveAttempted = true;
+      yield* store.saveManifest(manifest);
+      yield* hooks.afterPersist("manifest-save");
+      stateSaveAttempted = true;
+      yield* store.saveState(state);
+      yield* hooks.afterPersist("state-save");
+      yield* saveHostSkillLock(lockEntries);
+      yield* hooks.afterPersist("lock-save");
+    }),
+  );
+  if (Exit.isFailure(persisted)) {
+    const failures: string[] = [];
+    let manifestRestored = true;
+    if (manifestSaveAttempted) {
+      const restored = yield* Effect.exit(store.restoreManifestFile(previousManifestFile));
+      manifestRestored = Exit.isSuccess(restored);
+      if (Exit.isFailure(restored)) failures.push(`manifest: ${errorDetail(Cause.squash(restored.cause))}`);
+    }
+    if (stateSaveAttempted) {
+      const restored = yield* Effect.exit(store.restoreStateFile(previousStateFile));
+      if (Exit.isFailure(restored)) failures.push(`state: ${errorDetail(Cause.squash(restored.cause))}`);
+    }
+    if (lockTouched) {
+      const restored = yield* Effect.exit(restoreHostSkillLock(previousLock));
+      if (Exit.isFailure(restored)) failures.push(`lock: ${errorDetail(Cause.squash(restored.cause))}`);
+    }
+    if (manifestRestored) {
+      for (const adoption of copies) {
+        try {
+          rollbackAdoption(adoption);
+        } catch (error) {
+          failures.push(`destination ${adoption.destination}: ${errorDetail(error)}`);
+        }
+      }
+    }
+    if (failures.length > 0) {
+      return yield* Effect.fail(
+        new OperationFailed({
+          message: `${errorDetail(Cause.squash(persisted.cause))}; compensation also failed: ${failures.join("; ")}`,
+        }),
+      );
+    }
+    return yield* Effect.failCause(persisted.cause);
   }
-}
+
+  const warnings: string[] = [];
+  for (const source of sourcesToRemove) {
+    try {
+      removeOwnedDirectory(source.path, source.contentHash);
+    } catch (error) {
+      warnings.push(`${source.name}: adopted, but could not remove ${source.path}: ${errorDetail(error)}`);
+    }
+  }
+  for (const name of stagedNames) {
+    const cleanup = yield* Effect.exit(clearStagingResidue(name));
+    if (Exit.isSuccess(cleanup)) warnings.push(...cleanup.value);
+    else warnings.push(`${name}: adopted, but staging cleanup failed: ${errorDetail(Cause.squash(cleanup.cause))}`);
+  }
+
+  return { manifest, state, adopted, warnings } satisfies AdoptionResult;
+});

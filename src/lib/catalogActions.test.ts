@@ -3,10 +3,12 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Cause, ConfigProvider, Effect, Exit, Layer } from "effect";
-import { acceptVendorDrift, applyProfile, linkProjectSkill, restoreVendorDrift, setSkillsEnabled, unlinkProjectSkill } from "./catalogActions.ts";
+import { acceptVendorDrift, acceptVendorDrifts, applyProfile, linkProjectSkill, restoreVendorDrift, setSkillsEnabled, unlinkProjectSkill } from "./catalogActions.ts";
+import { ManifestFileError } from "../domain/model.ts";
 import { contentHash } from "./hash.ts";
 import { ManifestStore } from "./manifest.ts";
 import { HostRepo, Paths } from "./paths.ts";
+import { assertVendorUpdatePlacements } from "./vendorOps.ts";
 
 const roots: string[] = [];
 const version = 1;
@@ -127,8 +129,7 @@ function installDriftingVendor(f: Fixture, name = "vendored"): VendorPaths {
 }
 
 function state(f: Fixture): {
-  disabledSkills: string[];
-  activeProfile: string | null;
+  selection: { kind: "custom"; disabledSkills: string[] } | { kind: "profile"; name: string };
   projectLinks: Array<{ skill: string; project: string; targets: string[] }>;
 } {
   return JSON.parse(readFileSync(f.statePath, "utf8"));
@@ -147,7 +148,7 @@ describe("catalog actions", () => {
       warnings: [],
       dryRun: false,
     });
-    expect(state(f).disabledSkills).toEqual(["bar", "foo"]);
+    expect(state(f).selection).toEqual({ kind: "custom", disabledSkills: ["bar", "foo"] });
     expect(pathExists(join(f.home, ".agents", "skills", "foo"))).toBe(false);
     expect(pathExists(join(f.home, ".agents", "skills", "bar"))).toBe(false);
     expect(pathExists(join(f.home, ".agents", "skills", "baz"))).toBe(true);
@@ -160,7 +161,7 @@ describe("catalog actions", () => {
 
     success(run(f, setSkillsEnabled(["foo", "bar"], true)));
 
-    expect(state(f).disabledSkills).toEqual([]);
+    expect(state(f).selection).toEqual({ kind: "custom", disabledSkills: [] });
     for (const name of ["foo", "bar"]) {
       expect(lstatSync(join(f.home, ".agents", "skills", name)).isSymbolicLink()).toBe(true);
       expect(lstatSync(join(f.home, ".claude", "skills", name)).isSymbolicLink()).toBe(true);
@@ -180,17 +181,73 @@ describe("catalog actions", () => {
     expect(pathExists(join(f.home, ".claude", "skills", "foo"))).toBe(true);
   });
 
-  test("profile application persists its exact disabled complement", () => {
+  test("profile application persists profile identity and applies its current membership", () => {
     const f = fixture();
     for (const name of ["foo", "bar", "baz"]) installGlobal(f, name);
 
     success(run(f, applyProfile("focus")));
 
-    expect(state(f).disabledSkills).toEqual(["bar"]);
-    expect(state(f).activeProfile).toBe("focus");
+    expect(state(f).selection).toEqual({ kind: "profile", name: "focus" });
     expect(pathExists(join(f.home, ".agents", "skills", "foo"))).toBe(true);
     expect(pathExists(join(f.home, ".agents", "skills", "bar"))).toBe(false);
     expect(pathExists(join(f.home, ".agents", "skills", "baz"))).toBe(true);
+  });
+
+  test("apply revalidates ownership after state persistence", () => {
+    const f = fixture();
+    installGlobal(f, "foo");
+    const live = join(f.home, ".agents", "skills", "foo");
+    const effect = Effect.gen(function* () {
+      const realStore = yield* ManifestStore;
+      const racingStore = ManifestStore.of({
+        ...realStore,
+        saveState: (next) =>
+          realStore.saveState(next).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                rmSync(live);
+                mkdirSync(live);
+                writeFileSync(join(live, "SKILL.md"), "unowned\n");
+              }),
+            ),
+          ),
+      });
+      return yield* setSkillsEnabled(["foo"], false).pipe(Effect.provideService(ManifestStore, racingStore));
+    });
+
+    const result = success(run(f, effect));
+
+    expect(result.warnings.some((warning) => warning.includes("changed after preflight"))).toBe(true);
+    expect(readFileSync(join(live, "SKILL.md"), "utf8")).toBe("unowned\n");
+  });
+
+  test("a refused canonical replacement is not exposed through claude", () => {
+    const f = fixture(["foo"]);
+    const live = join(f.home, ".agents", "skills", "foo");
+    const claude = join(f.home, ".claude", "skills", "foo");
+    mkdirSync(join(f.home, ".claude", "skills"), { recursive: true });
+    symlinkSync(join("..", "..", ".agents", "skills", "foo"), claude);
+    const effect = Effect.gen(function* () {
+      const realStore = yield* ManifestStore;
+      const racingStore = ManifestStore.of({
+        ...realStore,
+        saveState: (next) =>
+          realStore.saveState(next).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                mkdirSync(live, { recursive: true });
+                writeFileSync(join(live, "SKILL.md"), "unowned\n");
+              }),
+            ),
+          ),
+      });
+      return yield* setSkillsEnabled(["foo"], true).pipe(Effect.provideService(ManifestStore, racingStore));
+    });
+
+    const result = success(run(f, effect));
+
+    expect(result.warnings.some((warning) => warning.includes("canonical replacement was refused"))).toBe(true);
+    expect(pathExists(claude)).toBe(false);
   });
 
   test("dry-run mutations return prospective actions without changing state or stores", () => {
@@ -232,6 +289,44 @@ describe("catalog actions", () => {
     success(run(f, restoreVendorDrift("vendored")));
 
     expect(readFileSync(join(paths.live, "SKILL.md"), "utf8")).toBe("baseline\n");
+  });
+
+  test("vendor actions refuse an unowned live symlink", () => {
+    const f = fixture();
+    const paths = installDriftingVendor(f);
+    const external = join(f.root, "external-vendor");
+    mkdirSync(external);
+    writeFileSync(join(external, "SKILL.md"), "external\n");
+    rmSync(paths.live, { recursive: true });
+    symlinkSync(external, paths.live);
+
+    const manifest = JSON.parse(readFileSync(join(f.host, "skills.manifest.json"), "utf8"));
+    expect(failureMessage(run(f, assertVendorUpdatePlacements(manifest, ["vendored"])))).toContain("not an owned vendor directory");
+    success(run(f, assertVendorUpdatePlacements(manifest, ["vendored"], true)));
+    expect(failureMessage(run(f, acceptVendorDrift("vendored")))).toContain("not an owned directory");
+    expect(failureMessage(run(f, restoreVendorDrift("vendored")))).toContain("not an owned directory");
+    expect(readFileSync(join(external, "SKILL.md"), "utf8")).toBe("external\n");
+    expect(readFileSync(join(paths.baseline, "SKILL.md"), "utf8")).toBe("baseline\n");
+  });
+
+  test("vendor acceptance restores baselines and raw manifest when persistence fails", () => {
+    const f = fixture();
+    const paths = installDriftingVendor(f);
+    const manifestPath = join(f.host, "skills.manifest.json");
+    const manifestBefore = readFileSync(manifestPath, "utf8");
+    const baselineBefore = readFileSync(join(paths.baseline, "SKILL.md"), "utf8");
+    const effect = Effect.gen(function* () {
+      const realStore = yield* ManifestStore;
+      const failingStore = ManifestStore.of({
+        ...realStore,
+        saveManifest: () => Effect.fail(new ManifestFileError(manifestPath, "write", "injected failure")),
+      });
+      return yield* acceptVendorDrifts(["vendored"]).pipe(Effect.provideService(ManifestStore, failingStore));
+    });
+
+    expect(failureMessage(run(f, effect))).toContain("injected failure");
+    expect(readFileSync(manifestPath, "utf8")).toBe(manifestBefore);
+    expect(readFileSync(join(paths.baseline, "SKILL.md"), "utf8")).toBe(baselineBefore);
   });
 
   test("successful link persists one project link and creates every target", () => {

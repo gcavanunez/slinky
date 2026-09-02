@@ -1,12 +1,14 @@
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { join, posix } from "node:path";
+import { join, posix, resolve } from "node:path";
 import { Cache, Context, Duration, Effect, Exit, Layer, Schedule, Schema } from "effect";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
 import { errorDetail, ExternalToolError, isSkillEnabled } from "../domain/model.ts";
+import { inspectCatalogEntry } from "./catalogInspection.ts";
+import type { LiveEntry } from "./catalogInspection.ts";
 import { contentHash } from "./hash.ts";
 import type { Manifest, State } from "./manifest.ts";
 import { HostRepo, Paths } from "./paths.ts";
+import { observe } from "./reconcile.ts";
 import { seedGlobalSkillLock } from "./skillLock.ts";
 
 export type UpstreamState = "current" | "update" | "gone" | "unchecked";
@@ -182,24 +184,40 @@ export interface UpdateOutcome {
   changed: string[];
   /** enabled skill whose live copy disappeared (deleted upstream) */
   missing: string[];
+  /** selected skill whose live path is not owned by this catalog */
+  unowned: string[];
 }
 
 /** Compare live copies against the vendored baselines after an update. */
 export const detectChanges = Effect.fn("Update.detectChanges")(function* (manifest: Manifest, state: State, names?: ReadonlyArray<string>) {
   const paths = yield* Paths;
+  const { repo } = yield* HostRepo;
+  const observation = yield* observe();
   const changed: string[] = [];
   const missing: string[] = [];
+  const unowned: string[] = [];
   for (const [name, meta] of Object.entries(manifest.skills)) {
     if (meta.origin !== "vendor") continue;
     if (names && names.length > 0 && !names.includes(name)) continue;
-    const live = join(paths.agentsSkills, name);
-    if (!existsSync(live)) {
-      if (isSkillEnabled(state, name)) missing.push(name);
-    } else if (contentHash(live) !== meta.contentHash) {
+    const enabled = isSkillEnabled(manifest, state, name);
+    const liveEntry: LiveEntry = Object.hasOwn(observation.agents, name) ? observation.agents[name]! : { kind: "missing" };
+    const matches = liveEntry.kind === "dir" && contentHash(join(paths.agentsSkills, name)) === meta.contentHash;
+    const inspection = inspectCatalogEntry({
+      origin: meta.origin,
+      enabled,
+      live: liveEntry,
+      expectedTarget: resolve(repo, meta.path),
+      vendorHash: { kind: "verified", matches },
+    });
+    if (inspection.placement === "wrong-symlink" || inspection.placement === "file") {
+      unowned.push(name);
+    } else if (inspection.status === "missing") {
+      missing.push(name);
+    } else if (inspection.placement === "dir" ? !matches : inspection.placement !== "missing" && inspection.placement !== "broken-symlink") {
       changed.push(name);
     }
   }
-  return { changed, missing } satisfies UpdateOutcome;
+  return { changed, missing, unowned } satisfies UpdateOutcome;
 });
 
 /** True when the baseline (vendor/, skills/, manifest, lock) has uncommitted changes. */

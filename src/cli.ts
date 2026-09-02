@@ -1,46 +1,35 @@
 #!/usr/bin/env bun
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
-import { join, posix, resolve } from "node:path";
+import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { BunServices } from "@effect/platform-bun";
-import { Cause, Effect, Exit, Layer, Option, Schema } from "effect";
+import { Cause, Effect, Exit, Layer, Option } from "effect";
 import { Argument, CliError, Command, Flag } from "effect/unstable/cli";
 import packageJson from "../package.json" with { type: "json" };
 import { errorDetail, ExternalToolError, OperationFailed } from "./domain/model.ts";
-import { adoptSkill, backfillTreeHash, clearStagingResidue, finalizeAdoption, findForeign, findStaged, findUnindexedSkills, rollbackAdoption } from "./lib/adopt.ts";
-import type { Adoption, AdoptOptions, ForeignSkill } from "./lib/adopt.ts";
+import { adoptSkills, clearStagingResidue, findForeign, findStaged, findUnindexedSkills } from "./lib/adopt.ts";
+import type { AdoptOptions, AdoptionResult, ForeignSkill } from "./lib/adopt.ts";
 import { backupGlobalDirs } from "./lib/bootstrap.ts";
-import { applyProfile, linkProjectSkill, setSkillsEnabled, unlinkProjectSkill } from "./lib/catalogActions.ts";
+import { classifyPlacement, inspectCatalogEntry } from "./lib/catalogInspection.ts";
+import type { CatalogLiveStatus, LiveEntry, VendorHashState } from "./lib/catalogInspection.ts";
+import { acceptVendorDrifts, applyProfile, linkProjectSkill, restoreVendorDrift, setSkillsEnabled, unlinkProjectSkill } from "./lib/catalogActions.ts";
 import type { ActionResult } from "./lib/catalogActions.ts";
-import { contentHash, findSymlinks, walkFiles } from "./lib/hash.ts";
+import { pullCatalog, pushCatalog, saveCatalog, syncCatalog, verifyCatalog } from "./lib/convergence.ts";
+import type { ConvergenceEvent } from "./lib/convergence.ts";
+import { contentHash } from "./lib/hash.ts";
 import { diffDirs, isClean, pagePatch, unifiedDiff } from "./lib/diff.ts";
 import type { DiffPager } from "./lib/diff.ts";
 import { parseCommand } from "./lib/editor.ts";
 import { layerRepo } from "./lib/layers.ts";
 import { checkLink } from "./lib/linker.ts";
-import { alignStateWithManifest, getSkill, isSkillEnabled, Manifest, ManifestStore, withSkillEnabled } from "./lib/manifest.ts";
-import type { ManifestStoreInterface, State } from "./lib/manifest.ts";
-import { HostRepo, isRepoDir, Paths, RepoNotFoundError, RepoResolution } from "./lib/paths.ts";
-import { apply, observe, observeAndPlan, planSync } from "./lib/reconcile.ts";
-import type { Plan } from "./lib/reconcile.ts";
+import { alignStateWithManifest, getActiveProfile, getDisabledSkills, getSkill, isSkillEnabled, ManifestStore } from "./lib/manifest.ts";
+import type { Manifest, State } from "./lib/manifest.ts";
+import { claudeRelTarget, HostRepo, isRepoDir, Paths, RepoNotFoundError, RepoResolution } from "./lib/paths.ts";
+import { observe, observeEntry, reconcileCatalog } from "./lib/reconcile.ts";
 import { refreshLocalHashes } from "./lib/rehash.ts";
-import {
-  absorbGlobalSkillLockEntries,
-  ensureHostSkillLock,
-  loadHostSkillLock,
-  loadSkillLockFile,
-  previewHostSkillLock,
-  pruneGlobalSkillLockEntries,
-  readSkillLockFile,
-  restoreHostSkillLock,
-  saveHostSkillLock,
-  seedGlobalSkillLock,
-  skillLockVersion,
-  validateSkillLock,
-} from "./lib/skillLock.ts";
-import type { SkillLockEntry, SkillLockSnapshot } from "./lib/skillLock.ts";
-import { vendorAccept, vendorRestore } from "./lib/vendorOps.ts";
+import { ensureHostSkillLock, seedGlobalSkillLock } from "./lib/skillLock.ts";
+import { assertVendorUpdatePlacements, findDriftingVendors, vendorRestore } from "./lib/vendorOps.ts";
 import { baselineDirty, checkUpstream, detectChanges, runSkillsAdd, runSkillsUpdate } from "./lib/update.ts";
 import type { GitHub } from "./lib/update.ts";
 
@@ -51,6 +40,30 @@ const c = {
   yellow: (s: string) => `\x1b[33m${s}\x1b[0m`,
   bold: (s: string) => `\x1b[1m${s}\x1b[0m`,
 };
+
+function renderConvergenceEvent(event: ConvergenceEvent): void {
+  if (event.type === "section") {
+    if (event.leadingBlank) console.log("");
+    console.log(c.bold(event.title));
+    return;
+  }
+  if (event.type === "git-output") {
+    const output = `${event.stdout}${event.stderr}`.trim();
+    if (output) console.log(output);
+    return;
+  }
+  const rendered =
+    event.tone === "dim"
+      ? c.dim(event.message)
+      : event.tone === "error"
+        ? c.red(event.message)
+        : event.tone === "success"
+          ? c.green(event.message)
+          : event.tone === "warning"
+            ? c.yellow(event.message)
+            : event.message;
+  console.log(rendered);
+}
 
 function pad(s: string, n: number): string {
   return s.length >= n ? s : s + " ".repeat(n - s.length);
@@ -91,35 +104,17 @@ interface SyncOptions {
 }
 
 const runSyncCmd = Effect.fn("Cli.runSync")(function* (manifest: Manifest, state: State, options: SyncOptions) {
-  const plan = yield* observeAndPlan(manifest, state, { force: options.force ?? false });
+  const { plan, applied } = yield* reconcileCatalog(manifest, state, options);
   for (const w of plan.warnings) console.log(c.yellow(`warn: ${w}`));
   if (options.dryRun) {
     if (plan.actions.length === 0) console.log("nothing to do");
     for (const a of plan.actions) console.log(`would ${a.type} ${a.skill}`);
     return;
   }
-  const res = yield* apply(plan, { force: options.force ?? false });
-  for (const d of res.done) console.log(`  ${d}`);
-  for (const s of res.skipped) console.log(c.yellow(`  skipped: ${s}`));
-  if (res.done.length === 0 && res.skipped.length === 0) console.log("in sync; nothing to do");
-});
-
-const seedVerifiedGlobalProvenance = Effect.fn("Cli.seedVerifiedGlobalProvenance")(function* (manifest: Manifest) {
-  const paths = yield* Paths;
-  const names = yield* Effect.try({
-    try: () =>
-      Object.entries(manifest.skills)
-        .filter(([name, skill]) => {
-          if (skill.origin !== "vendor") return false;
-          const live = join(paths.agentsSkills, name);
-          if (!existsSync(live)) return false;
-          const stat = lstatSync(live);
-          return stat.isDirectory() && !stat.isSymbolicLink() && contentHash(live) === skill.contentHash;
-        })
-        .map(([name]) => name),
-    catch: (error) => new OperationFailed({ message: `could not verify live vendor provenance: ${errorDetail(error)}` }),
-  });
-  if (names.length > 0) yield* seedGlobalSkillLock(manifest, names);
+  if (!applied) return;
+  for (const d of applied.done) console.log(`  ${d}`);
+  for (const s of applied.skipped) console.log(c.yellow(`  skipped: ${s}`));
+  if (applied.done.length === 0 && applied.skipped.length === 0) console.log("in sync; nothing to do");
 });
 
 function renderAction(result: ActionResult): void {
@@ -143,20 +138,25 @@ const cmdStatus = Effect.fn("Cli.status")(function* (manifest: Manifest, state: 
   console.log(c.dim(`host: ${repo}\n`));
   console.log(c.bold(`${pad("NAME", nameW)}${pad("ORIGIN", 8)}${pad("ENABLED", 9)}${pad("LIVE", 10)}CLAUDE`));
   for (const [name, meta] of Object.entries(manifest.skills)) {
-    const enabled = isSkillEnabled(state, name);
-    const live = Object.hasOwn(obs.agents, name) ? obs.agents[name]! : { kind: "missing" as const };
-    const claude = Object.hasOwn(obs.claude, name) ? "yes" : c.dim("-");
-
-    let liveLabel: string;
-    if (!enabled) {
-      liveLabel = live.kind === "missing" ? c.dim("-") : c.yellow(live.kind);
-    } else if (meta.origin === "local") {
-      liveLabel = live.kind === "symlink" ? c.green("ok") : c.red(live.kind);
-    } else if (live.kind === "dir") {
-      liveLabel = contentHash(join(paths.agentsSkills, name)) === meta.contentHash ? c.green("ok") : c.yellow("drift");
-    } else {
-      liveLabel = c.red(live.kind);
-    }
+    const enabled = isSkillEnabled(manifest, state, name);
+    const live: LiveEntry = Object.hasOwn(obs.agents, name) ? obs.agents[name]! : { kind: "missing" };
+    const claudeEntry: LiveEntry = Object.hasOwn(obs.claude, name) ? obs.claude[name]! : { kind: "missing" };
+    const claude = classifyPlacement(claudeEntry, resolve(paths.claudeSkills, claudeRelTarget(name))) === "expected-symlink" ? "yes" : c.dim("-");
+    const vendorHash: VendorHashState =
+      enabled && meta.origin === "vendor" && live.kind === "dir"
+        ? { kind: "verified", matches: contentHash(join(paths.agentsSkills, name)) === meta.contentHash }
+        : { kind: "pending" };
+    const inspection = inspectCatalogEntry({ origin: meta.origin, enabled, live, expectedTarget: resolve(repo, meta.path), vendorHash });
+    const labels = {
+      ok: c.green("ok"),
+      drift: c.yellow("drift"),
+      missing: c.red(live.kind),
+      off: c.dim("-"),
+      stale: c.yellow(live.kind),
+      checking: c.dim("checking"),
+      unowned: c.yellow("unowned"),
+    } satisfies Record<CatalogLiveStatus, string>;
+    const liveLabel = labels[inspection.status];
 
     console.log(
       `${pad(name, nameW)}${pad(meta.origin, 8)}${pad(enabled ? "on" : c.dim("off"), enabled ? 9 : 9 + 9)}${pad(liveLabel, 10 + liveLabel.length - stripAnsi(liveLabel).length)}${claude}`,
@@ -234,6 +234,11 @@ const cmdDiff = Effect.fn("Cli.diff")(function* (manifest: Manifest, names: Read
       console.log(`${name}: ${c.dim("local skill (symlinked; nothing to diff)")}`);
       continue;
     }
+    const placement = classifyPlacement(observeEntry(live), resolve(repo, meta.path));
+    if (placement === "wrong-symlink" || placement === "file") {
+      console.log(`${name}: ${c.yellow("live path is not owned by this catalog")}`);
+      continue;
+    }
     if (!existsSync(live)) {
       console.log(`${name}: ${c.dim("not installed globally (disabled?)")}`);
       continue;
@@ -262,441 +267,14 @@ const cmdDiff = Effect.fn("Cli.diff")(function* (manifest: Manifest, names: Read
   }
 });
 
-const verifyCatalogAt = Effect.fn("Cli.verifyCatalogAt")(function* (repo: string, catalogLock: string, manifest: Manifest, requireLock = false, projectedLock?: SkillLockSnapshot) {
-  let bad = 0;
-  for (const [name, meta] of Object.entries(manifest.skills)) {
-    const repoPath = join(repo, meta.path);
-    if (!existsSync(repoPath)) {
-      console.log(c.red(`${name}: repo copy missing at ${meta.path}`));
-      bad++;
-      continue;
-    }
-    const stat = lstatSync(repoPath);
-    if (stat.isSymbolicLink() || !stat.isDirectory()) {
-      console.log(c.red(`${name}: repo path must be a real directory: ${meta.path}`));
-      bad++;
-      continue;
-    }
-    const symlinks = findSymlinks(repoPath);
-    if (symlinks.length > 0) {
-      console.log(c.red(`${name}: repo copy contains symlink(s): ${symlinks.join(", ")}`));
-      bad++;
-      continue;
-    }
-    const h = contentHash(repoPath);
-    if (h !== meta.contentHash) {
-      console.log(c.yellow(`${name}: repo copy hash mismatch (manifest stale?)`));
-      bad++;
-    }
-  }
-  const lock = projectedLock ?? (yield* loadSkillLockFile(catalogLock));
-  if (requireLock && !lock.exists) {
-    console.log(c.yellow(".skill-lock.json is missing; run `slinky save` to create and commit it"));
-    bad++;
-  }
-  for (const issue of validateSkillLock(manifest, lock)) {
-    console.log(c.yellow(issue));
-    bad++;
-  }
-  if (bad > 0) return yield* bail(`${bad} catalog verification problem(s)`);
-  console.log(c.green(`all ${Object.keys(manifest.skills).length} skills verified`));
+const cmdVerify = Effect.fn("Cli.verify")(function* () {
+  yield* verifyCatalog(renderConvergenceEvent);
 });
 
-const cmdVerify = Effect.fn("Cli.verify")(function* (manifest: Manifest) {
-  const { repo, catalogLock } = yield* HostRepo;
-  yield* verifyCatalogAt(repo, catalogLock, manifest);
-});
-
-/** Run git without inheriting the caller's repository environment, reporting the exit status. */
-const tryGit = Effect.fn("Cli.tryGit")(function* (repo: string, args: ReadonlyArray<string>) {
-  const env = { ...process.env };
-  for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX"]) {
-    delete env[name];
-  }
-  const result = yield* Effect.sync(() => spawnSync("git", ["--literal-pathspecs", ...args], { cwd: repo, encoding: "utf8", env }));
-  if (result.error) {
-    return yield* Effect.fail(new ExternalToolError({ tool: "git", message: result.error.message }));
-  }
-  return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
-});
-
-const runGit = Effect.fn("Cli.runGit")(function* (repo: string, args: ReadonlyArray<string>) {
-  const result = yield* tryGit(repo, args);
-  if (result.status !== 0) {
-    const detail = (result.stderr || result.stdout || "").trim();
-    return yield* Effect.fail(new ExternalToolError({ tool: "git", message: detail || `git exited with ${result.status ?? "unknown"}` }));
-  }
-  return { stdout: result.stdout, stderr: result.stderr };
-});
-
-const assertGitRoot = Effect.fn("Cli.assertGitRoot")(function* (repo: string) {
-  const topLevel = yield* runGit(repo, ["rev-parse", "--show-toplevel"]);
-  if (realpathSync(topLevel.stdout.trim()) !== realpathSync(repo)) {
-    return yield* bail(`skills host must be a Git repository root: ${repo}`);
-  }
-});
-
-const loadCommittedManifest = Effect.fn("Cli.loadCommittedManifest")(function* (repo: string) {
-  const committed = yield* runGit(repo, ["show", "HEAD:skills.manifest.json"]);
-  return yield* Effect.try({
-    try: () => Schema.decodeUnknownSync(Manifest)(JSON.parse(committed.stdout)),
-    catch: (error) => new OperationFailed({ message: `cannot decode committed skills.manifest.json: ${errorDetail(error)}` }),
-  });
-});
-
-const requireCleanWorktree = Effect.fn("Cli.requireCleanWorktree")(function* (repo: string) {
-  const status = yield* runGit(repo, ["status", "--porcelain", "--untracked-files=normal"]);
-  if (status.stdout.trim()) return yield* bail("skills host worktree must be clean; save, commit, or remove local changes first");
-});
-
-const requireUpstream = Effect.fn("Cli.requireUpstream")(function* (repo: string) {
-  const branch = (yield* runGit(repo, ["branch", "--show-current"])).stdout.trim();
-  if (!branch) return yield* bail("skills host is on a detached HEAD; check out a branch first");
-  const upstream = yield* runGit(repo, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]).pipe(
-    Effect.map((result) => result.stdout.trim()),
-    Effect.mapError(() => new OperationFailed({ message: `branch ${branch} has no upstream; configure one with git push --set-upstream` })),
-  );
-  const remote = (yield* runGit(repo, ["config", "--get", `branch.${branch}.remote`])).stdout.trim();
-  const mergeRef = (yield* runGit(repo, ["config", "--get", `branch.${branch}.merge`])).stdout.trim();
-  return { branch, upstream, remote, mergeRef };
-});
-
-function renderGitOutput(result: { readonly stdout: string; readonly stderr: string }): void {
-  const output = `${result.stdout}${result.stderr}`.trim();
-  if (output) console.log(output);
-}
-
-interface PullOptions extends SyncOptions {
-  readonly dryRun?: boolean;
-  readonly restoreDrift?: boolean;
-}
-
-const prepareRetirement = Effect.fn("Cli.prepareRetirement")(function* (manifest: Manifest, state: State, removed: ReadonlyArray<string>, options: PullOptions) {
-  if (removed.length === 0) return { actions: [], warnings: [] } satisfies Plan;
-  const paths = yield* Paths;
-  const { repo } = yield* HostRepo;
-  const observation = yield* observe();
-  const removalState = removed.reduce((current, name) => withSkillEnabled(current, name, false), state);
-  const fullPlan = planSync(manifest, removalState, observation, { repo, claudeSkills: paths.claudeSkills, force: options.force ?? false });
-  const names = new Set(removed);
-  const retirementRank = (action: Plan["actions"][number]): number => (action.type === "remove-agents" ? 0 : action.type === "remove-claude" ? 1 : 2);
-  const plan = {
-    actions: fullPlan.actions
-      .filter((action) => names.has(action.skill))
-      .map((action) => {
-        if (action.type === "remove-agents") {
-          const live = observation.agents[action.skill];
-          const meta = manifest.skills[action.skill];
-          if (options.restoreDrift && meta?.origin === "vendor" && live?.kind === "dir") {
-            return { type: "remove-agents" as const, skill: action.skill };
-          }
-          return live?.kind === "symlink" || live?.kind === "broken-symlink" ? { ...action, expectedTarget: live.resolved } : action;
-        }
-        if (action.type === "remove-claude") {
-          const live = observation.claude[action.skill];
-          return live?.kind === "symlink" || live?.kind === "broken-symlink" ? { ...action, expectedTarget: live.resolved } : action;
-        }
-        return action;
-      })
-      .sort((left, right) => retirementRank(left) - retirementRank(right)),
-    warnings: fullPlan.warnings.filter((warning) => removed.some((name) => warning.startsWith(`${name}:`))),
-  };
-  if (plan.warnings.length > 0) return yield* bail(`cannot retire unowned skill paths: ${plan.warnings.join("; ")}`);
-
-  for (const name of removed) {
-    const meta = manifest.skills[name];
-    if (!meta) continue;
-    const live = observation.agents[name];
-    const restoreRetiredVendor = options.restoreDrift && meta.origin === "vendor";
-    if (live?.kind === "dir" && contentHash(join(paths.agentsSkills, name)) !== meta.contentHash && !options.force && !restoreRetiredVendor) {
-      return yield* bail(`${name}: live dir drifted from repo copy; run \`diff ${name}\` then \`vendor ${name}\` or use --force`);
-    }
-    const repoPath = resolve(repo, meta.path);
-    if ((live?.kind === "symlink" || live?.kind === "broken-symlink") && live.resolved !== repoPath && !options.force) {
-      return yield* bail(`${name}: ~/.agents/skills symlink is not owned by this catalog; inspect it or use --force`);
-    }
-    const claude = observation.claude[name];
-    const expectedClaudeTarget = resolve(paths.agentsSkills, name);
-    if ((claude?.kind === "symlink" || claude?.kind === "broken-symlink") && claude.resolved !== expectedClaudeTarget && !options.force) {
-      return yield* bail(`${name}: ~/.claude/skills symlink targets ${claude.resolved ?? "a missing path"}, expected ${expectedClaudeTarget}; inspect it or use --force`);
-    }
-  }
-  if (options.dryRun) {
-    for (const action of plan.actions) console.log(`would ${action.type} retired skill ${action.skill}`);
-  }
-  return plan;
-});
-
-const applyRetirement = Effect.fn("Cli.applyRetirement")(function* (
-  manifest: Manifest,
-  oldLockEntries: Readonly<Record<string, SkillLockEntry>>,
-  removed: ReadonlyArray<string>,
-  plan: Plan,
-  options: PullOptions,
-) {
-  const result = yield* apply(plan, { force: options.force ?? false });
-  for (const done of result.done) console.log(`  ${done}`);
-  if (result.skipped.length > 0) {
-    return yield* bail(`retired skill cleanup changed after preflight: ${result.skipped.join("; ")}`);
-  }
-  yield* pruneGlobalSkillLockEntries(manifest, oldLockEntries, removed, options.force ?? false);
-});
-
-const loadIncomingCatalog = Effect.fn("Cli.loadIncomingCatalog")(function* (repo: string, upstream: string) {
-  return yield* Effect.scoped(
-    Effect.gen(function* () {
-      const checkout = yield* Effect.acquireRelease(
-        Effect.gen(function* () {
-          const directory = mkdtempSync(join(tmpdir(), "slinky-pull-"));
-          yield* runGit(repo, ["worktree", "add", "--detach", directory, upstream]).pipe(
-            Effect.onError(() => Effect.sync(() => rmSync(directory, { recursive: true, force: true }))),
-          );
-          return directory;
-        }),
-        (directory) =>
-          Effect.gen(function* () {
-            yield* runGit(repo, ["worktree", "remove", "--force", directory]).pipe(Effect.ignore);
-            yield* Effect.sync(() => rmSync(directory, { recursive: true, force: true }));
-          }),
-      );
-      const manifest = yield* Effect.try({
-        try: () => Schema.decodeUnknownSync(Manifest)(JSON.parse(readFileSync(join(checkout, "skills.manifest.json"), "utf8")), { errors: "all", onExcessProperty: "error" }),
-        catch: (error) => new OperationFailed({ message: `incoming skills.manifest.json is invalid: ${errorDetail(error)}` }),
-      });
-      yield* verifyCatalogAt(checkout, join(checkout, ".skill-lock.json"), manifest, true);
-      return manifest;
-    }),
-  );
-});
-
-/** Materialize and verify a synthetic Git tree without changing the checked-out branch. */
-const loadCatalogTree = Effect.fn("Cli.loadCatalogTree")(function* (repo: string, tree: string) {
-  return yield* Effect.scoped(
-    Effect.gen(function* () {
-      const checkout = yield* Effect.acquireRelease(
-        Effect.gen(function* () {
-          const directory = mkdtempSync(join(tmpdir(), "slinky-merge-"));
-          yield* runGit(repo, ["worktree", "add", "--detach", directory, "HEAD"]).pipe(
-            Effect.onError(() => Effect.sync(() => rmSync(directory, { recursive: true, force: true }))),
-          );
-          return directory;
-        }),
-        (directory) =>
-          Effect.gen(function* () {
-            yield* runGit(repo, ["worktree", "remove", "--force", directory]).pipe(Effect.ignore);
-            yield* Effect.sync(() => rmSync(directory, { recursive: true, force: true }));
-          }),
-      );
-      yield* runGit(checkout, ["read-tree", "--reset", tree]);
-      yield* Effect.sync(() => {
-        for (const entry of readdirSync(checkout)) {
-          if (entry !== ".git") rmSync(join(checkout, entry), { recursive: true, force: true });
-        }
-      });
-      yield* runGit(checkout, ["checkout-index", "--all", "--force"]);
-      const manifest = yield* Effect.try({
-        try: () => Schema.decodeUnknownSync(Manifest)(JSON.parse(readFileSync(join(checkout, "skills.manifest.json"), "utf8")), { errors: "all", onExcessProperty: "error" }),
-        catch: (error) => new OperationFailed({ message: `merged skills.manifest.json is invalid: ${errorDetail(error)}` }),
-      });
-      yield* verifyCatalogAt(checkout, join(checkout, ".skill-lock.json"), manifest, true);
-      return manifest;
-    }),
-  );
-});
-
-/** Paths git reports as conflicted in `merge-tree --write-tree` output, which follows the tree OID. */
-function conflictedPaths(mergeTreeStdout: string): ReadonlyArray<string> {
-  const lines = mergeTreeStdout.split("\n").slice(1);
-  const end = lines.indexOf("");
-  const entries = end === -1 ? lines : lines.slice(0, end);
-  return [...new Set(entries.map((line) => line.split("\t")[1]).filter((path): path is string => path !== undefined))];
-}
-
-/**
- * Reconcile a diverged branch by replaying local commits onto the upstream tip.
- *
- * Two machines both running `slinky save` is the ordinary way this catalog diverges, and the
- * resulting commits almost always touch disjoint skills, so pull rebases them itself rather than
- * stopping. It only does so when it can prove the outcome first: `merge-tree` has to merge without
- * conflict, and the merged catalog must not retire any skill. Retirement needs the preflight the
- * fast-forward path runs below (global drift guards, project-link blocking, lock pruning), and a
- * rebase leaves nothing behind for it to act on, so those cases are handed back instead of being
- * silently skipped.
- */
-const rebaseDivergence = Effect.fn("Cli.rebaseDivergence")(function* (
-  repo: string,
-  upstream: string,
-  upstreamCommit: string,
-  manifest: Manifest,
-  ahead: number,
-  options: PullOptions,
-) {
-  const manually = `resolve them with Git before pulling: git rebase ${upstream}`;
-  const merge = yield* tryGit(repo, ["merge-tree", "--write-tree", upstreamCommit, "HEAD"]);
-  if (merge.status !== 0) {
-    const paths = conflictedPaths(merge.stdout);
-    const detail = paths.length > 0 ? ` (conflicts in ${paths.join(", ")})` : "";
-    return yield* bail(`local branch and ${upstream} have diverged and do not merge cleanly${detail}; ${manually}`);
-  }
-  const tree = merge.stdout.split("\n")[0]?.trim();
-  if (!tree) return yield* bail(`could not compute a merge of HEAD and ${upstream}; ${manually}`);
-
-  const merged = yield* loadCatalogTree(repo, tree);
-  const retired = Object.keys(manifest.skills).filter((name) => !Object.hasOwn(merged.skills, name));
-  if (retired.length > 0) {
-    return yield* bail(`local branch and ${upstream} have diverged and the merge retires ${retired.join(", ")}; ${manually}`);
-  }
-
-  if (options.dryRun) {
-    console.log(`would replay ${ahead} local commit(s) onto ${upstream}`);
-    return merged;
-  }
-  const before = (yield* runGit(repo, ["rev-parse", "HEAD"])).stdout.trim();
-  console.log(`diverged from ${upstream}; replaying ${ahead} local commit(s) onto it`);
-  // merge-tree proves the combined result is clean, not that each commit replays cleanly, so an
-  // interrupted rebase is still possible; abort it so the branch is left exactly as it was found.
-  const rebase = yield* tryGit(repo, ["rebase", upstreamCommit]);
-  if (rebase.status !== 0) {
-    yield* tryGit(repo, ["rebase", "--abort"]).pipe(Effect.ignore);
-    return yield* bail(`could not replay local commits onto ${upstream}; branch left at ${before.slice(0, 7)}; ${manually}`);
-  }
-  console.log(`replayed ${ahead} commit(s); previous branch tip was ${before.slice(0, 7)}`);
-});
-
-const pullAndSync = Effect.fn("Cli.pullAndSync")(function* (options: PullOptions) {
-  const { repo } = yield* HostRepo;
-  const { store, manifest: loadedManifest, state: loadedState } = yield* loadHostState;
-  let currentManifest = loadedManifest;
-  let currentState = loadedState;
-  const paths = yield* Paths;
-  yield* assertGitRoot(repo);
-  yield* requireCleanWorktree(repo);
-  yield* cmdVerify(currentManifest);
-  let currentHostLock = yield* loadHostSkillLock();
-  if (!currentHostLock.exists) return yield* bail(".skill-lock.json is missing; run `slinky save` before pulling");
-  const globalLock = readSkillLockFile(paths.skillLock);
-  if (globalLock.warning) return yield* Effect.fail(globalLock.warning);
-  if (globalLock.exists && globalLock.version !== skillLockVersion) {
-    return yield* bail(`machine skill lock version ${globalLock.version} is not supported for writes`);
-  }
-  const { upstream, remote, mergeRef } = yield* requireUpstream(repo);
-  renderGitOutput(yield* runGit(repo, ["fetch", remote, mergeRef]));
-  const upstreamCommit = (yield* runGit(repo, ["rev-parse", "FETCH_HEAD^{commit}"])).stdout.trim();
-
-  const countAgainstUpstream = Effect.fn("Cli.countAgainstUpstream")(function* () {
-    const counts = (yield* runGit(repo, ["rev-list", "--left-right", "--count", `HEAD...${upstreamCommit}`])).stdout.trim().split(/\s+/);
-    const ahead = Number.parseInt(counts[0] ?? "", 10);
-    const behind = Number.parseInt(counts[1] ?? "", 10);
-    if (!Number.isFinite(ahead) || !Number.isFinite(behind)) return yield* bail(`could not compare HEAD with ${upstream}`);
-    return { ahead, behind };
-  });
-
-  let { ahead, behind } = yield* countAgainstUpstream();
-  if (ahead > 0 && behind > 0) {
-    const mergedManifest = yield* rebaseDivergence(repo, upstream, upstreamCommit, currentManifest, ahead, options);
-    if (options.dryRun) {
-      const manifest = mergedManifest ?? currentManifest;
-      return { manifest, state: alignStateWithManifest(manifest, currentState) };
-    }
-    // The rebase rewrote the catalog under us; re-read it and re-verify before anything acts on it.
-    currentManifest = yield* store.loadManifest();
-    currentState = alignStateWithManifest(currentManifest, currentState);
-    currentHostLock = yield* loadHostSkillLock();
-    yield* cmdVerify(currentManifest);
-    ({ ahead, behind } = yield* countAgainstUpstream());
-  }
-
-  if (behind === 0) {
-    console.log(ahead > 0 ? `already up to date from ${upstream}; local branch is ${ahead} commit(s) ahead` : `already up to date with ${upstream}`);
-    if (options.dryRun) return { manifest: currentManifest, state: currentState };
-    yield* store.saveState(currentState);
-    yield* runSyncCmd(currentManifest, currentState, options);
-    yield* seedVerifiedGlobalProvenance(currentManifest);
-    return { manifest: currentManifest, state: currentState };
-  }
-
-  const incomingManifest = yield* loadIncomingCatalog(repo, upstreamCommit);
-  const removed = Object.keys(currentManifest.skills).filter((name) => !Object.hasOwn(incomingManifest.skills, name));
-  const linked = currentState.projectLinks.filter((link) => removed.includes(link.skill));
-  if (linked.length > 0) {
-    const commands = linked.map((link) => `slinky unlink ${link.skill} ${link.project}`).join("; ");
-    return yield* bail(`incoming catalog removes linked skills; unlink them before pulling: ${commands}`);
-  }
-
-  console.log(options.dryRun ? `would fast-forward ${behind} commit(s) from ${upstream}` : `fast-forwarding ${behind} commit(s) from ${upstream}`);
-  const retirement = yield* prepareRetirement(currentManifest, currentState, removed, options);
-  const incomingState = alignStateWithManifest(incomingManifest, currentState);
-  if (options.dryRun) return { manifest: incomingManifest, state: incomingState };
-
-  yield* applyRetirement(currentManifest, currentHostLock.entries, removed, retirement, options);
-  yield* store.saveState(incomingState);
-  renderGitOutput(yield* runGit(repo, ["merge", "--ff-only", upstreamCommit]));
-  const manifest = yield* store.loadManifest();
-  const state = incomingState;
-  yield* runSyncCmd(manifest, state, options);
-  yield* seedVerifiedGlobalProvenance(manifest);
-  return { manifest, state };
-});
-
-/**
- * Adopt candidates, persist manifest + state, and finalize. On failure the
- * manifest is restored and (when the restore was truthful) the copied
- * destinations are rolled back.
- */
-const adoptCandidates = Effect.fn("Cli.adoptCandidates")(function* (
-  store: ManifestStoreInterface,
-  initialManifest: Manifest,
-  initialState: State,
-  picked: ReadonlyArray<ForeignSkill>,
-  options: AdoptOptions,
-) {
-  const previousManifest = initialManifest;
-  const previousLock = yield* loadHostSkillLock();
-  const ensuredLock = yield* ensureHostSkillLock(initialManifest);
-  let manifest = initialManifest;
-  let state = initialState;
-  const lockEntries = { ...ensuredLock.entries };
-  const adoptions: Adoption[] = [];
-  const staged: string[] = [];
-  let manifestWritten = false;
-  yield* Effect.gen(function* () {
-    for (const cand of picked) {
-      // A project-scoped lock has no git tree SHA; recover it so the adopted
-      // skill still answers to `update --check`.
-      const lock = cand.lock ? yield* backfillTreeHash(cand.lock) : undefined;
-      const candidate = lock === undefined ? cand : { ...cand, lock };
-      const result = yield* adoptSkill(manifest, candidate, options);
-      adoptions.push(result);
-      if (result.lockEntry) lockEntries[cand.name] = result.lockEntry;
-      if (cand.location === "staged") staged.push(cand.name);
-      manifest = result.manifest;
-      console.log(`adopted ${c.bold(cand.name)} -> ${result.meta.path}`);
-    }
-    state = alignStateWithManifest(manifest, state);
-    yield* store.saveManifest(manifest);
-    manifestWritten = true;
-    yield* store.saveState(state);
-    yield* saveHostSkillLock(lockEntries);
-  }).pipe(
-    Effect.onError(() =>
-      Effect.gen(function* () {
-        let restored = !manifestWritten;
-        if (manifestWritten) {
-          restored = yield* store.saveManifest(previousManifest).pipe(
-            Effect.as(true),
-            Effect.catch(() => Effect.succeed(false)),
-          );
-        }
-        if (restored) for (const adoption of adoptions) rollbackAdoption(adoption);
-        yield* restoreHostSkillLock(previousLock).pipe(Effect.ignore);
-      }),
-    ),
-  );
-  for (const adoption of adoptions) finalizeAdoption(adoption);
-  const warnings: string[] = [];
-  for (const name of staged) warnings.push(...(yield* clearStagingResidue(name)));
-  return { manifest, state, warnings };
-});
+const renderAdoptions = (result: AdoptionResult): void => {
+  for (const record of result.adopted) console.log(`adopted ${c.bold(record.name)} -> ${record.path}`);
+  for (const warning of result.warnings) console.log(c.yellow(`warn: ${warning}`));
+};
 
 /** Where an adoptable skill currently sits, for display. */
 const originLabel = (cand: ForeignSkill): string => (cand.location === "staged" ? ".agents/skills" : `~/.${cand.location}`);
@@ -752,7 +330,12 @@ const suggestStagingIgnore = Effect.fn("Cli.suggestStagingIgnore")(function* () 
 /** Discard staging copies that merely duplicate a baseline already in the manifest. */
 const dropRedundantStaging = Effect.fn("Cli.dropRedundantStaging")(function* (pool: AdoptPool) {
   for (const entry of pool.redundant) {
-    rmSync(entry.dir, { recursive: true, force: true });
+    try {
+      rmSync(entry.dir, { recursive: true, force: true });
+    } catch (error) {
+      console.log(c.yellow(`warn: ${entry.name}: could not remove redundant staging copy ${entry.dir}: ${errorDetail(error)}`));
+      continue;
+    }
     for (const warning of yield* clearStagingResidue(entry.name)) console.log(c.yellow(`warn: ${warning}`));
     console.log(c.dim(`  ${entry.name}: already indexed at ${entry.path}; removed the redundant staging copy`));
   }
@@ -866,10 +449,16 @@ const bootstrapFlow = (input: BootstrapInput) =>
     if (scan.warning) console.log(c.yellow(`warn: ${scan.warning.message}`));
     if (candidates.length > 0) {
       if (input.adoptAll && !dryRun) {
-        const adopted = yield* adoptCandidates(store, manifest, state, candidates, {});
+        const adopted = yield* adoptSkills(
+          store,
+          manifest,
+          state,
+          candidates.map((candidate) => ({ candidate })),
+        );
         manifest = adopted.manifest;
         state = adopted.state;
         stateSaved = true;
+        renderAdoptions(adopted);
       } else {
         console.log(c.yellow(`\nfound ${candidates.length} host skill(s) not in the repo (left untouched):`));
         for (const cand of candidates) {
@@ -895,8 +484,8 @@ const bootstrapFlow = (input: BootstrapInput) =>
     // 4. integrity
     if (!dryRun) {
       console.log("");
-      yield* cmdVerify(manifest);
-      const enabledCount = Object.keys(manifest.skills).length - state.disabledSkills.length;
+      yield* cmdVerify();
+      const enabledCount = Object.keys(manifest.skills).length - getDisabledSkills(manifest, state).length;
       console.log(`\n${c.green("bootstrap complete")}: ${enabledCount}/${Object.keys(manifest.skills).length} skills enabled`);
       if (candidates.length > 0 && !input.adoptAll) {
         console.log(c.yellow(`${candidates.length} foreign skill(s) pending adoption`));
@@ -926,32 +515,17 @@ const statusCommand = Command.make("status", {}, () =>
   ),
 ).pipe(Command.withDescription("Catalog: origin, enabled, live state, claude link"));
 
-const syncCommand = Command.make("sync", { dryRun: dryRunFlag, force: forceFlag, pull: pullFlag }, (input) => withRepo(syncCatalog(input))).pipe(
-  Command.withDescription("Save, pull, reconcile, and restore live vendor drift"),
-);
+const syncCommand = Command.make("sync", { dryRun: dryRunFlag, force: forceFlag, pull: pullFlag }, ({ dryRun, force }) =>
+  withRepo(syncCatalog({ dryRun, force, onEvent: renderConvergenceEvent })),
+).pipe(Command.withDescription("Save, pull, reconcile, and restore live vendor drift"));
 
-const pullCommand = Command.make("pull", { dryRun: dryRunFlag, force: forceFlag }, (input) => withRepo(pullAndSync(input))).pipe(
-  Command.withDescription("Fast-forward the catalog from its upstream (replaying diverged local commits), align local state, and sync"),
-);
+const pullCommand = Command.make("pull", { dryRun: dryRunFlag, force: forceFlag }, ({ dryRun, force }) =>
+  withRepo(pullCatalog({ dryRun, force, onEvent: renderConvergenceEvent })),
+).pipe(Command.withDescription("Fast-forward the catalog from its upstream (replaying diverged local commits), align local state, and sync"));
 
-const pushCommand = Command.make("push", { dryRun: dryRunFlag }, ({ dryRun }) =>
-  withRepo(
-    Effect.gen(function* () {
-      const { repo } = yield* HostRepo;
-      yield* loadHostState;
-      yield* assertGitRoot(repo);
-      yield* requireCleanWorktree(repo);
-      const { upstream, remote, mergeRef } = yield* requireUpstream(repo);
-      const headCommit = (yield* runGit(repo, ["rev-parse", "HEAD^{commit}"])).stdout.trim();
-      yield* loadIncomingCatalog(repo, headCommit);
-      const hostLock = yield* loadHostSkillLock();
-      if (!hostLock.exists) return yield* bail(".skill-lock.json is missing; run `slinky save` before pushing");
-      const args = dryRun ? ["push", "--dry-run", remote, `${headCommit}:${mergeRef}`] : ["push", remote, `${headCommit}:${mergeRef}`];
-      renderGitOutput(yield* runGit(repo, args));
-      console.log(dryRun ? `push to ${upstream} would succeed` : `pushed catalog to ${upstream}`);
-    }),
-  ),
-).pipe(Command.withDescription("Push the clean, verified catalog branch to its configured upstream"));
+const pushCommand = Command.make("push", { dryRun: dryRunFlag }, ({ dryRun }) => withRepo(pushCatalog({ dryRun, onEvent: renderConvergenceEvent }))).pipe(
+  Command.withDescription("Push the clean, verified catalog branch to its configured upstream"),
+);
 
 const makeToggleCommand = (name: "enable" | "disable", description: string) =>
   Command.make(name, { skills: skillsArg, dryRun: dryRunFlag, force: forceFlag }, ({ skills, dryRun, force }) =>
@@ -971,7 +545,7 @@ const profileList = withRepo(
     const entries = Object.entries(manifest.profiles);
     if (entries.length === 0) console.log(c.dim("no profiles defined (edit skills.manifest.json)"));
     for (const [name, skills] of entries) {
-      const active = state.activeProfile === name ? c.green(" (active)") : "";
+      const active = getActiveProfile(manifest, state) === name ? c.green(" (active)") : "";
       console.log(`${c.bold(name)}${active}: ${skills.join(", ")}`);
     }
   }),
@@ -1140,30 +714,18 @@ const diffCommand = Command.make(
 const vendorCommand = Command.make("vendor", { names: skillsArg }, ({ names }) =>
   withRepo(
     Effect.gen(function* () {
-      const { store, manifest: initial } = yield* loadHostState;
-      let manifest = initial;
-      for (const name of names) {
-        const result = yield* vendorAccept(manifest, name);
-        manifest = result.manifest;
-        console.log(result.changed ? `${name}: vendored live copy into repo` : `${name}: already in sync`);
-        if (result.warning) console.log(c.yellow(`warn: ${result.warning.message}`));
+      const result = yield* acceptVendorDrifts(names);
+      for (const accepted of result.accepted) {
+        console.log(accepted.changed ? `${accepted.name}: vendored live copy into repo` : `${accepted.name}: already in sync`);
+        if (accepted.warning) console.log(c.yellow(`warn: ${accepted.warning.message}`));
       }
-      yield* store.saveManifest(manifest);
+      for (const warning of result.warnings) {
+        console.log(c.yellow(`warn: ${warning}`));
+      }
       console.log(c.dim("review with `git diff` and commit to lock the new baseline"));
     }),
   ),
 ).pipe(Command.withDescription("Accept live copy into repo (after skills.sh update)"));
-
-const findDriftingVendors = Effect.fn("Cli.findDriftingVendors")(function* (manifest: Manifest) {
-  const paths = yield* Paths;
-  const observation = yield* observe();
-  return Object.entries(manifest.skills)
-    .filter(([name, meta]) => {
-      const live = observation.agents[name];
-      return meta.origin === "vendor" && live?.kind === "dir" && contentHash(join(paths.agentsSkills, name)) !== meta.contentHash;
-    })
-    .map(([name]) => name);
-});
 
 const restoreCommand = Command.make("restore", { names: skillsArg }, ({ names }) =>
   withRepo(
@@ -1173,7 +735,7 @@ const restoreCommand = Command.make("restore", { names: skillsArg }, ({ names })
       const { manifest } = yield* loadHostState;
       const targets = restoreAll ? yield* findDriftingVendors(manifest) : names;
       for (const name of targets) {
-        yield* vendorRestore(manifest, name);
+        yield* restoreVendorDrift(name);
         console.log(`${name}: live copy restored from repo baseline`);
       }
       if (restoreAll && targets.length === 0) console.log("all live vendor skills already match the catalog");
@@ -1237,16 +799,22 @@ const skillsAddCommand = Command.make(
         const picked = pool.candidates.filter((candidate) => candidate.location === "staged" || foreignHashes.get(candidate.name) !== contentHash(candidate.dir));
         const globalPicks = picked.filter((candidate) => candidate.location !== "staged");
         if (globalPicks.length > 0) console.log(c.dim(`indexing ${globalPicks.length} skill(s) installed globally by skills.sh`));
-        yield* dropRedundantStaging(pool);
         if (picked.length === 0) {
+          yield* dropRedundantStaging(pool);
           if (pool.redundant.length === 0) console.log("nothing new to index");
           return;
         }
 
-        const adopted = yield* adoptCandidates(store, manifest, state, picked, {});
+        const adopted = yield* adoptSkills(
+          store,
+          manifest,
+          state,
+          picked.map((candidate) => ({ candidate })),
+        );
         manifest = adopted.manifest;
         state = adopted.state;
-        for (const warning of adopted.warnings) console.log(c.yellow(`warn: ${warning}`));
+        renderAdoptions(adopted);
+        yield* dropRedundantStaging(pool);
         yield* runSyncCmd(manifest, state, {});
         yield* suggestStagingIgnore();
         console.log(c.dim("review with `git status` and commit to lock the new baseline"));
@@ -1310,17 +878,22 @@ const adoptCommand = Command.make(
           }
           picked = chosen;
         }
-        // Adopting all also clears staging copies that duplicate an existing baseline.
-        if (adoptAll) yield* dropRedundantStaging(pool);
         if (picked.length === 0) {
+          if (adoptAll) yield* dropRedundantStaging(pool);
           if (pool.redundant.length === 0) console.log("nothing to adopt");
           return;
         }
         const options: AdoptOptions = Option.isSome(input.owner) ? { local: input.local, owner: input.owner.value } : { local: input.local };
-        const adopted = yield* adoptCandidates(store, manifest, state, picked, options);
+        const adopted = yield* adoptSkills(
+          store,
+          manifest,
+          state,
+          picked.map((candidate) => ({ candidate, options })),
+        );
         manifest = adopted.manifest;
         state = adopted.state;
-        for (const warning of adopted.warnings) console.log(c.yellow(`warn: ${warning}`));
+        renderAdoptions(adopted);
+        if (adoptAll) yield* dropRedundantStaging(pool);
         yield* runSyncCmd(manifest, state, { force: input.force });
         yield* suggestStagingIgnore();
         console.log(c.dim("review with `git status` and commit to lock the new baseline"));
@@ -1342,7 +915,7 @@ const updateCommand = Command.make(
       Effect.gen(function* () {
         const paths = yield* Paths;
         const { repo } = yield* HostRepo;
-        const { store, manifest: initial, state } = yield* loadHostState;
+        const { manifest: initial, state } = yield* loadHostState;
         let manifest = initial;
         if (input.check) {
           console.log(c.dim("comparing persisted upstream hashes against GitHub\u2026"));
@@ -1388,13 +961,15 @@ const updateCommand = Command.make(
         }
 
         // 2. fetch via skills.sh (updates live copies + lock; baselines untouched)
+        yield* assertVendorUpdatePlacements(manifest, selectedNames, input.force);
         console.log(c.bold("running npx skills update\u2026\n"));
         yield* runSkillsUpdate(manifest, selectedNames);
 
         // 3. detect what actually changed vs our baselines
         const outcome = yield* detectChanges(manifest, state, selectedNames);
+        if (outcome.unowned.length > 0) console.log(c.yellow(`\nunowned live placements left untouched: ${outcome.unowned.join(", ")}`));
         if (outcome.changed.length === 0 && outcome.missing.length === 0) {
-          console.log(c.green("\nno changes: all live copies still match the vendored baselines"));
+          if (outcome.unowned.length === 0) console.log(c.green("\nno changes: all live copies still match the vendored baselines"));
           return;
         }
 
@@ -1402,7 +977,8 @@ const updateCommand = Command.make(
         const pager = yield* selectPager(input);
         const pathsFor = (name: string) => {
           const meta = getSkill(manifest, name);
-          return meta ? { repoPath: join(repo, meta.path), live: join(paths.agentsSkills, name) } : undefined;
+          const live = join(paths.agentsSkills, name);
+          return meta && observeEntry(live).kind === "dir" ? { repoPath: join(repo, meta.path), live } : undefined;
         };
         if (pager && !input.yes) {
           const patches: string[] = [];
@@ -1420,7 +996,10 @@ const updateCommand = Command.make(
         const rejected: string[] = [];
         for (const name of outcome.changed) {
           const target = pathsFor(name);
-          if (!target) continue;
+          if (!target) {
+            console.log(c.yellow(`\n${name}: live path changed after update; left untouched`));
+            continue;
+          }
           const { repoPath, live } = target;
           const d = diffDirs(repoPath, live);
           console.log(c.bold(`\n\u2500\u2500 ${name} \u2500\u2500`));
@@ -1432,6 +1011,11 @@ const updateCommand = Command.make(
           while (!["a", "r", "s"].includes(decision)) {
             decision = (prompt(`accept [a] / reject [r] / skip [s] / show diff [d] >`) ?? "s").trim().toLowerCase();
             if (decision === "d") {
+              if (!pathsFor(name)) {
+                console.log(c.yellow(`${name}: live path changed; refusing to read it`));
+                decision = "s";
+                continue;
+              }
               const rendered = yield* renderPatch(repoPath, live);
               if (pager) yield* openPager(rendered, pager);
               else console.log(rendered);
@@ -1439,9 +1023,6 @@ const updateCommand = Command.make(
             }
           }
           if (decision === "a") {
-            const result = yield* vendorAccept(manifest, name, { refreshProvenance: true });
-            manifest = result.manifest;
-            if (result.warning) console.log(c.yellow(`  warn: ${result.warning.message}`));
             accepted.push(name);
             console.log(c.green(`  accepted: new baseline for ${name}`));
           } else if (decision === "r") {
@@ -1453,13 +1034,15 @@ const updateCommand = Command.make(
           }
         }
         if (accepted.length > 0) {
-          const previousLock = yield* loadHostSkillLock();
-          yield* Effect.gen(function* () {
-            yield* absorbGlobalSkillLockEntries(manifest, accepted);
-            yield* store.saveManifest(manifest);
-          }).pipe(Effect.onError(() => restoreHostSkillLock(previousLock).pipe(Effect.ignore)));
+          const acceptance = yield* acceptVendorDrifts(accepted, { refreshProvenance: true, absorbProvenance: true });
+          manifest = acceptance.manifest;
+          for (const result of acceptance.accepted) if (result.warning) console.log(c.yellow(`  warn: ${result.warning.message}`));
+          for (const warning of acceptance.warnings) console.log(c.yellow(`  warn: ${warning}`));
         }
-        yield* seedGlobalSkillLock(manifest, selectedNames);
+        yield* seedGlobalSkillLock(
+          manifest,
+          selectedNames.filter((name) => !outcome.unowned.includes(name)),
+        );
 
         // 5. resurrect enabled skills that upstream deleted
         if (outcome.missing.length > 0) {
@@ -1469,7 +1052,7 @@ const updateCommand = Command.make(
 
         console.log(
           `\n${c.bold("summary:")} ${accepted.length} accepted, ${rejected.length} rejected, ` +
-            `${outcome.changed.length - accepted.length - rejected.length} skipped, ${outcome.missing.length} restored`,
+            `${outcome.changed.length - accepted.length - rejected.length} skipped, ${outcome.missing.length} restored, ${outcome.unowned.length} unowned`,
         );
         if (accepted.length > 0) {
           console.log(c.dim(`review with \`git diff\` then commit to lock the new baseline`));
@@ -1478,251 +1061,18 @@ const updateCommand = Command.make(
     ),
 ).pipe(Command.withDescription("Check upstream (--check) or fetch updates via skills.sh and review each diff"));
 
-const saveCatalog = Effect.fn("Cli.saveCatalog")(function* (message: Option.Option<string>) {
-  const store = yield* ManifestStore;
-  let manifest = yield* store.loadManifest();
-  const { repo } = yield* HostRepo;
-  const topLevel = yield* runGit(repo, ["rev-parse", "--show-toplevel"]);
-  if (realpathSync(topLevel.stdout.trim()) !== realpathSync(repo)) {
-    return yield* bail(`skills host must be a Git repository root: ${repo}`);
-  }
-  const unindexed = findUnindexedSkills(manifest, repo).filter((skill) => skill.origin !== "agent");
-  if (unindexed.length > 0) return yield* bail(`unindexed catalog skill: ${unindexed.map((skill) => skill.path).join(", ")}`);
-
-  yield* ensureHostSkillLock(manifest);
-  // Editing a local skill edits the repo copy through its symlink, and save commits that
-  // content either way, so a stale local hash is bookkeeping rather than a reason to stop.
-  // Every other verification failure below still aborts the commit.
-  const refresh = refreshLocalHashes(manifest, repo);
-  if (refresh.refreshed.length > 0) {
-    manifest = refresh.manifest;
-    for (const name of refresh.refreshed) console.log(`${name}: refreshed manifest hash`);
-    yield* store.saveManifest(manifest);
-  }
-  yield* cmdVerify(manifest);
-  const previous = yield* loadCommittedManifest(repo);
-  const previousPaths = Object.values(previous.skills).map((skill) => skill.path);
-  const committedFiles = yield* runGit(repo, ["ls-tree", "-r", "--name-only", "HEAD", "--", ...previousPaths]);
-  const currentFiles = Object.values(manifest.skills).flatMap((skill) => walkFiles(join(repo, skill.path)).map((file) => posix.join(skill.path, file)));
-  const pathspec = [".skill-lock.json", "skills.manifest.json", ...new Set([...committedFiles.stdout.split("\n").filter(Boolean), ...currentFiles])];
-  const status = yield* runGit(repo, ["status", "--porcelain", "--", ...pathspec]);
-  if (status.stdout.trim().length === 0) {
-    console.log(c.green("catalog already saved; nothing to commit"));
-    return;
-  }
-
-  const commitMessage = Option.getOrElse(message, () => "Update skills catalog");
-  const index = yield* runGit(repo, ["rev-parse", "--git-path", "index"]);
-  const indexPath = resolve(repo, index.stdout.trim());
-  const indexBackup = `${indexPath}.slinky-${process.pid}`;
-  yield* Effect.try({
-    try: () => copyFileSync(indexPath, indexBackup),
-    catch: (error) => new ExternalToolError({ tool: "git", message: `could not back up Git index: ${errorDetail(error)}` }),
-  });
-  const commit = yield* Effect.gen(function* () {
-    yield* runGit(repo, ["add", "--intent-to-add", "--", ".skill-lock.json", "skills.manifest.json", ...currentFiles]);
-    return yield* runGit(repo, ["commit", "--only", "-m", commitMessage, "--", ...pathspec]);
-  }).pipe(
-    Effect.catch((commitError) =>
-      Effect.try({
-        try: () => {
-          const restore = `${indexPath}.slinky-restore-${process.pid}`;
-          copyFileSync(indexBackup, restore);
-          renameSync(restore, indexPath);
-          rmSync(indexBackup, { force: true });
-        },
-        catch: (restoreError) =>
-          new ExternalToolError({
-            tool: "git",
-            message: `${commitError.message}; failed to restore Git index: ${errorDetail(restoreError)} (backup retained at ${indexBackup})`,
-          }),
-      }).pipe(Effect.andThen(Effect.fail(commitError))),
-    ),
-  );
-  try {
-    rmSync(indexBackup, { force: true });
-  } catch (error) {
-    console.log(c.yellow(`warn: commit succeeded, but could not remove Git index backup ${indexBackup}: ${errorDetail(error)}`));
-  }
-  if (commit.stdout.trim()) console.log(commit.stdout.trim());
-  const revision = yield* runGit(repo, ["rev-parse", "--short", "HEAD"]);
-  console.log(c.green(`saved catalog as ${revision.stdout.trim()}`));
-});
-
-const inspectSyncGit = Effect.fn("Cli.inspectSyncGit")(function* () {
-  const { repo } = yield* HostRepo;
-  const topLevel = yield* tryGit(repo, ["rev-parse", "--show-toplevel"]);
-  if (topLevel.status !== 0) return { isGitRoot: false, hasUpstream: false };
-  if (realpathSync(topLevel.stdout.trim()) !== realpathSync(repo)) {
-    return yield* bail(`skills host must be a Git repository root: ${repo}`);
-  }
-  const upstream = yield* tryGit(repo, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]);
-  return { isGitRoot: true, hasUpstream: upstream.status === 0 };
-});
-
-const previewCatalogSave = Effect.fn("Cli.previewCatalogSave")(function* (manifest: Manifest) {
-  const { repo, catalogLock } = yield* HostRepo;
-  const unindexed = findUnindexedSkills(manifest, repo).filter((skill) => skill.origin !== "agent");
-  if (unindexed.length > 0) return yield* bail(`unindexed catalog skill: ${unindexed.map((skill) => skill.path).join(", ")}`);
-  const refresh = refreshLocalHashes(manifest, repo);
-  const projectedLock = yield* previewHostSkillLock(refresh.manifest);
-  yield* verifyCatalogAt(repo, catalogLock, refresh.manifest, false, projectedLock.snapshot);
-  const paths = [".skill-lock.json", "skills.manifest.json", ...Object.values(manifest.skills).map((skill) => skill.path)];
-  const status = yield* runGit(repo, ["status", "--porcelain", "--", ...paths]);
-  const dirty = status.stdout.trim().length > 0 || refresh.refreshed.length > 0 || projectedLock.changed;
-  if (dirty) {
-    for (const name of refresh.refreshed) console.log(`would refresh manifest hash for ${name}`);
-    console.log("would verify and save catalog-managed changes");
-  } else console.log("catalog already saved; nothing to commit");
-  return dirty;
-});
-
-interface LocalRetirement {
-  readonly previous: Manifest;
-  readonly state: State;
-  readonly removed: ReadonlyArray<string>;
-  readonly oldLockEntries: Readonly<Record<string, SkillLockEntry>>;
-  readonly plan: Plan;
-}
-
-const prepareLocalRetirement = Effect.fn("Cli.prepareLocalRetirement")(function* (manifest: Manifest, options: PullOptions) {
-  const { repo } = yield* HostRepo;
-  const store = yield* ManifestStore;
-  const previous = yield* loadCommittedManifest(repo);
-  const removed = Object.keys(previous.skills).filter((name) => !Object.hasOwn(manifest.skills, name));
-  if (removed.length === 0) return undefined;
-  const state = yield* store.loadState(previous);
-  const linked = state.projectLinks.filter((link) => removed.includes(link.skill));
-  if (linked.length > 0) {
-    const commands = linked.map((link) => `slinky unlink ${link.skill} ${link.project}`).join("; ");
-    return yield* bail(`catalog changes remove linked skills; unlink them before saving: ${commands}`);
-  }
-  const hostLock = yield* loadHostSkillLock();
-  const plan = yield* prepareRetirement(previous, state, removed, options);
-  return { previous, state, removed, oldLockEntries: hostLock.entries, plan } satisfies LocalRetirement;
-});
-
-const applyLocalRetirement = Effect.fn("Cli.applyLocalRetirement")(function* (manifest: Manifest, retirement: LocalRetirement, options: PullOptions) {
-  const store = yield* ManifestStore;
-  yield* applyRetirement(retirement.previous, retirement.oldLockEntries, retirement.removed, retirement.plan, options);
-  yield* store.saveState(alignStateWithManifest(manifest, retirement.state));
-});
-
-const saveWithLocalRetirement = Effect.fn("Cli.saveWithLocalRetirement")(function* (manifest: Manifest, retirement: LocalRetirement | undefined, options: PullOptions) {
-  if (!retirement) return yield* saveCatalog(Option.none<string>());
-  const { repo } = yield* HostRepo;
-  const before = (yield* runGit(repo, ["rev-parse", "HEAD"])).stdout.trim();
-  const index = yield* runGit(repo, ["rev-parse", "--git-path", "index"]);
-  const indexPath = resolve(repo, index.stdout.trim());
-  const indexBackup = `${indexPath}.slinky-sync-${process.pid}`;
-  yield* Effect.try({
-    try: () => copyFileSync(indexPath, indexBackup),
-    catch: (error) => new ExternalToolError({ tool: "git", message: `could not back up Git index: ${errorDetail(error)}` }),
-  });
-  yield* saveCatalog(Option.none<string>()).pipe(Effect.onError(() => Effect.sync(() => rmSync(indexBackup, { force: true }))));
-  const after = (yield* runGit(repo, ["rev-parse", "HEAD"])).stdout.trim();
-  const applied = yield* Effect.exit(applyLocalRetirement(manifest, retirement, options));
-  if (Exit.isFailure(applied)) {
-    yield* runGit(repo, ["update-ref", "HEAD", before, after]);
-    yield* Effect.try({
-      try: () => {
-        const restore = `${indexPath}.slinky-sync-restore-${process.pid}`;
-        copyFileSync(indexBackup, restore);
-        renameSync(restore, indexPath);
-      },
-      catch: (error) =>
-        new ExternalToolError({
-          tool: "git",
-          message: `retirement cleanup failed and the catalog commit was rolled back, but the Git index could not be restored: ${errorDetail(error)} (backup retained at ${indexBackup})`,
-        }),
-    });
-    rmSync(indexBackup, { force: true });
-    return yield* Effect.failCause(applied.cause);
-  }
-  rmSync(indexBackup, { force: true });
-});
-
-const restoreAllVendorDrift = Effect.fn("Cli.restoreAllVendorDrift")(function* (manifest: Manifest, dryRun: boolean) {
-  const targets = yield* findDriftingVendors(manifest);
-  if (targets.length === 0) {
-    console.log("all live vendor skills already match the catalog");
-    return targets;
-  }
-  for (const name of targets) {
-    if (dryRun) console.log(`would restore ${name} live copy from repo baseline`);
-    else {
-      yield* vendorRestore(manifest, name);
-      console.log(`${name}: live copy restored from repo baseline`);
-    }
-  }
-  return targets;
-});
-
-const syncCatalog = Effect.fn("Cli.syncCatalog")(function* (options: SyncOptions & { readonly pull: boolean }) {
-  const git = yield* inspectSyncGit();
-  if (options.dryRun) {
-    console.log(c.bold("save"));
-    const store = yield* ManifestStore;
-    const manifest = yield* store.loadManifest();
-    const retirement = git.isGitRoot ? yield* prepareLocalRetirement(manifest, { ...options, restoreDrift: true }) : undefined;
-    const state = retirement ? alignStateWithManifest(manifest, retirement.state) : yield* store.loadState(manifest);
-    let projected = { manifest, state };
-    const savePending = git.isGitRoot ? yield* previewCatalogSave(manifest) : false;
-    if (!git.isGitRoot) console.log(c.dim("not a Git repository; save and pull skipped"));
-
-    console.log(c.bold("\npull"));
-    if (!git.hasUpstream) console.log(c.dim("no configured upstream; pull skipped"));
-    else if (savePending) console.log("would pull after saving catalog changes; run dry-run again after saving for remote details");
-    else projected = yield* pullAndSync({ ...options, restoreDrift: true });
-
-    console.log(c.bold("\nreconcile"));
-    yield* runSyncCmd(projected.manifest, projected.state, options);
-    console.log(c.bold("\nrestore"));
-    const restored = yield* restoreAllVendorDrift(projected.manifest, true);
-    if (restored.length > 0) console.log("would reconcile global stores again after restoring vendor drift");
-    return;
-  }
-
-  if (git.isGitRoot) {
-    console.log(c.bold("save"));
-    const store = yield* ManifestStore;
-    const manifest = yield* store.loadManifest();
-    const retirement = yield* prepareLocalRetirement(manifest, { ...options, restoreDrift: true });
-    yield* saveWithLocalRetirement(manifest, retirement, { ...options, restoreDrift: true });
-  } else console.log(c.dim("save: not a Git repository; skipped"));
-
-  if (git.hasUpstream) {
-    console.log(c.bold("\npull"));
-    yield* pullAndSync({ ...options, restoreDrift: true });
-  } else {
-    console.log(c.dim("pull: no configured upstream; skipped"));
-    const { manifest, state } = yield* loadHostState;
-    console.log(c.bold("\nreconcile"));
-    yield* runSyncCmd(manifest, state, options);
-  }
-
-  console.log(c.bold("\nrestore"));
-  const { manifest, state } = yield* loadHostState;
-  const restored = yield* restoreAllVendorDrift(manifest, false);
-  if (restored.length > 0) {
-    console.log(c.bold("\nfinalize"));
-    yield* runSyncCmd(manifest, state, options);
-  }
-});
-
 const saveCommand = Command.make(
   "save",
   {
     message: Flag.string("message").pipe(Flag.withAlias("m"), Flag.optional, Flag.withDescription("Git commit message (default: Update skills catalog)")),
   },
-  ({ message }) => withRepo(saveCatalog(message)),
+  ({ message }) => withRepo(saveCatalog({ message: Option.getOrUndefined(message), onEvent: renderConvergenceEvent })),
 ).pipe(Command.withDescription("Verify and commit catalog-managed paths in the skills host"));
 
 const verifyCommand = Command.make("verify", {}, () =>
   withRepo(
     Effect.gen(function* () {
-      const { manifest } = yield* loadHostState;
-      yield* cmdVerify(manifest);
+      yield* cmdVerify();
     }),
   ),
 ).pipe(Command.withDescription("Hash-check every skill against the manifest"));

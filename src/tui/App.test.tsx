@@ -3,6 +3,9 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { AppProps } from "./App.tsx";
+import type { UpstreamStatus } from "../lib/update.ts";
+import type { RunResult } from "./runtime.ts";
 
 // Paths/HostRepo read these while the Effect layer builds, which happens on the
 // first runSync inside App. Set them before importing anything that touches the
@@ -42,6 +45,7 @@ const { KeymapProvider } = await import("@opentui/keymap/react");
 const { createRoot } = await import("@opentui/react");
 const { App } = await import("./App.tsx");
 const { rendererOptions } = await import("./index.tsx");
+const { runtime } = await import("./runtime.ts");
 
 /** Stand in for the real service so tests never touch the host clipboard. */
 const clipboard = {
@@ -62,14 +66,13 @@ async function input(drive: () => void | Promise<void>): Promise<void> {
  * Mount and let the post-mount work settle. App verifies vendor hashes from a
  * zero-delay timer, so that state update also has to land inside act.
  */
-async function mount() {
+async function mount(props: Omit<AppProps, "clipboard"> = {}) {
   let root: ReturnType<typeof createRoot> | null = null;
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { value: true, configurable: true, writable: true });
   const setup = await createTestRenderer({
     ...rendererOptions,
     ...size,
     onDestroy() {
-      act(() => root?.unmount());
       root = null;
       Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { value: false, configurable: true, writable: true });
     },
@@ -79,7 +82,7 @@ async function mount() {
   act(() => {
     root?.render(
       <KeymapProvider keymap={keymap}>
-        <App clipboard={clipboard} />
+        <App clipboard={clipboard} {...props} />
       </KeymapProvider>,
     );
   });
@@ -94,12 +97,28 @@ beforeAll(() => {
   cwd = process.cwd();
   process.chdir(project);
 });
-afterAll(() => {
+afterAll(async () => {
   process.chdir(cwd);
+  await runtime.dispose();
   rmSync(root, { recursive: true, force: true });
 });
 
 const size = { width: 120, height: 30 } as const;
+
+async function closeOverlay(setup: Awaited<ReturnType<typeof mount>>): Promise<void> {
+  await input(async () => {
+    setup.mockInput.pressEscape();
+    await Bun.sleep(60);
+  });
+}
+
+function destroy(setup: Awaited<ReturnType<typeof mount>>): void {
+  act(() => setup.renderer.destroy());
+}
+
+function deferredUpstream() {
+  return Promise.withResolvers<RunResult<ReadonlyArray<UpstreamStatus>>>();
+}
 
 test("mounts and renders the catalog chrome", async () => {
   const setup = await mount();
@@ -109,7 +128,7 @@ test("mounts and renders the catalog chrome", async () => {
     expect(frame).toContain("available here");
     expect(frame).toContain("all skills");
   } finally {
-    setup.renderer.destroy();
+    destroy(setup);
   }
 });
 
@@ -127,7 +146,7 @@ test("the all-skills view lists every indexed skill and previews its document", 
     const preview = await setup.waitForFrame((value) => value.includes("Usage"));
     expect(preview).toContain("Usage");
   } finally {
-    setup.renderer.destroy();
+    destroy(setup);
   }
 });
 
@@ -149,7 +168,135 @@ test("? opens help and esc closes it", async () => {
     const closed = await setup.waitForFrame((value) => !value.includes("focus the previous or next panel"));
     expect(closed).not.toContain("focus the previous or next panel");
   } finally {
-    setup.renderer.destroy();
+    destroy(setup);
+  }
+});
+
+test("overlays are exclusive and render the payload captured when opened", async () => {
+  const gamma = join(host, "skills", "gamma");
+  mkdirSync(gamma, { recursive: true });
+  writeFileSync(join(gamma, "SKILL.md"), "---\nname: gamma\ndescription: gamma unindexed fixture skill.\n---\n\n# gamma\n");
+  const setup = await mount();
+  try {
+    await setup.waitForFrame((value) => value.includes("slinky"));
+    await input(() => setup.mockInput.pressKey("2"));
+
+    await input(() => setup.mockInput.pressKey("i"));
+    const detail = await setup.waitForFrame((value) => value.includes("gamma unindexed fixture skill."));
+    expect(detail).toContain("gamma · unindexed");
+
+    // List bindings are inactive while an overlay owns the interaction state.
+    await input(() => setup.mockInput.pressKey("p"));
+    expect(await setup.waitForFrame((value) => value.includes("gamma unindexed fixture skill."))).not.toContain("applying a profile");
+    await closeOverlay(setup);
+
+    await input(() => setup.mockInput.pressKey("a"));
+    const index = await setup.waitForFrame((value) => value.includes("index gamma"));
+    expect(index).toContain("source: skills/gamma");
+    await closeOverlay(setup);
+
+    await input(() => setup.mockInput.pressKey("h"));
+    await input(() => setup.mockInput.pressKey("j"));
+    await input(() => setup.mockInput.pressKey("l"));
+
+    await input(() => setup.mockInput.pressKey("d"));
+    const diff = await setup.waitForFrame((value) => value.includes("diff alpha"));
+    expect(diff).toContain("local skill: lives in the repo, nothing to diff");
+    await closeOverlay(setup);
+
+    await input(() => setup.mockInput.pressKey("l", { shift: true }));
+    const link = await setup.waitForFrame((value) => value.includes("link alpha"));
+    expect(link).toContain("project directory:");
+    await closeOverlay(setup);
+
+    await input(() => setup.mockInput.pressKey("p"));
+    const profiles = await setup.waitForFrame((value) => value.includes("applying a profile disables"));
+    expect(profiles).toContain("focus");
+    await closeOverlay(setup);
+    expect(await setup.waitForFrame((value) => !value.includes("applying a profile disables"))).toContain("alpha");
+  } finally {
+    destroy(setup);
+    rmSync(gamma, { recursive: true, force: true });
+  }
+});
+
+test("a stale upstream check cannot overwrite a newer result", async () => {
+  const requests = [deferredUpstream(), deferredUpstream()];
+  const signals: AbortSignal[] = [];
+  let requestIndex = 0;
+  const setup = await mount({
+    checkForUpstream: (_manifest, signal) => {
+      signals.push(signal);
+      return requests[requestIndex++]!.promise;
+    },
+  });
+  try {
+    await setup.waitForFrame((value) => value.includes("slinky"));
+    await input(() => setup.mockInput.pressKey("2"));
+    await input(() => setup.mockInput.pressKey("u"));
+    await input(() => setup.mockInput.pressKey("u"));
+    expect(signals[0]?.aborted).toBe(true);
+
+    await act(async () => {
+      requests[1]!.resolve({ ok: true, value: [{ name: "alpha", state: "update" }] });
+      await Bun.sleep(0);
+    });
+    const updated = await setup.waitForFrame((value) => value.includes("upstream: 1 update(s), 0 gone"));
+    expect(updated).not.toContain("upstream: 0 update(s), 1 gone");
+
+    await act(async () => {
+      requests[0]!.resolve({ ok: true, value: [{ name: "alpha", state: "gone" }] });
+      await Bun.sleep(10);
+    });
+    expect(setup.captureCharFrame()).toContain("upstream: 1 update(s), 0 gone");
+  } finally {
+    destroy(setup);
+  }
+});
+
+test("unmount aborts an in-flight upstream check", async () => {
+  const request = deferredUpstream();
+  let signal: AbortSignal | undefined;
+  const setup = await mount({
+    checkForUpstream: (_manifest, currentSignal) => {
+      signal = currentSignal;
+      return request.promise;
+    },
+  });
+  await setup.waitForFrame((value) => value.includes("slinky"));
+  await input(() => setup.mockInput.pressKey("u"));
+  expect(signal?.aborted).toBe(false);
+
+  destroy(setup);
+  expect(signal?.aborted).toBe(true);
+  request.resolve({ ok: true, value: [{ name: "alpha", state: "gone" }] });
+  await Bun.sleep(10);
+  expect(setup.renderer.isDestroyed).toBe(true);
+});
+
+test("catalog refresh aborts and invalidates an in-flight upstream check", async () => {
+  const request = deferredUpstream();
+  let signal: AbortSignal | undefined;
+  const setup = await mount({
+    checkForUpstream: (_manifest, currentSignal) => {
+      signal = currentSignal;
+      return request.promise;
+    },
+  });
+  try {
+    await setup.waitForFrame((value) => value.includes("slinky"));
+    await input(() => setup.mockInput.pressKey("u"));
+    expect(signal?.aborted).toBe(false);
+
+    await input(() => setup.mockInput.pressKey("r"));
+    expect(signal?.aborted).toBe(true);
+    await act(async () => {
+      request.resolve({ ok: true, value: [{ name: "alpha", state: "gone" }] });
+      await Bun.sleep(10);
+    });
+    expect(setup.captureCharFrame()).not.toContain("upstream: 0 update(s), 1 gone");
+  } finally {
+    destroy(setup);
   }
 });
 
@@ -167,7 +314,7 @@ test("clicking a pane does not hand key bindings to a focused renderable", async
     // own arrow/page/home bindings on top of App's, scrolling twice per press.
     expect(setup.renderer.currentFocusedRenderable).toBeNull();
   } finally {
-    setup.renderer.destroy();
+    destroy(setup);
   }
 });
 
@@ -185,7 +332,7 @@ test("/ filters the catalog down to matching skills", async () => {
     expect(filtered).toContain("alpha");
     expect(filtered).not.toContain("beta");
   } finally {
-    setup.renderer.destroy();
+    destroy(setup);
   }
 });
 
@@ -203,7 +350,7 @@ test("Ctrl+C does not quit while filter input is active", async () => {
     expect(setup.renderer.isDestroyed).toBe(false);
     expect(await setup.waitForFrame((value) => value.includes("1 match"))).toContain("alpha");
   } finally {
-    setup.renderer.destroy();
+    destroy(setup);
   }
 });
 
@@ -250,6 +397,6 @@ test("keymap routes list movement and the gg sequence", async () => {
     await input(() => setup.mockInput.pressKey("i"));
     expect(await setup.waitForFrame((value) => value.includes("alpha fixture skill."))).toContain("alpha fixture skill.");
   } finally {
-    setup.renderer.destroy();
+    destroy(setup);
   }
 });

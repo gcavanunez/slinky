@@ -2,9 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { DateTime, Schema } from "effect";
 import {
   alignStateWithManifest,
+  getActiveProfile,
+  getDisabledSkills,
+  isSkillEnabled,
   Manifest,
   ProjectLink,
   State,
+  stateVersion,
   getSkill,
   validateState,
   withManifestSkill,
@@ -38,9 +42,8 @@ const manifestInput = () => ({
 });
 
 const stateInput = () => ({
-  version: 1,
-  disabledSkills: ["bar"],
-  activeProfile: null,
+  version: stateVersion,
+  selection: { kind: "custom", disabledSkills: ["bar"] },
   projectLinks: [],
   recentProjects: [],
 });
@@ -169,14 +172,14 @@ describe("domain schemas", () => {
     const manifest = Schema.decodeUnknownSync(Manifest)(manifestInput(), strict);
     const initial = Schema.decodeUnknownSync(State)(stateInput(), strict);
 
-    const enabled = withSkillEnabled(initial, "bar", true);
-    expect(initial.disabledSkills).toEqual(["bar"]);
-    expect(enabled.disabledSkills).toEqual([]);
+    const enabled = withSkillEnabled(manifest, initial, "bar", true);
+    expect(getDisabledSkills(manifest, initial)).toEqual(["bar"]);
+    expect(getDisabledSkills(manifest, enabled)).toEqual([]);
 
     const profiled = withProfile(manifest, enabled, "work");
-    expect(profiled.activeProfile).toBe("work");
-    expect(profiled.disabledSkills).toEqual(["bar"]);
-    expect(enabled.activeProfile).toBeNull();
+    expect(getActiveProfile(manifest, profiled)).toBe("work");
+    expect(getDisabledSkills(manifest, profiled)).toEqual(["bar"]);
+    expect(getActiveProfile(manifest, enabled)).toBeNull();
   });
 
   test("aligns local state after catalog skills and profiles are retired", () => {
@@ -190,8 +193,7 @@ describe("domain schemas", () => {
 
     const aligned = alignStateWithManifest(reduced, profiled);
 
-    expect(aligned.activeProfile).toBeNull();
-    expect(aligned.disabledSkills).toEqual([]);
+    expect(aligned.selection).toEqual({ kind: "custom", disabledSkills: [] });
   });
 
   test("transitions validate state that already contains decoded project timestamps", () => {
@@ -222,12 +224,13 @@ describe("domain schemas", () => {
     const added = withProjectLink(initial, second);
     const addedFirst = added.projectLinks[0];
     if (!addedFirst) throw new Error("expected added first project link");
-    const enabled = withSkillEnabled(added, "bar", true);
+    const manifest = Schema.decodeUnknownSync(Manifest)(manifestInput(), strict);
+    const enabled = withSkillEnabled(manifest, added, "bar", true);
     const removed = withoutProjectLink(added, addedFirst);
 
     expect(DateTime.isDateTime(first.linkedAt)).toBe(true);
     expect(added.projectLinks).toEqual([first, second]);
-    expect(enabled.disabledSkills).toEqual([]);
+    expect(getDisabledSkills(manifest, enabled)).toEqual([]);
     expect(removed.projectLinks).toEqual([second]);
     expect(initial.projectLinks).toEqual([first]);
   });
@@ -247,12 +250,24 @@ describe("domain schemas", () => {
     expect(getSkill(manifest, "foo")?.contentHash).toBe(HASH);
   });
 
-  test("rejects profile drift and prototype-like phantom references", () => {
+  test("derives profile membership from the current manifest without rewriting state", () => {
     const manifest = Schema.decodeUnknownSync(Manifest)(manifestInput(), strict);
-    const drifted = Schema.decodeUnknownSync(State)({ ...stateInput(), activeProfile: "work", disabledSkills: [] }, strict);
-    const phantom = Schema.decodeUnknownSync(State)({ ...stateInput(), disabledSkills: ["constructor"] }, strict);
+    const profiled = withProfile(manifest, Schema.decodeUnknownSync(State)(stateInput(), strict), "work");
+    const changed = Schema.decodeUnknownSync(Manifest)({ ...manifestInput(), profiles: { work: ["bar"] } }, strict);
 
-    expect(validateState(manifest, drifted)).not.toEqual([]);
+    expect(isSkillEnabled(manifest, profiled, "foo")).toBe(true);
+    expect(isSkillEnabled(manifest, profiled, "bar")).toBe(false);
+    expect(isSkillEnabled(changed, profiled, "foo")).toBe(false);
+    expect(isSkillEnabled(changed, profiled, "bar")).toBe(true);
+    expect(profiled.selection).toEqual({ kind: "profile", name: "work" });
+  });
+
+  test("rejects unknown profile and prototype-like custom references", () => {
+    const manifest = Schema.decodeUnknownSync(Manifest)(manifestInput(), strict);
+    const missingProfile = Schema.decodeUnknownSync(State)({ ...stateInput(), selection: { kind: "profile", name: "missing" } }, strict);
+    const phantom = Schema.decodeUnknownSync(State)({ ...stateInput(), selection: { kind: "custom", disabledSkills: ["constructor"] } }, strict);
+
+    expect(validateState(manifest, missingProfile)).not.toEqual([]);
     expect(validateState(manifest, phantom)).not.toEqual([]);
     expect(getSkill(manifest, "constructor")).toBeUndefined();
   });

@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, sy
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Cause, Effect, Exit, Layer, Schema } from "effect";
-import { Manifest, ProjectLink, State, version } from "./manifest.ts";
+import { Manifest, ProjectLink, State, stateVersion, version } from "./manifest.ts";
 import { applyUnlink, checkLink, isGlobalStoreProject, linkSkill, prepareUnlink, unlinkSkill } from "./linker.ts";
 import { HostRepo, hostRepoPaths, Paths, RepoResolution } from "./paths.ts";
 
@@ -69,9 +69,8 @@ function fixtures(project: string) {
     profiles: {},
   });
   const state = Schema.decodeUnknownSync(State)({
-    version,
-    disabledSkills: [],
-    activeProfile: null,
+    version: stateVersion,
+    selection: { kind: "custom", disabledSkills: [] },
     projectLinks: [
       {
         mode: "symlink",
@@ -99,9 +98,8 @@ describe("link construction", () => {
     roots.push(project);
     const { manifest } = fixtures(project);
     const state = Schema.decodeUnknownSync(State)({
-      version,
-      disabledSkills: [],
-      activeProfile: null,
+      version: stateVersion,
+      selection: { kind: "custom", disabledSkills: [] },
       projectLinks: [],
       recentProjects: [],
     });
@@ -128,9 +126,8 @@ describe("link construction", () => {
     expect(Bun.spawnSync(["git", "init", "-q", project]).exitCode).toBe(0);
     const { manifest } = fixtures(project);
     const state = Schema.decodeUnknownSync(State)({
-      version,
-      disabledSkills: [],
-      activeProfile: null,
+      version: stateVersion,
+      selection: { kind: "custom", disabledSkills: [] },
       projectLinks: [],
       recentProjects: [],
     });
@@ -155,9 +152,8 @@ describe("link construction", () => {
 describe("link safety", () => {
   function emptyState() {
     return Schema.decodeUnknownSync(State)({
-      version,
-      disabledSkills: [],
-      activeProfile: null,
+      version: stateVersion,
+      selection: { kind: "custom", disabledSkills: [] },
       projectLinks: [],
       recentProjects: [],
     });

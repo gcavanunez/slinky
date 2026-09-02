@@ -9,11 +9,13 @@ import { acceptVendorDrift, applyProfile, linkProjectSkill, restoreVendorDrift, 
 import type { ActionResult } from "../lib/catalogActions.ts";
 import { isClean, pagePatch, unifiedDiff } from "../lib/diff.ts";
 import type { DiffPager, DirDiff } from "../lib/diff.ts";
-import { formatUtc, getProfile } from "../lib/manifest.ts";
+import { formatUtc, getActiveProfile, getProfile } from "../lib/manifest.ts";
 import { addSkillFromSource, parseSkillsAddSource } from "../lib/skillsAdd.ts";
 import { checkUpstream } from "../lib/update.ts";
+import type { UpstreamStatus } from "../lib/update.ts";
 import type { UnindexedSkill } from "../lib/adopt.ts";
 import { runPromiseResult, runSync, runSyncResult } from "./runtime.ts";
+import type { RunResult } from "./runtime.ts";
 import { Hint, Modal, TextLine } from "./components.tsx";
 import { colors, createMarkdownSyntax } from "./theme.ts";
 import { clamp, fileTreeRows, fitCell, markdownBody, markdownHeadingLines, printable, searchMatchLines, singleLinePaste, windowOf } from "./util.ts";
@@ -25,7 +27,7 @@ import { editableHostSkillPath, editSkillInEditor, withSuspendedRenderer } from 
 import { cycleLayout, primaryPanel, resizeFocusedSplit } from "./layout.ts";
 import type { Panel, PrimaryPanel, TwoPanePair } from "./layout.ts";
 import { useAppKeybindings } from "./useAppKeybindings.ts";
-import type { AppCommand } from "./useAppKeybindings.ts";
+import type { AppCommand, AppKeymapState } from "./useAppKeybindings.ts";
 import {
   diffSkill,
   expandHome,
@@ -47,7 +49,6 @@ import {
 } from "./data.ts";
 import type { Catalog, CatalogRow, DiffResult, LiveStatus, ProjectPlacement, ProjectSkill } from "./data.ts";
 
-type Mode = "list" | "help" | "detail" | "profiles" | "diff" | "link" | "index";
 type CatalogView = "available" | "all";
 type SkillItem = { kind: "skill"; row: CatalogRow } | { kind: "project-skill"; skill: ProjectSkill } | { kind: "unindexed-skill"; skill: UnindexedSkill };
 
@@ -85,6 +86,49 @@ interface IndexFlow {
   error?: string;
 }
 
+type Interaction =
+  | { kind: "browse" }
+  | { kind: "help" }
+  | { kind: "detail"; item: SkillItem }
+  | { kind: "profiles"; index: number }
+  | { kind: "diff"; row: CatalogRow; result: DiffResult }
+  | { kind: "link"; row: CatalogRow; flow: LinkFlow }
+  | { kind: "index"; skill: UnindexedSkill; flow: IndexFlow };
+
+type CheckForUpstream = (manifest: Catalog["manifest"], signal: AbortSignal) => Promise<RunResult<ReadonlyArray<UpstreamStatus>>>;
+
+export interface AppProps {
+  clipboard: SelectionClipboard;
+  checkForUpstream?: CheckForUpstream;
+}
+
+const defaultCheckForUpstream: CheckForUpstream = (manifest, signal) => runPromiseResult(checkUpstream(manifest), { signal });
+
+function assertNever(value: never): never {
+  throw new Error(`unhandled interaction: ${JSON.stringify(value)}`);
+}
+
+function keymapStateFor(interaction: Interaction, textInputActive: boolean): AppKeymapState {
+  const inactive = { listActive: false, overlayActive: false, diffActive: false, profilesActive: false, helpActive: false, textInputActive };
+  switch (interaction.kind) {
+    case "browse":
+      return { ...inactive, listActive: !textInputActive };
+    case "help":
+      return { ...inactive, overlayActive: true, helpActive: true };
+    case "detail":
+      return { ...inactive, overlayActive: true };
+    case "profiles":
+      return { ...inactive, overlayActive: true, profilesActive: true };
+    case "diff":
+      return { ...inactive, overlayActive: true, diffActive: true };
+    case "link":
+    case "index":
+      return inactive;
+    default:
+      return assertNever(interaction);
+  }
+}
+
 const liveColor = {
   ok: colors.green,
   drift: colors.yellow,
@@ -92,6 +136,7 @@ const liveColor = {
   off: colors.muted,
   stale: colors.yellow,
   checking: colors.muted,
+  unowned: colors.yellow,
 } satisfies Record<LiveStatus, string>;
 
 const liveLabel = {
@@ -101,6 +146,7 @@ const liveLabel = {
   off: "-",
   stale: "stale",
   checking: "\u2026",
+  unowned: "unowned",
 } satisfies Record<LiveStatus, string>;
 
 const placementCell = {
@@ -113,7 +159,7 @@ const placementCell = {
   unmanaged: { label: "unmanaged", fg: colors.yellow },
 } satisfies Record<ProjectPlacement, { label: string; fg: string }>;
 
-export function App({ clipboard }: { clipboard: SelectionClipboard }) {
+export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: AppProps) {
   const renderer = useRenderer();
   const { width: cols, height: rowsAvail } = useTerminalDimensions();
 
@@ -126,24 +172,35 @@ export function App({ clipboard }: { clipboard: SelectionClipboard }) {
   const [twoPane, setTwoPane] = useState<TwoPanePair | null>(null);
   const [catalogSplit, setCatalogSplit] = useState(1 / 3);
   const [documentSplit, setDocumentSplit] = useState(0.4);
-  const [mode, setMode] = useState<Mode>("list");
+  const [interaction, setInteraction] = useState<Interaction>({ kind: "browse" });
   const [filterMode, setFilterMode] = useState(false);
   const [filterText, setFilterText] = useState("");
   const [docFind, setDocFind] = useState<{ typing: boolean; query: string }>({ typing: false, query: "" });
   const [flash, setFlash] = useState<{ text: string; error?: boolean } | null>(null);
-  const [profileIndex, setProfileIndex] = useState(0);
-  const [diffResult, setDiffResult] = useState<DiffResult | null>(null);
-  const [linkFlow, setLinkFlow] = useState<LinkFlow | null>(null);
-  const [indexFlow, setIndexFlow] = useState<IndexFlow | null>(null);
   const [previewState, setPreviewState] = useState<{ skill: string | null; file: number; restore: number }>({ skill: null, file: 0, restore: 0 });
 
   const quitting = useRef(false);
+  const mounted = useRef(true);
+  const notificationTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const indexTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const upstreamGeneration = useRef(0);
+  const upstreamAbort = useRef<AbortController | null>(null);
   const previewScroll = useRef<ScrollBoxRenderable | null>(null);
   const previewDoc = useRef<DocRenderable | null>(null);
   const findPos = useRef(-1);
   const syntaxStyle = useMemo(() => createMarkdownSyntax(), []);
 
-  useEffect(() => () => syntaxStyle.destroy(), [syntaxStyle]);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      upstreamGeneration.current += 1;
+      upstreamAbort.current?.abort();
+      if (notificationTimer.current) clearTimeout(notificationTimer.current);
+      if (indexTimer.current) clearTimeout(indexTimer.current);
+      syntaxStyle.destroy();
+    };
+  }, [syntaxStyle]);
 
   const filtered = useMemo(() => (filterText ? catalog.rows.filter((r) => r.name.includes(filterText.toLowerCase())) : catalog.rows), [catalog.rows, filterText]);
 
@@ -273,24 +330,29 @@ export function App({ clipboard }: { clipboard: SelectionClipboard }) {
     const row = catalog.rows.find((candidate) => candidate.live === "checking");
     if (!row) return;
     const timer = setTimeout(() => {
-      const verified = verifyRow(catalog.agentsSkills, row);
+      const verified = verifyRow({ agentsSkills: catalog.agentsSkills, repo: catalog.repo }, row);
       setCatalog((previous) => ({
         ...previous,
         rows: previous.rows.map((candidate) => (candidate.name === verified.name && candidate.live === "checking" ? verified : candidate)),
       }));
     }, 0);
     return () => clearTimeout(timer);
-  }, [catalog.rows, catalog.agentsSkills]);
+  }, [catalog.rows, catalog.agentsSkills, catalog.repo]);
 
   const refresh = () => {
+    upstreamGeneration.current += 1;
+    upstreamAbort.current?.abort();
+    upstreamAbort.current = null;
     setCatalog(runSync(loadCatalog()));
   };
 
   const notify = (text: string, error = false) => {
+    if (!mounted.current) return;
     setFlash({ text, error });
-    const snapshot = text;
-    setTimeout(() => {
-      setFlash((cur) => (cur?.text === snapshot ? null : cur));
+    if (notificationTimer.current) clearTimeout(notificationTimer.current);
+    notificationTimer.current = setTimeout(() => {
+      notificationTimer.current = null;
+      if (mounted.current) setFlash(null);
     }, 3000);
   };
   // The renderer emits `selection` exactly when a drag finishes, so this fires
@@ -397,16 +459,16 @@ export function App({ clipboard }: { clipboard: SelectionClipboard }) {
     return true;
   };
 
-  const patchFlow = (fn: (prev: LinkFlow) => LinkFlow) => setLinkFlow((prev) => (prev ? fn(prev) : prev));
+  const patchLinkFlow = (fn: (prev: LinkFlow) => LinkFlow) => setInteraction((previous) => (previous.kind === "link" ? { ...previous, flow: fn(previous.flow) } : previous));
 
-  const patchIndexFlow = (fn: (prev: IndexFlow) => IndexFlow) => setIndexFlow((prev) => (prev ? fn(prev) : prev));
+  const patchIndexFlow = (fn: (prev: IndexFlow) => IndexFlow) => setInteraction((previous) => (previous.kind === "index" ? { ...previous, flow: fn(previous.flow) } : previous));
 
   const handleIndex = (key: KeyEvent): boolean => {
-    if (!indexFlow || !currentUnindexedSkill) return true;
-    if (indexFlow.running) return true;
+    if (interaction.kind !== "index") return true;
+    const { flow, skill } = interaction;
+    if (flow.running) return true;
     if (key.name === "escape") {
-      setIndexFlow(null);
-      setMode("list");
+      setInteraction({ kind: "browse" });
       return true;
     }
     if (key.name === "backspace") {
@@ -416,19 +478,19 @@ export function App({ clipboard }: { clipboard: SelectionClipboard }) {
     if (key.name === "return" || key.name === "enter") {
       let source: string;
       try {
-        source = parseSkillsAddSource(indexFlow.input, currentUnindexedSkill.name);
+        source = parseSkillsAddSource(flow.input, skill.name);
       } catch (error) {
         patchIndexFlow((flow) => ({ ...flow, error: error instanceof Error ? error.message : String(error) }));
         return true;
       }
-      const skill = currentUnindexedSkill;
       patchIndexFlow((flow) => ({ ...flow, running: true, error: undefined }));
-      setTimeout(() => {
+      indexTimer.current = setTimeout(() => {
+        indexTimer.current = null;
+        if (!mounted.current) return;
         const outcome = runSyncResult(addSkillFromSource(source, skill.name, { unindexedSkill: skill }));
         if (outcome.ok) {
           const result = outcome.value;
-          setIndexFlow(null);
-          setMode("list");
+          setInteraction({ kind: "browse" });
           refresh();
           if (result.warnings.length > 0) notify(`indexed ${skill.name}: ${result.warnings[0]}`, true);
           else notify(`indexed ${skill.name} -> ${result.path}`);
@@ -444,25 +506,25 @@ export function App({ clipboard }: { clipboard: SelectionClipboard }) {
   };
 
   const handleLink = (key: KeyEvent): boolean => {
-    if (!linkFlow || !current) return true;
+    if (interaction.kind !== "link") return true;
+    const { flow, row } = interaction;
     if (key.name === "escape") {
-      setLinkFlow(null);
-      setMode("list");
+      setInteraction({ kind: "browse" });
       return true;
     }
-    if (linkFlow.step === "project") {
+    if (flow.step === "project") {
       const recents = catalog.state.recentProjects;
       if (key.name === "up" || key.name === "down") {
         if (recents.length === 0) return true;
         const dir = key.name === "down" ? 1 : -1;
-        patchFlow((f) => {
+        patchLinkFlow((f) => {
           const next = clamp(f.recentIndex + dir, 0, recents.length - 1);
           return { ...f, recentIndex: next, input: recents[next] ?? f.input };
         });
         return true;
       }
       if (key.name === "return" || key.name === "enter") {
-        patchFlow((f) => {
+        patchLinkFlow((f) => {
           const path = expandHome(f.input.trim());
           if (!path || !existsSync(path)) {
             return { ...f, error: `not a directory: ${path || "(empty)"}` };
@@ -472,55 +534,54 @@ export function App({ clipboard }: { clipboard: SelectionClipboard }) {
         return true;
       }
       if (key.name === "backspace") {
-        patchFlow((f) => ({ ...f, input: f.input.slice(0, -1), recentIndex: -1 }));
+        patchLinkFlow((f) => ({ ...f, input: f.input.slice(0, -1), recentIndex: -1 }));
         return true;
       }
       const p = printable(key);
-      if (p) patchFlow((f) => ({ ...f, input: f.input + p, recentIndex: -1 }));
+      if (p) patchLinkFlow((f) => ({ ...f, input: f.input + p, recentIndex: -1 }));
       return true;
     }
-    if (linkFlow.step === "mode") {
+    if (flow.step === "mode") {
       if (key.name === "j" || key.name === "k" || key.name === "up" || key.name === "down") {
-        patchFlow((f) => ({ ...f, mode: f.mode === "copy" ? "symlink" : "copy" }));
+        patchLinkFlow((f) => ({ ...f, mode: f.mode === "copy" ? "symlink" : "copy" }));
         return true;
       }
       if (key.name === "c") {
-        patchFlow((f) => ({ ...f, mode: "copy" }));
+        patchLinkFlow((f) => ({ ...f, mode: "copy" }));
         return true;
       }
       if (key.name === "s") {
-        patchFlow((f) => ({ ...f, mode: "symlink" }));
+        patchLinkFlow((f) => ({ ...f, mode: "symlink" }));
         return true;
       }
       if (key.name === "return" || key.name === "enter") {
-        patchFlow((f) => ({ ...f, step: "options" }));
+        patchLinkFlow((f) => ({ ...f, step: "options" }));
         return true;
       }
       return true;
     }
     // options
     if (key.name === "e") {
-      patchFlow((f) => ({ ...f, exclude: !f.exclude }));
+      patchLinkFlow((f) => ({ ...f, exclude: !f.exclude }));
       return true;
     }
     if (key.name === "c") {
-      patchFlow((f) => ({ ...f, claude: !f.claude }));
+      patchLinkFlow((f) => ({ ...f, claude: !f.claude }));
       return true;
     }
     if (key.name === "return" || key.name === "enter") {
       const outcome = runSyncResult(
         linkProjectSkill({
-          skill: current.name,
-          project: linkFlow.input,
-          mode: linkFlow.mode,
-          gitExclude: linkFlow.exclude,
-          claude: linkFlow.claude,
+          skill: row.name,
+          project: flow.input,
+          mode: flow.mode,
+          gitExclude: flow.exclude,
+          claude: flow.claude,
         }),
       );
-      if (outcome.ok) notify(`linked ${current.name} (${linkFlow.mode}) into ${linkFlow.input}`);
+      if (outcome.ok) notify(`linked ${row.name} (${flow.mode}) into ${flow.input}`);
       else notify(outcome.message, true);
-      setLinkFlow(null);
-      setMode("list");
+      setInteraction({ kind: "browse" });
       refresh();
       return true;
     }
@@ -614,43 +675,49 @@ export function App({ clipboard }: { clipboard: SelectionClipboard }) {
   const runAppCommand = (command: AppCommand, key: KeyEvent): void => {
     switch (command) {
       case "app.copy-or-quit":
-        if (!handleSelectionKey(renderer, clipboard, key, { notify }) && mode === "list") quit();
+        if (!handleSelectionKey(renderer, clipboard, key, { notify }) && interaction.kind === "browse") quit();
         return;
       case "app.quit":
         quit();
         return;
       case "overlay.close":
       case "help.close":
-        setMode("list");
+        setInteraction({ kind: "browse" });
         return;
       case "diff.accept": {
-        if (!current || diffResult?.kind !== "diff" || isClean(diffResult.diff)) return;
-        const outcome = runSyncResult(acceptVendorDrift(current.name));
+        if (interaction.kind !== "diff" || interaction.result.kind !== "diff" || isClean(interaction.result.diff)) return;
+        const outcome = runSyncResult(acceptVendorDrift(interaction.row.name));
         if (outcome.ok) {
           const warning = outcome.value.warning;
-          notify(warning ? `accepted ${current.name}: ${warning.message}` : `accepted global ${current.name} as the repo baseline`, warning !== undefined);
+          notify(warning ? `accepted ${interaction.row.name}: ${warning.message}` : `accepted global ${interaction.row.name} as the repo baseline`, warning !== undefined);
           refresh();
-          setMode("list");
+          setInteraction({ kind: "browse" });
         } else notify(outcome.message, true);
         return;
       }
       case "diff.restore": {
-        if (!current || diffResult?.kind !== "diff" || isClean(diffResult.diff)) return;
-        const outcome = runSyncResult(restoreVendorDrift(current.name));
+        if (interaction.kind !== "diff" || interaction.result.kind !== "diff" || isClean(interaction.result.diff)) return;
+        const outcome = runSyncResult(restoreVendorDrift(interaction.row.name));
         if (outcome.ok) {
-          notify(`restored global ${current.name} from the repo baseline`);
+          notify(`restored global ${interaction.row.name} from the repo baseline`);
           refresh();
-          setMode("list");
+          setInteraction({ kind: "browse" });
         } else notify(outcome.message, true);
         return;
       }
       case "diff.hunk":
       case "diff.delta": {
-        if (!current || diffResult?.kind !== "diff" || isClean(diffResult.diff)) return;
+        if (interaction.kind !== "diff" || interaction.result.kind !== "diff" || isClean(interaction.result.diff)) return;
+        const currentDiff = diffSkill(catalog, interaction.row);
+        if (currentDiff.kind !== "diff") {
+          setInteraction({ ...interaction, result: currentDiff });
+          notify(currentDiff.kind === "unowned" ? "live path is not owned by this catalog" : "live copy is no longer available", true);
+          return;
+        }
         const pager: DiffPager = command === "diff.hunk" ? "hunk" : "delta";
         let suspended = false;
         try {
-          const patch = unifiedDiff(join(catalog.repo, current.meta.path), join(catalog.agentsSkills, current.name));
+          const patch = unifiedDiff(join(catalog.repo, interaction.row.meta.path), join(catalog.agentsSkills, interaction.row.name));
           renderer.suspend();
           suspended = true;
           pagePatch(patch, pager);
@@ -662,18 +729,19 @@ export function App({ clipboard }: { clipboard: SelectionClipboard }) {
         return;
       }
       case "profiles.next":
-        setProfileIndex((index) => clamp(index + 1, 0, profileNames.length - 1));
+        setInteraction((previous) => (previous.kind === "profiles" ? { ...previous, index: clamp(previous.index + 1, 0, profileNames.length - 1) } : previous));
         return;
       case "profiles.previous":
-        setProfileIndex((index) => clamp(index - 1, 0, profileNames.length - 1));
+        setInteraction((previous) => (previous.kind === "profiles" ? { ...previous, index: clamp(previous.index - 1, 0, profileNames.length - 1) } : previous));
         return;
       case "profiles.apply": {
-        const name = profileNames[profileIndex];
+        if (interaction.kind !== "profiles") return;
+        const name = profileNames[interaction.index];
         if (name) {
           reportAction(`profile ${name}`, runSync(applyProfile(name)));
           refresh();
         }
-        setMode("list");
+        setInteraction({ kind: "browse" });
         return;
       }
       case "view.available":
@@ -799,12 +867,24 @@ export function App({ clipboard }: { clipboard: SelectionClipboard }) {
         editCurrentSkill();
         return;
       case "help.open":
-        setMode("help");
+        setInteraction({ kind: "help" });
         return;
-      case "upstream.check":
+      case "upstream.check": {
         notify("checking upstream\u2026");
+        upstreamAbort.current?.abort();
+        const controller = new AbortController();
+        upstreamAbort.current = controller;
+        const generation = ++upstreamGeneration.current;
+        const manifest = catalog.manifest;
         void (async () => {
-          const outcome = await runPromiseResult(checkUpstream(runSync(loadCatalog()).manifest));
+          let outcome: RunResult<ReadonlyArray<UpstreamStatus>>;
+          try {
+            outcome = await checkForUpstream(manifest, controller.signal);
+          } catch (error) {
+            outcome = { ok: false, message: error instanceof Error ? error.message : String(error) };
+          }
+          if (!mounted.current || generation !== upstreamGeneration.current) return;
+          upstreamAbort.current = null;
           if (!outcome.ok) {
             notify(`upstream check failed: ${outcome.message}`, true);
             return;
@@ -823,19 +903,19 @@ export function App({ clipboard }: { clipboard: SelectionClipboard }) {
           notify(updates + gone === 0 ? "upstream: everything current" : `upstream: ${updates} update(s), ${gone} gone \u2014 run slinky update`);
         })();
         return;
+      }
       case "profiles.open":
         if (profileNames.length === 0) {
           notify("no profiles defined in skills.manifest.json", true);
           return;
         }
-        setProfileIndex(Math.max(0, profileNames.indexOf(catalog.state.activeProfile ?? "")));
-        setMode("profiles");
+        setInteraction({ kind: "profiles", index: Math.max(0, profileNames.indexOf(getActiveProfile(catalog.manifest, catalog.state) ?? "")) });
         return;
       case "selection.open":
         if (panel === "authors") setPanel("skills");
-        else if (panel === "skills" && twoPane === "catalog" && (current || currentProjectSkill || currentUnindexedSkill)) setMode("detail");
+        else if (panel === "skills" && twoPane === "catalog" && currentItem) setInteraction({ kind: "detail", item: currentItem });
         else if (panel === "skills" || panel === "files") setPanel("content");
-        else if (current || currentProjectSkill || currentUnindexedSkill) setMode("detail");
+        else if (currentItem) setInteraction({ kind: "detail", item: currentItem });
         return;
       case "selection.toggle":
         if (panel === "authors" && currentGroup?.rows) {
@@ -855,57 +935,48 @@ export function App({ clipboard }: { clipboard: SelectionClipboard }) {
         }
         return;
       case "skill.details":
-        if (current || currentProjectSkill || currentUnindexedSkill) setMode("detail");
+        if (currentItem) setInteraction({ kind: "detail", item: currentItem });
         return;
       case "skill.index":
         if (currentUnindexedSkill) {
-          setIndexFlow({ input: "", running: false });
-          setMode("index");
+          setInteraction({ kind: "index", skill: currentUnindexedSkill, flow: { input: "", running: false } });
         }
         return;
       case "skill.diff":
         if (current) {
-          setDiffResult(diffSkill(catalog, current));
-          setMode("diff");
+          setInteraction({ kind: "diff", row: current, result: diffSkill(catalog, current) });
         }
         return;
       case "skill.link":
         if (!current) return;
-        setLinkFlow({
-          step: "project",
-          input: process.cwd() !== catalog.repo ? process.cwd() : (catalog.state.recentProjects[0] ?? ""),
-          recentIndex: -1,
-          mode: "copy",
-          exclude: true,
-          claude: true,
+        setInteraction({
+          kind: "link",
+          row: current,
+          flow: {
+            step: "project",
+            input: process.cwd() !== catalog.repo ? process.cwd() : (catalog.state.recentProjects[0] ?? ""),
+            recentIndex: -1,
+            mode: "copy",
+            exclude: true,
+            claude: true,
+          },
         });
-        setMode("link");
         return;
     }
   };
 
-  const textInputActive = filterMode || docFind.typing || mode === "link" || mode === "index";
-  useAppKeybindings(
-    {
-      listActive: mode === "list" && !textInputActive,
-      overlayActive: mode !== "list" && mode !== "link" && mode !== "index",
-      diffActive: mode === "diff",
-      profilesActive: mode === "profiles",
-      helpActive: mode === "help",
-      textInputActive,
-    },
-    runAppCommand,
-  );
+  const textInputActive = filterMode || docFind.typing || interaction.kind === "link" || interaction.kind === "index";
+  useAppKeybindings(keymapStateFor(interaction, textInputActive), runAppCommand);
 
   useKeyboard((key) => {
     if (handleFilter(key)) return;
     if (handleFind(key)) return;
-    if (mode === "link" && linkFlow) handleLink(key);
-    else if (mode === "index" && indexFlow) handleIndex(key);
+    if (interaction.kind === "link") handleLink(key);
+    else if (interaction.kind === "index") handleIndex(key);
   });
 
   usePaste((event) => {
-    if (mode !== "index" || !indexFlow || indexFlow.running) return;
+    if (interaction.kind !== "index" || interaction.flow.running) return;
     event.preventDefault();
     event.stopPropagation();
     const value = singleLinePaste(event.bytes);
@@ -981,7 +1052,7 @@ export function App({ clipboard }: { clipboard: SelectionClipboard }) {
           bg={catalogView === "available" ? colors.selectedBg : undefined}
           marginLeft={1}
           onMouseDown={() => {
-            if (mode === "list") switchCatalogView("available");
+            if (interaction.kind === "browse") switchCatalogView("available");
           }}
         >{` 1 ${compactHeader ? "available" : "available here"} ${availableCount} `}</text>
         <text
@@ -991,35 +1062,37 @@ export function App({ clipboard }: { clipboard: SelectionClipboard }) {
           bg={catalogView === "all" ? colors.selectedBg : undefined}
           marginLeft={1}
           onMouseDown={() => {
-            if (mode === "list") switchCatalogView("all");
+            if (interaction.kind === "browse") switchCatalogView("all");
           }}
         >{` 2 ${compactHeader ? "all" : "all skills"} ${allCount} `}</text>
       </box>
-      {catalog.state.activeProfile && !tiny ? <text fg={colors.muted} wrapMode="none" truncate>{`profile: ${catalog.state.activeProfile} `}</text> : null}
+      {getActiveProfile(catalog.manifest, catalog.state) && !tiny ? (
+        <text fg={colors.muted} wrapMode="none" truncate>{`profile: ${getActiveProfile(catalog.manifest, catalog.state)} `}</text>
+      ) : null}
     </box>
   );
 
   // Mouse: click selects a row (and focuses its panel); wheel moves the selection.
   const clickAuthorRow = (index: number) => (event: { stopPropagation: () => void }) => {
     event.stopPropagation();
-    if (mode !== "list") return;
+    if (interaction.kind !== "browse") return;
     if (panel !== "authors") focusPanel("authors");
     setSelectedAuthor(index);
     setSelectedSkill(0);
   };
   const clickSkillRow = (index: number) => (event: { stopPropagation: () => void }) => {
     event.stopPropagation();
-    if (mode !== "list") return;
+    if (interaction.kind !== "browse") return;
     if (panel !== "skills") focusPanel("skills");
     setSelectedSkill(index);
   };
   const clickPanel = (target: Panel) => () => {
-    if (mode !== "list") return;
+    if (interaction.kind !== "browse") return;
     if (panel !== target) focusPanel(target);
   };
   const wheelList = (move: (delta: number) => void) => (event: { stopPropagation: () => void; scroll?: { direction: string } }) => {
     event.stopPropagation();
-    if (mode !== "list") return;
+    if (interaction.kind !== "browse") return;
     if (event.scroll?.direction === "up") move(-1);
     else if (event.scroll?.direction === "down") move(1);
   };
@@ -1126,6 +1199,36 @@ export function App({ clipboard }: { clipboard: SelectionClipboard }) {
     </TextLine>
   );
 
+  const overlay = (() => {
+    switch (interaction.kind) {
+      case "browse":
+        return null;
+      case "help":
+        return <HelpModal cols={cols} editor={catalog.editorCommand[0]} />;
+      case "detail":
+        switch (interaction.item.kind) {
+          case "skill":
+            return <DetailModal cols={cols} row={interaction.item.row} catalog={catalog} />;
+          case "project-skill":
+            return <ProjectSkillModal cols={cols} skill={interaction.item.skill} catalog={catalog} />;
+          case "unindexed-skill":
+            return <UnindexedSkillModal cols={cols} skill={interaction.item.skill} />;
+          default:
+            return assertNever(interaction.item);
+        }
+      case "profiles":
+        return <ProfilesModal cols={cols} catalog={catalog} names={profileNames} index={interaction.index} />;
+      case "diff":
+        return <DiffModal cols={cols} row={interaction.row} result={interaction.result} />;
+      case "link":
+        return <LinkModal cols={cols} row={interaction.row} flow={interaction.flow} recents={catalog.state.recentProjects} />;
+      case "index":
+        return <IndexSkillModal cols={cols} skill={interaction.skill} flow={interaction.flow} />;
+      default:
+        return assertNever(interaction);
+    }
+  })();
+
   return (
     <box width="100%" height="100%" flexDirection="column">
       {header}
@@ -1179,23 +1282,16 @@ export function App({ clipboard }: { clipboard: SelectionClipboard }) {
             height={viewport}
             onFocusPanel={(target) => clickPanel(target)()}
             onSelectFile={(index) => {
-              if (mode === "list") selectFile(index);
+              if (interaction.kind === "browse") selectFile(index);
             }}
             onScrollFiles={(delta) => {
-              if (mode === "list") moveFile(delta);
+              if (interaction.kind === "browse") moveFile(delta);
             }}
           />
         ) : null}
       </box>
       {footer}
-      {mode === "help" ? <HelpModal cols={cols} editor={catalog.editorCommand[0]} /> : null}
-      {mode === "detail" && current ? <DetailModal cols={cols} row={current} catalog={catalog} /> : null}
-      {mode === "detail" && currentProjectSkill ? <ProjectSkillModal cols={cols} skill={currentProjectSkill} catalog={catalog} /> : null}
-      {mode === "detail" && currentUnindexedSkill ? <UnindexedSkillModal cols={cols} skill={currentUnindexedSkill} /> : null}
-      {mode === "profiles" ? <ProfilesModal cols={cols} catalog={catalog} names={profileNames} index={profileIndex} /> : null}
-      {mode === "diff" && current && diffResult ? <DiffModal cols={cols} row={current} result={diffResult} /> : null}
-      {mode === "link" && current && linkFlow ? <LinkModal cols={cols} row={current} flow={linkFlow} recents={catalog.state.recentProjects} /> : null}
-      {mode === "index" && currentUnindexedSkill && indexFlow ? <IndexSkillModal cols={cols} skill={currentUnindexedSkill} flow={indexFlow} /> : null}
+      {overlay}
     </box>
   );
 }
@@ -1547,7 +1643,7 @@ function ProfilesModal({ cols, catalog, names, index }: { cols: number; catalog:
     <Modal title="profiles" width={56} cols={cols}>
       {names.map((name, i) => {
         const isSel = i === index;
-        const active = catalog.state.activeProfile === name;
+        const active = getActiveProfile(catalog.manifest, catalog.state) === name;
         const members = getProfile(catalog.manifest, name) ?? [];
         return (
           <TextLine key={name} fg={isSel ? colors.selectedText : colors.text} bg={isSel ? colors.selectedBg : undefined}>
@@ -1576,6 +1672,15 @@ function DiffModal({ cols, row, result }: { cols: number; row: CatalogRow; resul
     return (
       <Modal title={`diff ${row.name}`} width={64} cols={cols}>
         <TextLine fg={colors.muted}>{"not installed globally (disabled?)"}</TextLine>
+        <TextLine fg={colors.muted}>{"esc to close"}</TextLine>
+      </Modal>
+    );
+  }
+  if (result.kind === "unowned") {
+    return (
+      <Modal title={`diff ${row.name}`} width={64} cols={cols}>
+        <TextLine fg={colors.yellow}>{"live path is not owned by this catalog"}</TextLine>
+        <TextLine fg={colors.muted}>{"inspect it before using --force"}</TextLine>
         <TextLine fg={colors.muted}>{"esc to close"}</TextLine>
       </Modal>
     );

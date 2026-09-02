@@ -1,9 +1,11 @@
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { Effect } from "effect";
 import { readdirIfExists } from "../lib/fs.ts";
 import { contentHash, walkFiles } from "../lib/hash.ts";
+import { classifyPlacement, inspectCatalogEntry, isDiscoverablePlacement } from "../lib/catalogInspection.ts";
+import type { CatalogLiveStatus, LiveEntry, Placement } from "../lib/catalogInspection.ts";
 import { diffDirs } from "../lib/diff.ts";
 import { findUnindexedSkills } from "../lib/adopt.ts";
 import type { UnindexedSkill } from "../lib/adopt.ts";
@@ -12,18 +14,18 @@ import type { EditorCommand } from "../lib/editor.ts";
 import { isGlobalStoreProject } from "../lib/linker.ts";
 import { isSkillEnabled, ManifestStore } from "../lib/manifest.ts";
 import type { Manifest, ProjectLink, Skill, State } from "../lib/manifest.ts";
-import { HostRepo, Paths } from "../lib/paths.ts";
-import { observe } from "../lib/reconcile.ts";
-import type { LiveKind } from "../lib/reconcile.ts";
+import { claudeRelTarget, HostRepo, Paths } from "../lib/paths.ts";
+import { observe, observeEntry } from "../lib/reconcile.ts";
 import type { UpstreamState } from "../lib/update.ts";
 
-export type LiveStatus = "ok" | "drift" | "missing" | "off" | "stale" | "checking";
+export type LiveStatus = CatalogLiveStatus;
 
 export interface CatalogRow {
   name: string;
   origin: "local" | "vendor";
   enabled: boolean;
-  liveKind: LiveKind;
+  liveEntry: LiveEntry;
+  placement: Placement;
   live: LiveStatus;
   claude: boolean;
   projectLink: ProjectLink | null;
@@ -62,8 +64,8 @@ export function projectPlacement(row: Pick<CatalogRow, "name" | "projectLink" | 
 }
 
 /** Whether an agent can currently discover this skill globally or in the active project. */
-export function isSkillAvailableHere(row: Pick<CatalogRow, "liveKind" | "projectSkill">): boolean {
-  return row.liveKind === "symlink" || row.liveKind === "dir" || row.projectSkill !== null;
+export function isSkillAvailableHere(row: Pick<CatalogRow, "placement" | "projectSkill">): boolean {
+  return isDiscoverablePlacement(row.placement) || row.projectSkill !== null;
 }
 
 /** Resolve cwd to the nearest recorded project, falling back to cwd itself. */
@@ -119,24 +121,25 @@ export const loadCatalog = Effect.fn("Tui.loadCatalog")(function* () {
   const unindexedSkills = findUnindexedSkills(manifest, repo);
   const projectSkillsByName = new Map(projectSkills.map((skill) => [skill.name, skill]));
   const rows: CatalogRow[] = Object.entries(manifest.skills).map(([name, meta]) => {
-    const enabled = isSkillEnabled(state, name);
-    const liveKind: LiveKind = Object.hasOwn(obs.agents, name) ? obs.agents[name]!.kind : "missing";
-    let live: LiveStatus;
-    if (!enabled) {
-      live = liveKind === "missing" ? "off" : "stale";
-    } else if (meta.origin === "local") {
-      live = liveKind === "symlink" ? "ok" : "missing";
-    } else {
-      live = liveKind === "dir" ? "checking" : "missing";
-    }
+    const enabled = isSkillEnabled(manifest, state, name);
+    const liveEntry: LiveEntry = Object.hasOwn(obs.agents, name) ? obs.agents[name]! : { kind: "missing" };
+    const inspection = inspectCatalogEntry({
+      origin: meta.origin,
+      enabled,
+      live: liveEntry,
+      expectedTarget: resolve(repo, meta.path),
+      vendorHash: { kind: "pending" },
+    });
     const projectLink = state.projectLinks.find((link) => link.skill === name && resolve(link.project) === project) ?? null;
     return {
       name,
       origin: meta.origin,
       enabled,
-      liveKind,
-      live,
-      claude: Object.hasOwn(obs.claude, name),
+      liveEntry: inspection.live,
+      placement: inspection.placement,
+      live: inspection.status,
+      claude:
+        classifyPlacement(Object.hasOwn(obs.claude, name) ? obs.claude[name]! : { kind: "missing" }, resolve(paths.claudeSkills, claudeRelTarget(name))) === "expected-symlink",
       projectLink,
       projectSkill: projectSkillsByName.get(name) ?? null,
       meta,
@@ -146,19 +149,28 @@ export const loadCatalog = Effect.fn("Tui.loadCatalog")(function* () {
 });
 
 /** Hash-verify one vendor row (the slow part, run incrementally). */
-export function verifyRow(agentsSkills: string, row: CatalogRow): CatalogRow {
+export function verifyRow(catalog: Pick<Catalog, "agentsSkills" | "repo">, row: CatalogRow): CatalogRow {
   if (row.live !== "checking") return row;
-  const live = join(agentsSkills, row.name);
-  const ok = existsSync(live) && contentHash(live) === row.meta.contentHash;
-  return { ...row, live: ok ? "ok" : "drift" };
+  const live = join(catalog.agentsSkills, row.name);
+  const liveEntry = observeEntry(live);
+  const inspection = inspectCatalogEntry({
+    origin: row.origin,
+    enabled: row.enabled,
+    live: liveEntry,
+    expectedTarget: resolve(catalog.repo, row.meta.path),
+    vendorHash: { kind: "verified", matches: liveEntry.kind === "dir" && contentHash(live) === row.meta.contentHash },
+  });
+  return { ...row, liveEntry: inspection.live, placement: inspection.placement, live: inspection.status };
 }
 
-export type DiffResult = { kind: "local" } | { kind: "not-installed" } | { kind: "diff"; diff: DirDiff };
+export type DiffResult = { kind: "local" } | { kind: "not-installed" } | { kind: "unowned" } | { kind: "diff"; diff: DirDiff };
 
 export function diffSkill(catalog: Pick<Catalog, "repo" | "agentsSkills">, row: CatalogRow): DiffResult {
   if (row.origin === "local") return { kind: "local" };
   const live = join(catalog.agentsSkills, row.name);
-  if (!existsSync(live)) return { kind: "not-installed" };
+  const placement = classifyPlacement(observeEntry(live), resolve(catalog.repo, row.meta.path));
+  if (placement === "wrong-symlink" || placement === "file") return { kind: "unowned" };
+  if (placement === "missing" || placement === "broken-symlink") return { kind: "not-installed" };
   return { kind: "diff", diff: diffDirs(join(catalog.repo, row.meta.path), live) };
 }
 

@@ -1,6 +1,6 @@
 import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { currentReleaseTargetId, findReleaseTarget, releaseTargets } from "./release-targets.ts";
+import { currentReleaseTargetId, findReleaseTarget, releaseTargets, standaloneCompileCommand } from "./release-targets.ts";
 
 const root = process.cwd();
 const requestedTargetId = process.argv[2];
@@ -46,21 +46,7 @@ for (const target of selectedTargets()) {
   const assetPath = join(releaseDir, assetName);
 
   await mkdir(stageDir, { recursive: true });
-  run([
-    "bun",
-    "build",
-    "--compile",
-    "--bytecode",
-    "--format=esm",
-    `--target=${target.bunTarget}`,
-    // OpenTUI picks its native package from OPENTUI_LIBC while its module graph
-    // evaluates. Defining it at build time lets Bun drop the branch it does not
-    // need; leaving it undefined keeps both, so a glibc build also wants the
-    // musl native package present. We publish glibc only.
-    ...(target.os === "linux" ? ["--define", `process.env.OPENTUI_LIBC=${JSON.stringify(target.libc)}`] : []),
-    `--outfile=${binaryPath}`,
-    "src/standalone.ts",
-  ]);
+  run(standaloneCompileCommand(target, binaryPath));
   await chmod(binaryPath, 0o755);
 
   if (target.id === hostTargetId) {

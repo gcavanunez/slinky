@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { ConfigProvider, Effect, Layer } from "effect";
 import type { Manifest } from "../domain/model.ts";
 import { HostRepo, Paths } from "./paths.ts";
-import { absorbGlobalSkillLockEntries, ensureHostSkillLock, pruneGlobalSkillLockEntries, readSkillLockFile, seedGlobalSkillLock } from "./skillLock.ts";
+import { absorbGlobalSkillLockEntries, ensureHostSkillLock, pruneGlobalSkillLockEntries, readSkillLockFile, restoreGlobalSkillLock, seedGlobalSkillLock } from "./skillLock.ts";
 
 const roots: string[] = [];
 
@@ -177,6 +177,20 @@ describe("committed skill lock", () => {
 
     const global = JSON.parse(readFileSync(join(f.home, ".agents", ".skill-lock.json"), "utf8"));
     expect(global.skills.effect.source).toBe("someone/else");
+  });
+
+  test("restores the exact machine lock contents from a snapshot", () => {
+    const f = fixture("restore");
+    mkdirSync(join(f.home, ".agents"), { recursive: true });
+    const path = join(f.home, ".agents", ".skill-lock.json");
+    const original = `${JSON.stringify({ version: 3, skills: { foreign: { source: "/tmp/local", sourceType: "local" } }, dismissed: { notice: true } })}\n`;
+    writeFileSync(path, original);
+    const snapshot = readSkillLockFile(path);
+    writeFileSync(path, `${JSON.stringify({ version: 3, skills: {} }, null, 2)}\n`);
+
+    run(f, restoreGlobalSkillLock(snapshot));
+
+    expect(readFileSync(path, "utf8")).toBe(original);
   });
 
   test("absorbs an accepted update before the manifest and host hashes agree", () => {

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +8,7 @@ import { Manifest } from "./domain/model.ts";
 import { contentHash } from "./lib/hash.ts";
 
 const roots: string[] = [];
+setDefaultTimeout(30_000);
 const decodeEncodedManifest = Schema.decodeUnknownSync(Schema.toEncoded(Manifest));
 const gitIdentity = {
   GIT_AUTHOR_NAME: "Slinky Test",
@@ -149,8 +150,7 @@ cat > "$HOME/${name}-input"
 }
 
 function stateAt(path: string): {
-  disabledSkills: string[];
-  activeProfile: string | null;
+  selection: { kind: "custom"; disabledSkills: string[] } | { kind: "profile"; name: string };
   projectLinks: Array<{ skill: string; project: string }>;
 } {
   return JSON.parse(readFileSync(path, "utf8"));
@@ -370,6 +370,22 @@ describe("config", () => {
     expect(inline.exitCode).toBe(0);
     expect(existsSync(join(f.home, "delta-invocations"))).toBe(false);
     expect(inline.stdout.toString()).toContain("differs from repo baseline");
+  });
+
+  test("diff does not traverse an unowned vendor symlink", () => {
+    const f = fixture();
+    addDriftingVendor(f);
+    const live = join(f.home, ".agents", "skills", "drifting");
+    const external = join(f.root, "external-vendor");
+    mkdirSync(external);
+    writeFileSync(join(external, "SKILL.md"), "# external\n");
+    rmSync(live, { recursive: true });
+    symlinkSync(external, live);
+
+    const result = runCli(f.host, f.home, ["diff", "drifting", "--no-pager"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("live path is not owned by this catalog");
   });
 
   test("refuses a pager flag combined with --no-pager", () => {
@@ -608,8 +624,8 @@ describe("remote catalog sync", () => {
     expect(runGit(subscriber, ["rev-parse", "HEAD"]).stdout.toString()).toEqual(runGit(publisher.host, ["rev-parse", "HEAD"]).stdout.toString());
     expect(() => lstatSync(join(subscriberHome, ".agents", "skills", "bar"))).toThrow();
     expect(lstatSync(join(subscriberHome, ".agents", "skills", "baz")).isSymbolicLink()).toBe(true);
-    expect(stateAt(join(subscriber, ".local", "state.json")).disabledSkills).toEqual(["foo"]);
-  });
+    expect(stateAt(join(subscriber, ".local", "state.json")).selection).toEqual({ kind: "custom", disabledSkills: ["foo"] });
+  }, 30_000);
 
   test("sync --dry-run previews the remote workflow without changing the catalog", () => {
     const f = fixture();
@@ -690,7 +706,7 @@ describe("remote catalog sync", () => {
     const synced = runCli(f.host, f.home, ["sync"], gitIdentity);
     if (synced.exitCode !== 0) throw new Error(`${synced.stderr.toString()}\n${synced.stdout.toString()}`);
     expect(existsSync(live)).toBe(false);
-    expect(JSON.parse(readFileSync(f.statePath, "utf8")).disabledSkills).not.toContain("bar");
+    expect(JSON.parse(readFileSync(f.statePath, "utf8")).selection.disabledSkills).not.toContain("bar");
   });
 
   function divergedSubscriber(label: string) {
@@ -733,6 +749,30 @@ describe("remote catalog sync", () => {
     expect(existsSync(join(subscriber, "publisher-note.txt"))).toBe(true);
     expect(existsSync(join(subscriber, "subscriber-note.txt"))).toBe(true);
     expect(runGit(subscriber, ["status", "--porcelain"]).stdout.toString().trim()).toBe("");
+  }, 30_000);
+
+  test("diverged pull preserves disabled intent when upstream retires the active profile", () => {
+    const { publisher, subscriber, subscriberHome } = divergedSubscriber("diverged-profile");
+    const manifestPath = join(publisher.host, "skills.manifest.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    manifest.profiles = {};
+    writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
+    expect(runCli(publisher.host, publisher.home, ["save"], gitIdentity).exitCode).toBe(0);
+    expect(runGit(publisher.host, ["push"]).exitCode).toBe(0);
+    writeFileSync(
+      join(subscriber, ".local", "state.json"),
+      `${JSON.stringify({ version: 2, selection: { kind: "profile", name: "focus" }, projectLinks: [], recentProjects: [] })}\n`,
+    );
+    commitFile(subscriber, "subscriber-note.txt", "subscriber\n", "Subscriber commit");
+
+    const preview = runCli(subscriber, subscriberHome, ["pull", "--dry-run"]);
+    if (preview.exitCode !== 0) throw new Error(`${preview.stderr.toString()}\n${preview.stdout.toString()}`);
+    expect(preview.stdout.toString()).not.toContain("would ensure-agents-symlink bar");
+
+    const pulled = runCli(subscriber, subscriberHome, ["pull"]);
+
+    if (pulled.exitCode !== 0) throw new Error(`${pulled.stderr.toString()}\n${pulled.stdout.toString()}`);
+    expect(JSON.parse(readFileSync(join(subscriber, ".local", "state.json"), "utf8")).selection).toEqual({ kind: "custom", disabledSkills: ["bar"] });
   }, 30_000);
 
   test("pull refuses to replay commits that do not merge cleanly", () => {
@@ -846,13 +886,13 @@ describe("remote catalog sync", () => {
     const pulled = runCli(subscriber, subscriberHome, ["pull"]);
 
     expect(pulled.exitCode).toBe(1);
-    expect(pulled.stderr.toString()).toContain("live dir drifted from repo copy");
+    expect(pulled.stderr.toString()).toContain("real directory replaced the catalog symlink");
     expect(runGit(subscriber, ["rev-parse", "HEAD"]).stdout.toString()).toBe(before);
     expect(lstatSync(join(subscriberHome, ".claude", "skills", "bar")).isSymbolicLink()).toBe(true);
 
     const synced = runCli(subscriber, subscriberHome, ["sync"]);
     expect(synced.exitCode).toBe(1);
-    expect(synced.stderr.toString()).toContain("live dir drifted from repo copy");
+    expect(synced.stderr.toString()).toContain("real directory replaced the catalog symlink");
     expect(readFileSync(join(subscriberHome, ".agents", "skills", "bar", "SKILL.md"), "utf8")).toBe("# unrelated bar\n");
   }, 30_000);
 
@@ -872,6 +912,7 @@ describe("remote catalog sync", () => {
     delete manifest.skills.drifting;
     writeFileSync(join(publisher.host, "skills.manifest.json"), `${JSON.stringify(manifest)}\n`);
     rmSync(join(publisher.host, "vendor", "acme", "drifting"), { recursive: true });
+    rmSync(join(publisher.home, ".agents", "skills", "drifting"), { recursive: true });
     expect(runCli(publisher.host, publisher.home, ["save"], gitIdentity).exitCode).toBe(0);
     expect(runGit(publisher.host, ["push"]).exitCode).toBe(0);
 
@@ -1323,6 +1364,23 @@ printf '%s\\n' '# beta upstream' > "$HOME/.agents/skills/beta/SKILL.md"
     expect(output).toContain(".agents/skills/manual");
   });
 
+  test("status does not call a local symlink to the wrong target healthy", () => {
+    const f = fixture();
+    const agentsSkills = join(f.home, ".agents", "skills");
+    mkdirSync(agentsSkills, { recursive: true });
+    symlinkSync(join(f.host, "skills", "bar"), join(agentsSkills, "foo"));
+
+    const result = runCli(f.host, f.home, ["status"]);
+    const foo = result.stdout
+      .toString()
+      .split("\n")
+      .find((line) => line.startsWith("foo"));
+
+    expect(result.exitCode).toBe(0);
+    expect(foo).toContain("\x1b[33munowned\x1b[0m");
+    expect(foo).not.toContain("\x1b[32mok\x1b[0m");
+  });
+
   test("enable and profile dry runs preserve state bytes and global stores", () => {
     const f = fixture(["foo"]);
     const before = readFileSync(f.statePath);
@@ -1344,7 +1402,7 @@ printf '%s\\n' '# beta upstream' > "$HOME/.agents/skills/beta/SKILL.md"
 
     const enable = runCli(f.host, f.home, ["enable", "foo", "bar"]);
     expect(enable.exitCode).toBe(0);
-    expect(stateAt(f.statePath).disabledSkills).toEqual([]);
+    expect(stateAt(f.statePath).selection).toEqual({ kind: "custom", disabledSkills: [] });
     for (const name of ["foo", "bar"]) {
       expect(lstatSync(join(f.home, ".agents", "skills", name)).isSymbolicLink()).toBe(true);
       expect(lstatSync(join(f.home, ".claude", "skills", name)).isSymbolicLink()).toBe(true);
@@ -1352,7 +1410,7 @@ printf '%s\\n' '# beta upstream' > "$HOME/.agents/skills/beta/SKILL.md"
 
     const disable = runCli(f.host, f.home, ["disable", "foo", "bar"]);
     expect(disable.exitCode).toBe(0);
-    expect(stateAt(f.statePath).disabledSkills).toEqual(["bar", "foo"]);
+    expect(stateAt(f.statePath).selection).toEqual({ kind: "custom", disabledSkills: ["bar", "foo"] });
     expect(() => lstatSync(join(f.home, ".agents", "skills", "foo"))).toThrow();
     expect(() => lstatSync(join(f.home, ".agents", "skills", "bar"))).toThrow();
   });

@@ -2,7 +2,7 @@
 
 A skills host is recognized by `skills.manifest.json`. All catalog mutations, vendored updates, and `.local/state.json` writes occur in that host repository.
 
-Slinky validates its owned JSON documents with Effect Schema. Unknown properties, unsafe paths, malformed hashes, and invalid cross-references are errors. A missing state file starts from an empty state; a malformed state file is never silently reset.
+Slinky validates its owned JSON documents with Effect Schema. Unknown properties, unsafe paths, malformed hashes, and invalid cross-references are errors. State loading explicitly normalizes retired profiles and disabled skills that no longer exist; dangling project links remain errors. A missing state file starts from an empty state, and a malformed state file is never silently reset.
 
 ## Manifest
 
@@ -73,19 +73,21 @@ Before `slinky update` or bootstrap, Slinky merges managed entries into the mach
 
 ## State
 
-Machine-local `.local/state.json` records exceptions to the default-enabled catalog:
+Machine-local `.local/state.json` records either custom exceptions to the default-enabled catalog or a profile identity:
 
 ```json
 {
-  "version": 1,
-  "disabledSkills": [],
-  "activeProfile": null,
+  "version": 2,
+  "selection": {
+    "kind": "custom",
+    "disabledSkills": []
+  },
   "projectLinks": [],
   "recentProjects": []
 }
 ```
 
-When `activeProfile` is set, `disabledSkills` must exactly match the skills outside that profile. Project links and disabled skills must reference manifest skills.
+Profile selection uses `{"kind":"profile","name":"default"}` and derives enabled skills from the current manifest profile membership. If that profile is retired, state normalizes to an all-enabled custom selection. Version-1 state is migrated on load; existing profile identity wins, while a retired profile keeps its still-valid disabled skills as a custom selection. Project links and custom disabled skills must reference manifest skills.
 
 A copy project link records:
 
@@ -110,8 +112,10 @@ Symlink links use `"mode": "symlink"` and omit `snapshotHash`. Targets are limit
 ```json
 {
   "version": 1,
-  "host": "/absolute/path/to/my-agent-skills"
+  "host": "/absolute/path/to/my-agent-skills",
+  "diffPager": "delta",
+  "editor": "code -w"
 }
 ```
 
-`SLINKY_REPO` can override the configured host for one invocation.
+`diffPager` is optional and accepts `hunk` or `delta`. `editor` is an optional nonblank command specification, including arguments. Clearing either setting removes its property rather than writing `null` or `"none"`. The editor resolves from the configured value, then `$VISUAL`, `$EDITOR`, and finally `nvim`. `SLINKY_REPO` can override the configured host for one invocation.

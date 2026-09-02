@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Schema } from "effect";
-import { State, version } from "../lib/manifest.ts";
+import { contentHash } from "../lib/hash.ts";
+import { State, stateVersion } from "../lib/manifest.ts";
 import {
+  diffSkill,
   discoverProjectSkills,
   isSkillAvailableHere,
   projectForCwd,
@@ -14,6 +16,7 @@ import {
   projectSkillPath,
   projectSkillsFor,
   readProjectSkillFile,
+  verifyRow,
 } from "./data.ts";
 import type { CatalogRow } from "./data.ts";
 
@@ -24,9 +27,8 @@ afterEach(() => {
 });
 
 const state = Schema.decodeUnknownSync(State)({
-  version,
-  disabledSkills: [],
-  activeProfile: null,
+  version: stateVersion,
+  selection: { kind: "custom", disabledSkills: [] },
   projectLinks: [
     {
       mode: "symlink",
@@ -137,14 +139,86 @@ describe("projectPlacement", () => {
 
 describe("isSkillAvailableHere", () => {
   test("accepts global directories, global symlinks, and project placements", () => {
-    expect(isSkillAvailableHere({ liveKind: "dir", projectSkill: null })).toBe(true);
-    expect(isSkillAvailableHere({ liveKind: "symlink", projectSkill: null })).toBe(true);
-    expect(isSkillAvailableHere({ liveKind: "missing", projectSkill: { name: "foo", agents: true, claude: false } })).toBe(true);
+    expect(isSkillAvailableHere({ placement: "dir", projectSkill: null })).toBe(true);
+    expect(isSkillAvailableHere({ placement: "expected-symlink", projectSkill: null })).toBe(true);
+    expect(isSkillAvailableHere({ placement: "missing", projectSkill: { name: "foo", agents: true, claude: false } })).toBe(true);
   });
 
-  test("rejects missing, broken, and invalid global entries", () => {
-    expect(isSkillAvailableHere({ liveKind: "missing", projectSkill: null })).toBe(false);
-    expect(isSkillAvailableHere({ liveKind: "broken-symlink", projectSkill: null })).toBe(false);
-    expect(isSkillAvailableHere({ liveKind: "file", projectSkill: null })).toBe(false);
+  test("rejects missing, broken, wrong-target, and invalid global entries", () => {
+    expect(isSkillAvailableHere({ placement: "missing", projectSkill: null })).toBe(false);
+    expect(isSkillAvailableHere({ placement: "broken-symlink", projectSkill: null })).toBe(false);
+    expect(isSkillAvailableHere({ placement: "wrong-symlink", projectSkill: null })).toBe(false);
+    expect(isSkillAvailableHere({ placement: "file", projectSkill: null })).toBe(false);
+  });
+});
+
+describe("verifyRow", () => {
+  test("incrementally resolves a pending vendor hash to ok or drift", () => {
+    const root = mkdtempSync(join(tmpdir(), "slinky-verify-row-"));
+    roots.push(root);
+    const agentsSkills = join(root, ".agents", "skills");
+    const live = join(agentsSkills, "vendor-skill");
+    mkdirSync(live, { recursive: true });
+    writeFileSync(join(live, "SKILL.md"), "# vendor\n");
+
+    const row: CatalogRow = {
+      name: "vendor-skill",
+      origin: "vendor",
+      enabled: true,
+      liveEntry: { kind: "dir" },
+      placement: "dir",
+      live: "checking",
+      claude: false,
+      projectLink: null,
+      projectSkill: null,
+      meta: {
+        origin: "vendor",
+        path: "vendor/acme/vendor-skill",
+        contentHash: contentHash(live),
+        upstream: { kind: "unknown", note: null },
+        vendoredAt: null,
+      },
+    };
+
+    expect(verifyRow({ agentsSkills, repo: root }, row).live).toBe("ok");
+    writeFileSync(join(live, "SKILL.md"), "# changed\n");
+    expect(verifyRow({ agentsSkills, repo: root }, row).live).toBe("drift");
+
+    const external = join(root, "external");
+    mkdirSync(external);
+    writeFileSync(join(external, "SKILL.md"), "# external\n");
+    rmSync(live, { recursive: true });
+    symlinkSync(external, live);
+    expect(verifyRow({ agentsSkills, repo: root }, row)).toMatchObject({ placement: "wrong-symlink", live: "unowned" });
+  });
+
+  test("does not traverse an unowned vendor symlink for diff", () => {
+    const root = mkdtempSync(join(tmpdir(), "slinky-diff-row-"));
+    roots.push(root);
+    const agentsSkills = join(root, ".agents", "skills");
+    const external = join(root, "external");
+    mkdirSync(agentsSkills, { recursive: true });
+    mkdirSync(external);
+    symlinkSync(external, join(agentsSkills, "vendor-skill"));
+    const row = {
+      name: "vendor-skill",
+      origin: "vendor",
+      enabled: true,
+      liveEntry: { kind: "symlink", resolved: "/unowned" },
+      placement: "wrong-symlink",
+      live: "missing",
+      claude: false,
+      projectLink: null,
+      projectSkill: null,
+      meta: {
+        origin: "vendor",
+        path: "vendor/acme/vendor-skill",
+        contentHash: "a".repeat(64),
+        upstream: { kind: "unknown", note: null },
+        vendoredAt: null,
+      },
+    } satisfies CatalogRow;
+
+    expect(diffSkill({ agentsSkills, repo: root }, row)).toEqual({ kind: "unowned" });
   });
 });

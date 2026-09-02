@@ -2,6 +2,7 @@ import { isAbsolute, normalize, posix } from "node:path";
 import { DateTime, Schema } from "effect";
 
 export const version = 1;
+export const stateVersion = 2;
 
 const SkillName = Schema.NonEmptyString;
 const ProfileName = Schema.NonEmptyString;
@@ -170,7 +171,19 @@ const SymlinkProjectLink = Schema.Struct({
 export const ProjectLink = Schema.Union([CopyProjectLink, SymlinkProjectLink]);
 export type ProjectLink = typeof ProjectLink.Type;
 
-export const State = Schema.Struct({
+export const StateSelection = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("custom"),
+    disabledSkills: Schema.Array(SkillName),
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("profile"),
+    name: ProfileName,
+  }),
+]);
+export type StateSelection = typeof StateSelection.Type;
+
+export const StateV1 = Schema.Struct({
   version: Schema.Literal(version),
   disabledSkills: Schema.Array(SkillName),
   activeProfile: Schema.NullOr(ProfileName),
@@ -199,7 +212,38 @@ export const State = Schema.Struct({
     return issues;
   }),
 );
+export type StateV1 = typeof StateV1.Type;
+
+export const State = Schema.Struct({
+  version: Schema.Literal(stateVersion),
+  selection: StateSelection,
+  projectLinks: Schema.Array(ProjectLink),
+  recentProjects: Schema.Array(ProjectPath),
+}).check(
+  Schema.makeFilter((state) => {
+    const issues: Array<Schema.FilterIssue> = [];
+    if (state.selection.kind === "custom" && new Set(state.selection.disabledSkills).size !== state.selection.disabledSkills.length) {
+      issues.push({ path: ["selection", "disabledSkills"], issue: "disabled skills must be unique" });
+    }
+    if (new Set(state.recentProjects).size !== state.recentProjects.length) {
+      issues.push({ path: ["recentProjects"], issue: "recent projects must be unique" });
+    }
+    if (state.recentProjects.length > 10) {
+      issues.push({ path: ["recentProjects"], issue: "at most 10 recent projects are retained" });
+    }
+    const links = new Set<string>();
+    for (const link of state.projectLinks) {
+      const key = `${link.project}\0${link.skill}`;
+      if (links.has(key)) {
+        issues.push({ path: ["projectLinks"], issue: `duplicate project link: ${link.skill}` });
+      }
+      links.add(key);
+    }
+    return issues;
+  }),
+);
 export type State = typeof State.Type;
+export const PersistedState = Schema.Union([StateV1, State]);
 
 /** Interactive diff pagers Slinky knows how to drive. */
 export const DiffPager = Schema.Literals(["hunk", "delta"]);
@@ -232,50 +276,88 @@ export function withManifestSkill(manifest: Manifest, name: string, skill: Skill
 
 export function emptyState(): State {
   return decodeState({
-    version,
-    disabledSkills: [],
-    activeProfile: null,
+    version: stateVersion,
+    selection: { kind: "custom", disabledSkills: [] },
     projectLinks: [],
     recentProjects: [],
   });
 }
 
-export function isSkillEnabled(state: State, name: string): boolean {
-  return !state.disabledSkills.includes(name);
+export function getActiveProfile(manifest: Manifest, state: State): string | null {
+  return state.selection.kind === "profile" && Object.hasOwn(manifest.profiles, state.selection.name) ? state.selection.name : null;
 }
 
-export function withSkillEnabled(state: State, name: string, enabled: boolean): State {
-  const disabled = new Set(state.disabledSkills);
+export function getDisabledSkills(manifest: Manifest, state: State): ReadonlyArray<string> {
+  if (state.selection.kind === "custom") return state.selection.disabledSkills;
+  const members = getProfile(manifest, state.selection.name);
+  if (!members) return [];
+  const enabled = new Set(members);
+  return Object.keys(manifest.skills)
+    .filter((name) => !enabled.has(name))
+    .sort();
+}
+
+export function isSkillEnabled(manifest: Manifest, state: State, name: string): boolean {
+  return !getDisabledSkills(manifest, state).includes(name);
+}
+
+export function withSkillEnabled(manifest: Manifest, state: State, name: string, enabled: boolean): State {
+  const disabled = new Set(getDisabledSkills(manifest, state));
   if (enabled) disabled.delete(name);
   else disabled.add(name);
   return decodeState({
     ...state,
-    disabledSkills: [...disabled].sort(),
-    activeProfile: null,
+    selection: { kind: "custom", disabledSkills: [...disabled].sort() },
   });
 }
 
 export function withProfile(manifest: Manifest, state: State, name: string): State {
   const members = getProfile(manifest, name);
   if (!members) throw new Error(`unknown profile: ${name}`);
-  const enabled = new Set(members);
   return decodeState({
     ...state,
-    disabledSkills: Object.keys(manifest.skills)
-      .filter((skill) => !enabled.has(skill))
-      .sort(),
-    activeProfile: name,
+    selection: { kind: "profile", name },
   });
 }
 
 export function alignStateWithManifest(manifest: Manifest, state: State): State {
-  const activeProfile = state.activeProfile !== null && Object.hasOwn(manifest.profiles, state.activeProfile) ? state.activeProfile : null;
-  const filtered = decodeState({
+  if (state.selection.kind === "profile") {
+    if (Object.hasOwn(manifest.profiles, state.selection.name)) return state;
+    // A v2 profile has no cached custom complement. If it is retired, fall back
+    // to the default all-enabled catalog rather than inventing stale choices.
+    return decodeState({ ...state, selection: { kind: "custom", disabledSkills: [] } });
+  }
+  return decodeState({
     ...state,
-    activeProfile,
-    disabledSkills: state.disabledSkills.filter((name) => Object.hasOwn(manifest.skills, name)),
+    selection: {
+      kind: "custom",
+      disabledSkills: state.selection.disabledSkills.filter((name) => Object.hasOwn(manifest.skills, name)),
+    },
   });
-  return activeProfile === null ? filtered : withProfile(manifest, filtered, activeProfile);
+}
+
+export function alignStateForTransition(previous: Manifest, resulting: Manifest, state: State): State {
+  if (state.selection.kind !== "profile" || Object.hasOwn(resulting.profiles, state.selection.name)) {
+    return alignStateWithManifest(resulting, state);
+  }
+  const disabledSkills = getDisabledSkills(previous, state).filter((name) => Object.hasOwn(resulting.skills, name));
+  return decodeState({ ...state, selection: { kind: "custom", disabledSkills } });
+}
+
+export function migrateStateV1(manifest: Manifest, state: StateV1): State {
+  const selection: StateSelection =
+    state.activeProfile !== null && Object.hasOwn(manifest.profiles, state.activeProfile)
+      ? { kind: "profile", name: state.activeProfile }
+      : {
+          kind: "custom",
+          disabledSkills: state.disabledSkills.filter((name) => Object.hasOwn(manifest.skills, name)),
+        };
+  return decodeState({
+    version: stateVersion,
+    selection,
+    projectLinks: state.projectLinks,
+    recentProjects: state.recentProjects,
+  });
 }
 
 export function withProjectLink(state: State, link: ProjectLink): State {
@@ -295,20 +377,12 @@ export function withoutProjectLink(state: State, link: ProjectLink): State {
 
 export function validateState(manifest: Manifest, state: State): ReadonlyArray<string> {
   const issues: string[] = [];
-  for (const name of state.disabledSkills) {
-    if (!Object.hasOwn(manifest.skills, name)) issues.push(`disabled skill is not in the manifest: ${name}`);
-  }
-  if (state.activeProfile !== null && !Object.hasOwn(manifest.profiles, state.activeProfile)) {
-    issues.push(`active profile is not in the manifest: ${state.activeProfile}`);
-  } else if (state.activeProfile !== null) {
-    const members = new Set(getProfile(manifest, state.activeProfile) ?? []);
-    const expected = Object.keys(manifest.skills)
-      .filter((name) => !members.has(name))
-      .sort();
-    const actual = [...state.disabledSkills].sort();
-    if (expected.length !== actual.length || expected.some((name, index) => name !== actual[index])) {
-      issues.push(`active profile does not match disabled skills: ${state.activeProfile}`);
+  if (state.selection.kind === "custom") {
+    for (const name of state.selection.disabledSkills) {
+      if (!Object.hasOwn(manifest.skills, name)) issues.push(`disabled skill is not in the manifest: ${name}`);
     }
+  } else if (!Object.hasOwn(manifest.profiles, state.selection.name)) {
+    issues.push(`active profile is not in the manifest: ${state.selection.name}`);
   }
   for (const link of state.projectLinks) {
     if (!Object.hasOwn(manifest.skills, link.skill)) {

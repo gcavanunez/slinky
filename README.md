@@ -298,7 +298,6 @@ slinky version                 # print the installed version
 slinky status                  # inspect catalog, live state, and Claude visibility
 slinky sync --dry-run          # preview reconciliation
 slinky sync [--force]          # apply reconciliation
-slinky sync --pull [--dry-run] [--force]
 slinky pull [--dry-run] [--force]
 slinky push [--dry-run]
 slinky enable <skill...>

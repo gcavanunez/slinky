@@ -73,27 +73,83 @@ jobs:
         env:
           SLINKY_REUSE_RELEASE_BINARY: "1"
 
-      - name: Publish npm binary package
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          package_dir="dist/npm/binaries/${{ matrix.target }}"
-          name="$(node -p "require('./${package_dir}/package.json').name")"
-          version="$(node -p "require('./${package_dir}/package.json').version")"
-          if npm view "${name}@${version}" version >/dev/null 2>&1; then
-            echo "${name}@${version} already published."
-            exit 0
-          fi
-          npm publish "${package_dir}"
-
-      - name: Upload standalone release assets
+      - name: Verify existing release artifact identity
+        id: identity
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh release upload "${GITHUB_REF_NAME}"
-          "dist/release/slinky-${{ matrix.target }}.tar.gz"
-          "dist/release/slinky-${{ matrix.target }}.tar.gz.sha256"
-          --clobber
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          target="${{ matrix.target }}"
+          package_dir="dist/npm/binaries/${{ matrix.target }}"
+          release_binary="dist/release/${target}/slinky"
+          name="$(node -p "require('./${package_dir}/package.json').name")"
+          version="$(node -p "require('./${package_dir}/package.json').version")"
+          temp_dir="$(mktemp -d)"
+          trap 'rm -rf "${temp_dir}"' EXIT
+
+          if npm view "${name}@${version}" version >/dev/null 2>&1; then
+            bun run scripts/release-package-identity.ts "${package_dir}" "${name}@${version}"
+            npm pack "${name}@${version}" --pack-destination "${temp_dir}" >/dev/null
+            shopt -s nullglob
+            npm_tarballs=("${temp_dir}"/*.tgz)
+            if [[ "${#npm_tarballs[@]}" -ne 1 ]]; then
+              echo "Expected one npm tarball for ${name}@${version}, found ${#npm_tarballs[@]}." >&2
+              exit 1
+            fi
+            mkdir "${temp_dir}/npm"
+            tar -xzf "${npm_tarballs[0]}" -C "${temp_dir}/npm"
+            bun run scripts/release-artifact-identity.ts "${release_binary}" "${temp_dir}/npm/package/bin/slinky"
+            npm_exists=true
+          else
+            npm_exists=false
+          fi
+
+          archive="slinky-${target}.tar.gz"
+          checksum="${archive}.sha256"
+          asset_names="$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name')"
+          archive_exists=false
+          checksum_exists=false
+          if grep -Fqx "${archive}" <<<"${asset_names}"; then archive_exists=true; fi
+          if grep -Fqx "${checksum}" <<<"${asset_names}"; then checksum_exists=true; fi
+          if [[ "${archive_exists}" != "${checksum_exists}" ]]; then
+            echo "Release has only one of ${archive} and ${checksum}; refusing to replace either asset." >&2
+            exit 1
+          fi
+
+          if [[ "${archive_exists}" == true ]]; then
+            mkdir "${temp_dir}/github" "${temp_dir}/github-unpacked"
+            gh release download "${GITHUB_REF_NAME}" --pattern "${archive}" --pattern "${checksum}" --dir "${temp_dir}/github"
+            (cd "${temp_dir}/github" && shasum -a 256 --check "${checksum}")
+            if [[ "$(tar -tzf "${temp_dir}/github/${archive}")" != "slinky" ]]; then
+              echo "Existing ${archive} must contain exactly one slinky executable." >&2
+              exit 1
+            fi
+            tar -xzf "${temp_dir}/github/${archive}" -C "${temp_dir}/github-unpacked"
+            test -x "${temp_dir}/github-unpacked/slinky"
+            bun run scripts/release-artifact-identity.ts "${release_binary}" "${temp_dir}/github-unpacked/slinky"
+            assets_exist=true
+          else
+            assets_exist=false
+          fi
+
+          echo "npm_exists=${npm_exists}" >>"${GITHUB_OUTPUT}"
+          echo "assets_exist=${assets_exist}" >>"${GITHUB_OUTPUT}"
+
+      - name: Publish npm binary package
+        if: steps.identity.outputs.npm_exists != 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish "dist/npm/binaries/${{ matrix.target }}"
+
+      - name: Upload standalone release assets
+        if: steps.identity.outputs.assets_exist != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" \
+            "dist/release/slinky-${{ matrix.target }}.tar.gz" \
+            "dist/release/slinky-${{ matrix.target }}.tar.gz.sha256"
 
   publish:
     runs-on: ubuntu-latest
@@ -129,7 +185,8 @@ jobs:
           name="$(node -p "require('./package.json').name")"
           version="$(node -p "require('./package.json').version")"
           if npm view "${name}@${version}" version >/dev/null 2>&1; then
-            echo "${name}@${version} already published."
+            bun run ../../../scripts/release-package-identity.ts . "${name}@${version}"
+            echo "${name}@${version} already published with identical contents."
             exit 0
           fi
           npm publish
