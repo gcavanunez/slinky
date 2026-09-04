@@ -35,6 +35,28 @@ writeFileSync(
 );
 writeFileSync(join(host, ".local", "state.json"), `${JSON.stringify({ version: 1, disabledSkills: [], activeProfile: null, projectLinks: [], recentProjects: [] }, null, 2)}\n`);
 
+// The host tracks a bare remote that is one commit ahead, so the launch-time
+// store check has something to report and S has something to pull.
+const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com" };
+const git = (cwd: string, ...args: string[]) => {
+  const result = Bun.spawnSync(["git", ...args], { cwd, env: gitEnv });
+  if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+};
+const remote = join(root, "remote.git");
+const publisher = join(root, "publisher");
+writeFileSync(join(host, ".gitignore"), ".local/\n");
+git(host, "init", "-q", "-b", "main");
+git(host, "add", ".");
+git(host, "commit", "-qm", "init");
+git(root, "init", "-q", "--bare", remote);
+git(host, "remote", "add", "origin", remote);
+git(host, "push", "-qu", "origin", "main");
+git(root, "clone", "-q", remote, publisher);
+writeFileSync(join(publisher, "README.md"), "# catalog\n");
+git(publisher, "add", ".");
+git(publisher, "commit", "-qm", "add readme");
+git(publisher, "push", "-q");
+
 process.env.HOME = home;
 process.env.SLINKY_REPO = host;
 
@@ -427,6 +449,30 @@ test("groups fold from their heading and space toggles the whole set", async () 
     expect(off).toContain("0/2");
     await input(() => setup.mockInput.pressKey(" "));
     expect(await setup.waitForFrame((value) => value.includes("enabled local"))).toContain("2/2");
+  } finally {
+    destroy(setup);
+  }
+});
+
+test("launch reports unpulled store commits and S syncs them down", async () => {
+  const setup = await mount();
+  try {
+    // The store check is a background git fetch resolving outside act; give it
+    // real time inside act so its state update is flushed.
+    const settle = () => act(() => Bun.sleep(400));
+    await settle();
+    const behind = await setup.waitForFrame((value) => value.includes("⇣ 1 to pull"));
+    expect(behind).toContain("S sync");
+
+    await input(() => setup.mockInput.pressKey("S"));
+    await settle();
+    const done = await setup.waitForFrame((value) => value.includes("Sync") && value.includes("done"));
+    expect(done).toContain("esc close");
+    await closeOverlay(setup);
+
+    await settle();
+    expect(await setup.waitForFrame((value) => !value.includes("to pull"))).not.toContain("⇣");
+    expect(Bun.spawnSync(["git", "rev-list", "--count", "HEAD..origin/main"], { cwd: host }).stdout.toString().trim()).toBe("0");
   } finally {
     destroy(setup);
   }

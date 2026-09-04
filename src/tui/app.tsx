@@ -14,6 +14,10 @@ import type { DiffPager } from "../lib/diff.ts";
 import { defaultThemeId, getActiveProfile, themeIds } from "../domain/model.ts";
 import type { ThemeId } from "../domain/model.ts";
 import { addSkillFromSource, parseSkillsAddSource } from "../lib/skills-add.ts";
+import { syncCatalog } from "../lib/convergence.ts";
+import type { ConvergenceEvent } from "../lib/convergence.ts";
+import { compareWithUpstream, tryGitAsync } from "../lib/git.ts";
+import type { UpstreamComparison } from "../lib/git.ts";
 import { checkUpstream } from "../lib/update.ts";
 import type { UpstreamStatus } from "../lib/update.ts";
 import type { UnindexedSkill } from "../lib/adopt.ts";
@@ -53,6 +57,8 @@ import { IndexSkillModal } from "./modals/index-skill-modal.tsx";
 import { LinkModal } from "./modals/link-modal.tsx";
 import { ProfilesModal } from "./modals/profiles-modal.tsx";
 import { ProjectSkillModal } from "./modals/project-skill-modal.tsx";
+import { SyncModal } from "./modals/sync-modal.tsx";
+import type { SyncFlow } from "./modals/sync-modal.tsx";
 import { ThemeModal } from "./modals/theme-modal.tsx";
 import { UnindexedSkillModal } from "./modals/unindexed-skill-modal.tsx";
 import {
@@ -117,7 +123,11 @@ type Interaction =
   | { kind: "theme"; index: number; saved: ThemeId }
   | { kind: "diff"; row: CatalogRow; result: DiffResult }
   | { kind: "link"; row: CatalogRow; flow: LinkFlow }
-  | { kind: "index"; skill: UnindexedSkill; flow: IndexFlow };
+  | { kind: "index"; skill: UnindexedSkill; flow: IndexFlow }
+  | { kind: "sync"; flow: SyncFlow };
+
+/** What we know about the store's tracking branch; "checking" until the background fetch answers. */
+type StoreStatus = { kind: "checking" } | { kind: "failed"; message: string } | UpstreamComparison;
 
 type CheckForUpstream = (manifest: Catalog["manifest"], signal: AbortSignal) => Promise<RunResult<ReadonlyArray<UpstreamStatus>>>;
 
@@ -146,6 +156,8 @@ function keymapStateFor(interaction: Interaction, textInputActive: boolean): App
       return { ...inactive, overlayActive: true, profilesActive: true };
     case "diff":
       return { ...inactive, overlayActive: true, diffActive: true };
+    case "sync":
+      return interaction.flow.running ? inactive : { ...inactive, overlayActive: true };
     case "link":
     case "index":
       return inactive;
@@ -210,6 +222,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
   const [filterText, setFilterText] = useState("");
   const [docFind, setDocFind] = useState<{ typing: boolean; query: string }>({ typing: false, query: "" });
   const [showFrontmatter, setShowFrontmatter] = useState(false);
+  const [store, setStore] = useState<StoreStatus>({ kind: "checking" });
   const [flash, setFlash] = useState<{ text: string; error?: boolean } | null>(null);
   const [previewState, setPreviewState] = useState<{ skill: string | null; file: number; restore: number }>({ skill: null, file: 0, restore: 0 });
   const [themeId, setThemeId] = useState<ThemeId>(() => {
@@ -222,6 +235,8 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
   const mounted = useRef(true);
   const notificationTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const indexTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const syncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const storeGeneration = useRef(0);
   const upstreamGeneration = useRef(0);
   const upstreamAbort = useRef<AbortController | null>(null);
   const previewScroll = useRef<ScrollBoxRenderable | null>(null);
@@ -244,8 +259,23 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
       upstreamAbort.current?.abort();
       if (notificationTimer.current) clearTimeout(notificationTimer.current);
       if (indexTimer.current) clearTimeout(indexTimer.current);
+      if (syncTimer.current) clearTimeout(syncTimer.current);
+      storeGeneration.current += 1;
     };
   }, []);
+
+  // Is the store behind its upstream? Runs off the render path so a slow remote
+  // costs nothing visible; the result is a notice, never a block. Checked on
+  // launch, on r, and after a sync, not on every catalog mutation.
+  const checkStore = () => {
+    const generation = ++storeGeneration.current;
+    setStore({ kind: "checking" });
+    void runPromiseResult(compareWithUpstream(catalog.repo, tryGitAsync)).then((outcome) => {
+      if (!mounted.current || generation !== storeGeneration.current) return;
+      setStore(outcome.ok ? outcome.value : { kind: "failed", message: outcome.message });
+    });
+  };
+  useEffect(checkStore, [catalog.repo]);
 
   /** Switch the live palette; the state change re-renders every consumer of `colors`. */
   const previewTheme = (id: ThemeId) => {
@@ -739,6 +769,27 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
     } else previewScroll.current?.scrollTo(last ? previewScroll.current.scrollHeight : 0);
   };
 
+  const runStoreSync = () => {
+    const events: ConvergenceEvent[] = [];
+    setInteraction({ kind: "sync", flow: { events: [], running: true } });
+    // Let the modal paint before git and the reconcile block the loop.
+    syncTimer.current = setTimeout(() => {
+      syncTimer.current = null;
+      if (!mounted.current) return;
+      const outcome = runSyncResult(
+        syncCatalog({
+          onEvent: (event) => {
+            events.push(event);
+          },
+        }),
+      );
+      if (!mounted.current) return;
+      setInteraction({ kind: "sync", flow: { events: [...events], running: false, error: outcome.ok ? undefined : outcome.message } });
+      refresh();
+      checkStore();
+    }, 0);
+  };
+
   const runAppCommand = (command: AppCommand, key: KeyEvent): void => {
     switch (command) {
       case "app.copy-or-quit":
@@ -954,6 +1005,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
         return;
       case "catalog.refresh":
         refresh();
+        checkStore();
         notify("refreshed");
         return;
       case "skill.edit":
@@ -997,6 +1049,9 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
         })();
         return;
       }
+      case "store.sync":
+        runStoreSync();
+        return;
       case "theme.open": {
         const saved = catalog.theme ?? themeId;
         setInteraction({ kind: "theme", index: Math.max(0, themeIds.indexOf(themeId)), saved });
@@ -1163,6 +1218,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
     }
   }
   const activeProfile = getActiveProfile(catalog.manifest, catalog.state);
+  const storeBehind = store.kind === "compared" && store.behind > 0;
   const tabs = (
     <box height={1} width="100%" flexDirection="row" justifyContent="space-between">
       <box height={1} flexDirection="row">
@@ -1189,10 +1245,23 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
         })}
         <PlainLine text="│" fg={colors.separator} />
       </box>
-      {activeProfile && !tiny ? (
+      {!tiny ? (
         <text wrapMode="none" truncate>
-          <span fg={colors.muted}>{"profile "}</span>
-          <span fg={colors.count}>{activeProfile}</span>
+          {storeBehind ? (
+            <>
+              <span fg={colors.yellow}>{`⇣ ${store.behind} to pull`}</span>
+              <span fg={colors.muted}>{" · "}</span>
+              <span fg={colors.count}>S</span>
+              <span fg={colors.muted}>{" sync"}</span>
+              {activeProfile ? <span fg={colors.separator}>{"  │  "}</span> : null}
+            </>
+          ) : null}
+          {activeProfile ? (
+            <>
+              <span fg={colors.muted}>{"profile "}</span>
+              <span fg={colors.count}>{activeProfile}</span>
+            </>
+          ) : null}
           <span> </span>
         </text>
       ) : null}
@@ -1321,6 +1390,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
         { key: "a", label: "index", when: currentUnindexedSkill !== undefined },
         { key: "e", label: "edit", when: editableSkillPath !== null },
         { key: "i", label: "details" },
+        { key: "S", label: "sync", when: storeBehind },
         { key: "1/2", label: "view" },
         { key: "/", label: panel === "content" ? "search" : "filter" },
         { key: "n/N", label: "match", when: docFind.query.length > 0 },
@@ -1357,6 +1427,8 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
         return <LinkModal cols={cols} rows={rowsAvail} row={interaction.row} flow={interaction.flow} recents={catalog.state.recentProjects} />;
       case "index":
         return <IndexSkillModal cols={cols} rows={rowsAvail} skill={interaction.skill} flow={interaction.flow} />;
+      case "sync":
+        return <SyncModal cols={cols} rows={rowsAvail} flow={interaction.flow} />;
       default:
         return assertNever(interaction);
     }

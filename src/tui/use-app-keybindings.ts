@@ -58,6 +58,7 @@ export type AppCommand =
   | "upstream.check"
   | "profiles.open"
   | "theme.open"
+  | "store.sync"
   | "selection.open"
   | "selection.toggle"
   | "skill.details"
@@ -124,6 +125,7 @@ const listCommands: ReadonlyArray<CommandDefinition> = [
   { name: "upstream.check", title: "Check upstream", keys: ["u"] },
   { name: "profiles.open", title: "Open profiles", keys: ["p"] },
   { name: "theme.open", title: "Open theme picker", keys: ["t"] },
+  { name: "store.sync", title: "Sync the catalog store", keys: ["shift+s"] },
   { name: "selection.open", title: "Open selection", keys: ["return", "enter"] },
   { name: "selection.toggle", title: "Toggle selection", keys: ["space"] },
   { name: "skill.details", title: "Show skill details", keys: ["i"] },

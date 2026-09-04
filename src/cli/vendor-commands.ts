@@ -175,7 +175,7 @@ export const updateCommand = Command.make(
         if (store.kind === "unreachable") console.log(c.yellow(`could not reach ${store.upstream} to check for catalog changes: ${store.detail}`));
 
         if (input.check) {
-          if (storeBehind) console.log(c.yellow(`catalog store is ${store.behind} commit(s) behind ${store.upstream}; run \`slinky pull\` to bring them down`));
+          if (storeBehind) console.log(c.yellow(`catalog store is ${store.behind} commit(s) behind ${store.upstream}; run \`slinky sync\` to bring them down`));
           else if (store.kind === "compared") console.log(c.dim(`catalog store is up to date with ${store.upstream}`));
           console.log(c.dim("comparing persisted upstream hashes against GitHub…"));
           const statuses = yield* checkUpstream(manifest);
@@ -212,7 +212,7 @@ export const updateCommand = Command.make(
 
         // 1. preflight: the committed baseline is the snapshot we diff against
         if (storeBehind && !input.force) {
-          return yield* bail(`catalog store is ${store.behind} commit(s) behind ${store.upstream}; run \`slinky pull\` first (--force to override)`);
+          return yield* bail(`catalog store is ${store.behind} commit(s) behind ${store.upstream}; run \`slinky sync\` first (--force to override)`);
         }
         const hostLock = yield* ensureHostSkillLock(manifest);
         if (hostLock.changed && !input.force) {

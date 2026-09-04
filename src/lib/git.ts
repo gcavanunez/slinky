@@ -1,19 +1,46 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Effect } from "effect";
 import { ExternalToolError, OperationFailed } from "../domain/model.ts";
 
-/** Run Git without inheriting repository variables from the caller. */
-export const tryGit = Effect.fn("Git.try")(function* (repo: string, args: ReadonlyArray<string>) {
+export interface GitResult {
+  readonly status: number | null;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
+export type GitRunner = (repo: string, args: ReadonlyArray<string>) => Effect.Effect<GitResult, ExternalToolError>;
+
+/** Git must see only the target repo, not GIT_DIR and friends inherited from a hook or an editor. */
+function gitEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX"]) {
     delete env[name];
   }
-  const result = yield* Effect.sync(() => spawnSync("git", ["--literal-pathspecs", ...args], { cwd: repo, encoding: "utf8", env }));
+  return env;
+}
+
+/** Run Git without inheriting repository variables from the caller. */
+export const tryGit: GitRunner = Effect.fn("Git.try")(function* (repo: string, args: ReadonlyArray<string>) {
+  const result = yield* Effect.sync(() => spawnSync("git", ["--literal-pathspecs", ...args], { cwd: repo, encoding: "utf8", env: gitEnv() }));
   if (result.error) return yield* Effect.fail(new ExternalToolError({ tool: "git", message: result.error.message }));
   return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+});
+
+/** Same as tryGit but yields to the event loop while git runs, so a renderer keeps painting during a fetch. */
+export const tryGitAsync: GitRunner = Effect.fn("Git.tryAsync")(function* (repo: string, args: ReadonlyArray<string>) {
+  return yield* Effect.callback<GitResult, ExternalToolError>((resume) => {
+    const child = spawn("git", ["--literal-pathspecs", ...args], { cwd: repo, env: gitEnv(), stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk));
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => (stderr += chunk));
+    child.on("error", (error) => resume(Effect.fail(new ExternalToolError({ tool: "git", message: error.message }))));
+    child.on("close", (status) => resume(Effect.succeed({ status, stdout, stderr })));
+    return Effect.sync(() => child.kill());
+  });
 });
 
 export const runGit = Effect.fn("Git.run")(function* (repo: string, args: ReadonlyArray<string>) {
@@ -61,17 +88,25 @@ export type UpstreamComparison =
  * without a branch or upstream is not an error here; callers decide whether
  * that matters. A failed fetch (offline, auth) reports as unreachable.
  */
-export const compareWithUpstream = Effect.fn("Git.compareWithUpstream")(function* (repo: string) {
-  const branch = yield* tryGit(repo, ["branch", "--show-current"]);
+export const compareWithUpstream = Effect.fn("Git.compareWithUpstream")(function* (repo: string, git: GitRunner = tryGit) {
+  const run = Effect.fn("Git.compareWithUpstream.run")(function* (args: ReadonlyArray<string>) {
+    const result = yield* git(repo, args);
+    if (result.status !== 0) {
+      const detail = (result.stderr || result.stdout || "").trim();
+      return yield* Effect.fail(new ExternalToolError({ tool: "git", message: detail || `git exited with ${result.status ?? "unknown"}` }));
+    }
+    return result;
+  });
+  const branch = yield* git(repo, ["branch", "--show-current"]);
   const none: UpstreamComparison = { kind: "no-upstream" };
   if (branch.status !== 0 || !branch.stdout.trim()) return none;
-  const upstreamRef = yield* tryGit(repo, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]);
+  const upstreamRef = yield* git(repo, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]);
   if (upstreamRef.status !== 0) return none;
   const upstream = upstreamRef.stdout.trim();
   const name = branch.stdout.trim();
-  const remote = (yield* runGit(repo, ["config", "--get", `branch.${name}.remote`])).stdout.trim();
-  const mergeRef = (yield* runGit(repo, ["config", "--get", `branch.${name}.merge`])).stdout.trim();
-  const fetched = yield* tryGit(repo, ["fetch", "--quiet", remote, mergeRef]);
+  const remote = (yield* run(["config", "--get", `branch.${name}.remote`])).stdout.trim();
+  const mergeRef = (yield* run(["config", "--get", `branch.${name}.merge`])).stdout.trim();
+  const fetched = yield* git(repo, ["fetch", "--quiet", remote, mergeRef]);
   if (fetched.status !== 0) {
     const unreachable: UpstreamComparison = {
       kind: "unreachable",
@@ -80,7 +115,7 @@ export const compareWithUpstream = Effect.fn("Git.compareWithUpstream")(function
     };
     return unreachable;
   }
-  const counts = (yield* runGit(repo, ["rev-list", "--left-right", "--count", "HEAD...FETCH_HEAD"])).stdout.trim().split(/\s+/);
+  const counts = (yield* run(["rev-list", "--left-right", "--count", "HEAD...FETCH_HEAD"])).stdout.trim().split(/\s+/);
   const ahead = Number.parseInt(counts[0] ?? "", 10);
   const behind = Number.parseInt(counts[1] ?? "", 10);
   if (!Number.isFinite(ahead) || !Number.isFinite(behind)) {

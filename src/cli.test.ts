@@ -1355,11 +1355,11 @@ printf '%s\\n' '# beta upstream' > "$HOME/.agents/skills/beta/SKILL.md"
 
     const behind = runCli(subscriber, subscriberHome, ["update", "--check"]);
     expect(behind.exitCode).toBe(0);
-    expect(behind.stdout.toString()).toContain("catalog store is 1 commit(s) behind origin/main; run `slinky pull`");
+    expect(behind.stdout.toString()).toContain("catalog store is 1 commit(s) behind origin/main; run `slinky sync`");
 
     const refused = runCli(subscriber, subscriberHome, ["update"]);
     expect(refused.exitCode).toBe(1);
-    expect(refused.stderr.toString()).toContain("catalog store is 1 commit(s) behind origin/main; run `slinky pull` first (--force to override)");
+    expect(refused.stderr.toString()).toContain("catalog store is 1 commit(s) behind origin/main; run `slinky sync` first (--force to override)");
     // Nothing was fetched into the working branch: the guard only compares.
     expect(runGit(subscriber, ["rev-list", "--count", "HEAD..origin/main"]).stdout.toString().trim()).toBe("1");
   });
