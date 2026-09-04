@@ -1093,6 +1093,8 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
   const nameW = Math.max(4, catalogWidth - 29);
   // " " + fold glyph 2 + label + drift 2 + count 6 + " "
   const groupW = Math.max(4, catalogWidth - 12);
+  // Same cells as a skill row, so each label ends where its column does.
+  const columnHeader = `${fitCell("on", 5, "right")}${fitCell("live", 8, "right")}${fitCell("project", 9, "right")}${fitCell("up", 3, "right")} `;
   const fileTreeMode: "split" | "hidden" | "only" = tiny ? (panel === "files" ? "only" : "hidden") : "split";
 
   const upstreamCell = (row: CatalogRow): { label: string; fg: string } =>
@@ -1350,7 +1352,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
       width: catalogWidth,
       node: (
         <box width={catalogWidth} height={viewport} flexDirection="column" onMouseDown={clickPanel("catalog")} onMouseScroll={wheelList(moveRow)}>
-          <PaneTitle title="catalog" detail={detail || undefined} focused={panel === "catalog"} />
+          <PaneTitle title="catalog" detail={detail || undefined} columns={columnHeader} width={catalogWidth} focused={panel === "catalog"} />
           {listRows}
           {matchCount === 0 ? <TextLine fg={colors.muted}>{filterText ? " - No skills match." : " - No skills."}</TextLine> : null}
         </box>
