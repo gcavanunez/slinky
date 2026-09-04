@@ -15,7 +15,7 @@ import { ensureHostSkillLock, seedGlobalSkillLock } from "../lib/skill-lock.ts";
 import { assertVendorUpdatePlacements, findDriftingVendors, vendorRestore } from "../lib/vendor-ops.ts";
 import { baselineDirty, checkUpstream, detectChanges, runSkillsUpdate } from "../lib/update.ts";
 import { c, pad } from "./render.ts";
-import { bail, forceFlag, loadHostState, openPager, optionalSkillsArg, pagerFlags, renderPatch, selectPager, skillsArg, runSyncCmd, withRepo } from "./shared.ts";
+import { bail, forceFlag, loadHostState, openPager, optionalSkillsArg, pagerFlags, renderPatch, selectPager, skillsArg, runSyncCmd, withRepo, switchFlag } from "./shared.ts";
 
 interface DiffOptions {
   readonly patch: boolean;
@@ -80,7 +80,7 @@ export const diffCommand = Command.make(
   "diff",
   {
     names: Argument.string("skill").pipe(Argument.variadic()),
-    patch: Flag.boolean("patch").pipe(Flag.withDescription("Print the full unified diff")),
+    patch: switchFlag("patch", "Print the full unified diff"),
     ...pagerFlags,
   },
   ({ names, patch, ...choice }) =>
@@ -154,8 +154,8 @@ export const updateCommand = Command.make(
   "update",
   {
     names: Argument.string("skill").pipe(Argument.variadic()),
-    check: Flag.boolean("check").pipe(Flag.withDescription("Compare installed skills against upstream (no changes)")),
-    yes: Flag.boolean("yes").pipe(Flag.withAlias("y"), Flag.withDescription("Accept every changed skill without prompting")),
+    check: switchFlag("check", "Compare installed skills against upstream (no changes)"),
+    yes: switchFlag("yes", "Accept every changed skill without prompting").pipe(Flag.withAlias("y")),
     force: forceFlag,
     ...pagerFlags,
   },

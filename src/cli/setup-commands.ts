@@ -13,7 +13,7 @@ import { isRepoDir, Paths, RepoResolution } from "../lib/paths.ts";
 import { ensureHostSkillLock, seedGlobalSkillLock } from "../lib/skill-lock.ts";
 import { cmdVerify } from "./catalog-commands.ts";
 import { c, pad, renderAdoptions } from "./render.ts";
-import { bail, dryRunFlag, forceFlag, loadHostState, runSyncCmd, withRepo } from "./shared.ts";
+import { bail, dryRunFlag, forceFlag, loadHostState, runSyncCmd, withRepo, switchFlag } from "./shared.ts";
 
 function resolveDir(p: string): string {
   try {
@@ -162,8 +162,8 @@ const bootstrapFlow = (input: BootstrapInput) =>
 export const bootstrapCommand = Command.make(
   "bootstrap",
   {
-    adoptAll: Flag.boolean("adopt-all").pipe(Flag.withDescription("Adopt every foreign host skill into the repo")),
-    noBackup: Flag.boolean("no-backup").pipe(Flag.withDescription("Skip the tar backup of the global skill dirs")),
+    adoptAll: switchFlag("adopt-all", "Adopt every foreign host skill into the repo"),
+    noBackup: switchFlag("no-backup", "Skip the tar backup of the global skill dirs"),
     dryRun: dryRunFlag,
     force: forceFlag,
     clone: Flag.string("clone").pipe(Flag.optional, Flag.withDescription("Fresh machine: git URL of the skills repo to clone first")),

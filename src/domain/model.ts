@@ -454,35 +454,35 @@ const MissingFileError = Schema.instanceOf(Error).check(Schema.makeFilter((error
 export const isMissingFile = Schema.is(MissingFileError);
 
 /** Expected domain-rule failure (unknown skill, drift guard, existing destination, ...). */
-export class OperationFailed extends Schema.TaggedErrorClass<OperationFailed>()("OperationFailed", {
+export class OperationFailed extends Schema.TaggedError<OperationFailed>()("OperationFailed", {
   message: Schema.String,
 }) {}
 
 /** An external tool (git, tar, npx skills, ...) failed at an adapter boundary. */
-export class ExternalToolError extends Schema.TaggedErrorClass<ExternalToolError>()("ExternalToolError", {
+export class ExternalToolError extends Schema.TaggedError<ExternalToolError>()("ExternalToolError", {
   tool: Schema.String,
   message: Schema.String,
 }) {}
 
-export class ManifestFileError extends Schema.TaggedErrorClass<ManifestFileError>()("ManifestFileError", FileErrorFields) {
+export class ManifestFileError extends Schema.TaggedError<ManifestFileError>()("ManifestFileError", FileErrorFields) {
   constructor(path: string, operation: FileOperation, detail: string) {
     super(fileErrorArgs(path, operation, detail));
   }
 }
 
-export class StateFileError extends Schema.TaggedErrorClass<StateFileError>()("StateFileError", FileErrorFields) {
+export class StateFileError extends Schema.TaggedError<StateFileError>()("StateFileError", FileErrorFields) {
   constructor(path: string, operation: FileOperation, detail: string) {
     super(fileErrorArgs(path, operation, detail));
   }
 }
 
-export class ConfigFileError extends Schema.TaggedErrorClass<ConfigFileError>()("ConfigFileError", FileErrorFields) {
+export class ConfigFileError extends Schema.TaggedError<ConfigFileError>()("ConfigFileError", FileErrorFields) {
   constructor(path: string, operation: FileOperation, detail: string) {
     super(fileErrorArgs(path, operation, detail));
   }
 }
 
-export class SkillLockDecodeError extends Schema.TaggedErrorClass<SkillLockDecodeError>()("SkillLockDecodeError", FileErrorFields) {
+export class SkillLockDecodeError extends Schema.TaggedError<SkillLockDecodeError>()("SkillLockDecodeError", FileErrorFields) {
   constructor(path: string, operation: FileOperation, detail: string) {
     super(fileErrorArgs(path, operation, detail));
   }

@@ -10,7 +10,7 @@ import { contentHash } from "../lib/hash.ts";
 import { HostRepo } from "../lib/paths.ts";
 import { runSkillsAdd } from "../lib/update.ts";
 import { c, pad, renderAdoptions } from "./render.ts";
-import { bail, forceFlag, loadHostState, runSyncCmd, withRepo } from "./shared.ts";
+import { bail, forceFlag, loadHostState, runSyncCmd, withRepo, switchFlag } from "./shared.ts";
 
 /** Where an adoptable skill currently sits, for display. */
 const originLabel = (cand: ForeignSkill): string => (cand.location === "staged" ? ".agents/skills" : `~/.${cand.location}`);
@@ -137,8 +137,8 @@ export const adoptCommand = Command.make(
   "adopt",
   {
     names: Argument.string("skill").pipe(Argument.variadic()),
-    all: Flag.boolean("all").pipe(Flag.withDescription("Adopt every candidate")),
-    local: Flag.boolean("local").pipe(Flag.withDescription("Adopt as locally-authored skills into skills/")),
+    all: switchFlag("all", "Adopt every candidate"),
+    local: switchFlag("local", "Adopt as locally-authored skills into skills/"),
     owner: Flag.string("owner").pipe(Flag.optional, Flag.withDescription("Vendor owner directory when provenance is unknown")),
     force: forceFlag,
   },

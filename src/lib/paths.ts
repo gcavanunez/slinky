@@ -218,7 +218,7 @@ export class Paths extends Context.Service<Paths, PathsInterface>()("slinky/Path
   );
 }
 
-export class RepoNotFoundError extends Schema.TaggedErrorClass<RepoNotFoundError>()("RepoNotFoundError", {
+export class RepoNotFoundError extends Schema.TaggedError<RepoNotFoundError>()("RepoNotFoundError", {
   message: Schema.String,
 }) {
   constructor() {

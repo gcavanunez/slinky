@@ -85,14 +85,17 @@ export const selectPager = Effect.fn("Cli.selectPager")(function* (choice: Pager
   return selected[0] ?? paths.diffPager;
 });
 
-export const dryRunFlag = Flag.boolean("dry-run").pipe(Flag.withDescription("Print prospective actions without changing anything"));
-export const forceFlag = Flag.boolean("force").pipe(Flag.withDescription("Override drift and safety guards"));
-export const pullFlag = Flag.boolean("pull").pipe(Flag.withDescription("Compatibility flag; sync now pulls automatically"));
+/** An off-by-default switch: present means true, absent means false. */
+export const switchFlag = (name: string, description: string) => Flag.boolean(name).pipe(Flag.withDefault(false), Flag.withDescription(description));
+
+export const dryRunFlag = switchFlag("dry-run", "Print prospective actions without changing anything");
+export const forceFlag = switchFlag("force", "Override drift and safety guards");
+export const pullFlag = switchFlag("pull", "Compatibility flag; sync now pulls automatically");
 export const skillsArg = Argument.string("skill").pipe(Argument.variadic({ min: 1 }));
 export const optionalSkillsArg = Argument.string("skill").pipe(Argument.variadic({ min: 0 }));
 export const pagerFlags = {
   pager: Flag.choice("pager", ["hunk", "delta"] as const).pipe(Flag.optional, Flag.withDescription("Open the patch in hunk or delta")),
-  hunk: Flag.boolean("hunk").pipe(Flag.withDescription("Open the patch in Hunk")),
-  delta: Flag.boolean("delta").pipe(Flag.withDescription("Open the patch in Delta")),
-  noPager: Flag.boolean("no-pager").pipe(Flag.withDescription("Print inline, ignoring the configured diff pager")),
+  hunk: switchFlag("hunk", "Open the patch in Hunk"),
+  delta: switchFlag("delta", "Open the patch in Delta"),
+  noPager: switchFlag("no-pager", "Print inline, ignoring the configured diff pager"),
 };

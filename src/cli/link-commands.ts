@@ -1,20 +1,20 @@
 import { Effect, Option } from "effect";
-import { Argument, Command, Flag } from "effect/unstable/cli";
+import { Argument, Command } from "effect/unstable/cli";
 import { linkProjectSkill, unlinkProjectSkill } from "../lib/catalog-actions.ts";
 import { checkLink } from "../lib/linker.ts";
 import { HostRepo } from "../lib/paths.ts";
 import { c } from "./render.ts";
-import { forceFlag, loadHostState, withRepo } from "./shared.ts";
+import { forceFlag, loadHostState, withRepo, switchFlag } from "./shared.ts";
 
 export const linkCommand = Command.make(
   "link",
   {
     skill: Argument.string("skill"),
     project: Argument.string("project").pipe(Argument.optional),
-    copy: Flag.boolean("copy").pipe(Flag.withDescription("Copy the skill into the project (default)")),
-    symlink: Flag.boolean("symlink").pipe(Flag.withDescription("Symlink the skill into the project")),
-    noExclude: Flag.boolean("no-exclude").pipe(Flag.withDescription("Do not add entries to .git/info/exclude")),
-    noClaude: Flag.boolean("no-claude").pipe(Flag.withDescription("Do not create the .claude/skills symlink")),
+    copy: switchFlag("copy", "Copy the skill into the project (default)"),
+    symlink: switchFlag("symlink", "Symlink the skill into the project"),
+    noExclude: switchFlag("no-exclude", "Do not add entries to .git/info/exclude"),
+    noClaude: switchFlag("no-claude", "Do not create the .claude/skills symlink"),
   },
   (input) =>
     withRepo(
@@ -59,7 +59,7 @@ export const unlinkCommand = Command.make(
     ),
 ).pipe(Command.withDescription("Remove a recorded project link"));
 
-export const linksCommand = Command.make("links", { check: Flag.boolean("check").pipe(Flag.withDescription("Verify each link's health")) }, ({ check }) =>
+export const linksCommand = Command.make("links", { check: switchFlag("check", "Verify each link's health") }, ({ check }) =>
   withRepo(
     Effect.gen(function* () {
       const { manifest, state } = yield* loadHostState;

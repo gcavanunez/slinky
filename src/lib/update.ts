@@ -52,7 +52,7 @@ const GitHubContents = Schema.Array(
   }),
 );
 
-export class GitHubError extends Schema.TaggedErrorClass<GitHubError>()("GitHubError", {
+export class GitHubError extends Schema.TaggedError<GitHubError>()("GitHubError", {
   message: Schema.String,
 }) {}
 

@@ -46,11 +46,11 @@
     "prepublishOnly": "printf '%s\n' 'Publish dist/npm/main, not the source checkout.' && exit 1"
   },
   "dependencies": {
-    "@effect/platform-bun": "4.0.0-beta.102",
+    "@effect/platform-bun": "4.0.0-rc.112",
     "@opentui/core": "0.5.9",
     "@opentui/keymap": "0.5.9",
     "@opentui/react": "0.5.9",
-    "effect": "4.0.0-beta.102",
+    "effect": "4.0.0-rc.112",
     "react": "^19.2.7"
   },
   "devDependencies": {
