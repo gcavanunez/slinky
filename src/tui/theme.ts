@@ -35,7 +35,7 @@ export interface ThemeDefinition {
   readonly colors: ColorPalette;
 }
 
-// Palettes adapted from ghui (MIT, Kit Langton).
+// Palettes adapted from ghui (https://github.com/kitlangton/ghui), MIT; notice in LICENSE.
 export const themes = {
   slinky: {
     name: "Slinky",

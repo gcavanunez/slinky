@@ -337,6 +337,10 @@ slinky verify
 
 See [docs/data-contract.md](docs/data-contract.md) for the validated manifest, state, and config formats.
 
+## Acknowledgements
+
+The TUI's look, and its colour themes, are adapted from Kit Langton's [ghui](https://github.com/kitlangton/ghui) and [mail-control](https://github.com/kitlangton/mail-control) (MIT).
+
 ## Development
 
 ```bash
