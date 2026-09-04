@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { fileTreeRows, fitCell, markdownBody, markdownHeadingLines, printable, searchMatchLines, singleLinePaste, windowOf } from "./util.ts";
+import { fileTreeRows, fitCell, markdownBody, markdownFrontmatter, markdownHeadingLines, printable, searchMatchLines, singleLinePaste, windowOf } from "./util.ts";
 
 describe("fitCell", () => {
   test("pads to width", () => {
@@ -94,6 +94,13 @@ describe("markdownHeadingLines", () => {
 describe("markdownBody", () => {
   test("removes SKILL.md frontmatter from the rendered body", () => {
     expect(markdownBody("SKILL.md", "---\nname: test\ndescription: Test.\n---\n\n# Test\n")).toBe("\n# Test\n");
+  });
+
+  test("shows frontmatter as a yaml fence when asked", () => {
+    const content = "---\nname: test\ndescription: Test.\n---\n\n# Test\n";
+    expect(markdownBody("SKILL.md", content, true)).toBe("```yaml\nname: test\ndescription: Test.\n```\n\n# Test\n");
+    expect(markdownFrontmatter(content)).toBe("name: test\ndescription: Test.");
+    expect(markdownFrontmatter("# Test\n")).toBeNull();
   });
 
   test("preserves related Markdown and body horizontal rules", () => {

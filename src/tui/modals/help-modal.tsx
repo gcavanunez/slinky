@@ -20,6 +20,7 @@ export function HelpModal({ cols, rows, editor }: { cols: number; rows: number; 
         ["ctrl-e / ctrl-y", "scroll the document one line from any panel"],
         ["J / K, PgUp/PgDn", "scroll the document from any panel"],
         ["[ / ]", "previous / next related file"],
+        ["f", "show / hide SKILL.md frontmatter"],
         ["{ / }", "previous / next markdown heading in the document"],
         ["n / N", "next / previous document search match"],
         ["enter", "fold a group, enter the next panel, or from the document show details"],

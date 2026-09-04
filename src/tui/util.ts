@@ -98,10 +98,24 @@ export function fileTreeRows(files: ReadonlyArray<string>): FileTreeRow[] {
   return rows;
 }
 
-/** Hide skill metadata from the rendered document while preserving the source file itself. */
-export function markdownBody(file: string, content: string): string {
+const frontmatterPattern = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
+
+/** The YAML between a leading `---` pair, or null when the file has none. */
+export function markdownFrontmatter(content: string): string | null {
+  return frontmatterPattern.exec(content)?.[1] ?? null;
+}
+
+/**
+ * The document to render for a skill file. SKILL.md metadata is hidden by
+ * default; when shown it becomes a fenced yaml block so it reads as metadata
+ * rather than as a horizontal rule and stray text.
+ */
+export function markdownBody(file: string, content: string, showFrontmatter = false): string {
   if (file !== "SKILL.md") return content;
-  return content.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "");
+  const frontmatter = markdownFrontmatter(content);
+  if (frontmatter === null) return content;
+  const body = content.replace(frontmatterPattern, "");
+  return showFrontmatter ? `\`\`\`yaml\n${frontmatter}\n\`\`\`\n${body}` : body;
 }
 
 /** Zero-based line indices whose text contains `query` (case-insensitive). */

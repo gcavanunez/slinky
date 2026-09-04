@@ -33,6 +33,7 @@ export type AppCommand =
   | "document.previous-heading"
   | "document.next-file"
   | "document.previous-file"
+  | "document.frontmatter"
   | "document.scroll-three-down"
   | "document.scroll-three-up"
   | "document.page-down"
@@ -100,6 +101,7 @@ const listCommands: ReadonlyArray<CommandDefinition> = [
   { name: "document.previous-heading", title: "Previous document heading", keys: ["{", "shift+["] },
   { name: "document.next-file", title: "Next related file", keys: ["]"] },
   { name: "document.previous-file", title: "Previous related file", keys: ["["] },
+  { name: "document.frontmatter", title: "Show or hide SKILL.md frontmatter", keys: ["f"] },
   { name: "document.scroll-three-down", title: "Scroll document down", keys: ["shift+j"] },
   { name: "document.scroll-three-up", title: "Scroll document up", keys: ["shift+k"] },
   { name: "document.page-down", title: "Scroll document one page down", keys: ["pagedown"] },

@@ -22,7 +22,19 @@ import type { RunResult } from "./runtime.ts";
 import { Divider, Filler, HintRow, PaneTitle, PlainLine, SeparatorColumn, TextLine } from "./components.tsx";
 import type { Junction } from "./components.tsx";
 import { activeTheme, colors, createMarkdownSyntax, mixHex, setActiveTheme, themes } from "./theme.ts";
-import { centerCell, clamp, fileTreeRows, fitCell, markdownBody, markdownHeadingLines, printable, searchMatchLines, singleLinePaste, windowOf } from "./util.ts";
+import {
+  centerCell,
+  clamp,
+  fileTreeRows,
+  fitCell,
+  markdownBody,
+  markdownFrontmatter,
+  markdownHeadingLines,
+  printable,
+  searchMatchLines,
+  singleLinePaste,
+  windowOf,
+} from "./util.ts";
 import { scrollRowForLine } from "./doc-nav.ts";
 import type { DocRenderable } from "./doc-nav.ts";
 import { copySelection, handleSelectionKey } from "./clipboard.ts";
@@ -197,6 +209,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
   const [filterMode, setFilterMode] = useState(false);
   const [filterText, setFilterText] = useState("");
   const [docFind, setDocFind] = useState<{ typing: boolean; query: string }>({ typing: false, query: "" });
+  const [showFrontmatter, setShowFrontmatter] = useState(false);
   const [flash, setFlash] = useState<{ text: string; error?: boolean } | null>(null);
   const [previewState, setPreviewState] = useState<{ skill: string | null; file: number; restore: number }>({ skill: null, file: 0, restore: 0 });
   const [themeId, setThemeId] = useState<ThemeId>(() => {
@@ -351,9 +364,10 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
     if (!previewData) return null;
     const extension = extname(previewData.file).slice(1).toLowerCase();
     const markdown = extension === "md" || extension === "mdx";
-    const content = markdown ? markdownBody(previewData.file, previewData.content) : previewData.content;
+    const content = markdown ? markdownBody(previewData.file, previewData.content, showFrontmatter) : previewData.content;
     return { markdown, lines: content.split("\n") };
-  }, [previewData]);
+  }, [previewData, showFrontmatter]);
+  const hasFrontmatter = previewData?.file === "SKILL.md" && markdownFrontmatter(previewData.content) !== null;
   const docMatches = useMemo(() => (docLines && docFind.query ? searchMatchLines(docLines.lines, docFind.query) : []), [docLines, docFind.query]);
   const docHeadings = useMemo(() => (docLines?.markdown ? markdownHeadingLines(docLines.lines) : []), [docLines]);
 
@@ -634,7 +648,8 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
       setPreviewState({ skill: currentName ?? null, file: previewFile, restore: previewScroll.current?.scrollTop ?? 0 });
     }
     setPanel(next);
-    setLayout(null);
+    // Moving within the zoomed primary (document <-> files) keeps the zoom.
+    setLayout((current) => (current === primaryPanel(next) ? current : null));
   };
   const selectRow = (index: number) => {
     const row = rows[clamp(index, 0, Math.max(0, rows.length - 1))];
@@ -877,6 +892,10 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
         return;
       case "document.previous-file":
         if (previewData) moveFile(-1);
+        return;
+      case "document.frontmatter":
+        if (!hasFrontmatter) return notify("no frontmatter in this document", true);
+        setShowFrontmatter((value) => !value);
         return;
       case "document.scroll-three-down":
         previewScroll.current?.scrollBy(3);
@@ -1293,6 +1312,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
         { key: "x", label: layout ? "restore" : "zoom" },
         { key: "</>", label: "size", when: !layout && split },
         { key: "[/]", label: "file", when: showContent && previewData !== null },
+        { key: "f", label: showFrontmatter ? "hide meta" : "meta", when: showContent && hasFrontmatter },
         {
           key: "space",
           label: currentRow?.kind === "group" ? "toggle all" : "toggle",
@@ -1377,6 +1397,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
           fileTreeMode={fileTreeMode}
           height={viewport}
           findTitle={findTitle}
+          showFrontmatter={showFrontmatter}
           onFocusPanel={(target) => clickPanel(target)()}
           onSelectFile={(index) => {
             if (interaction.kind === "browse") selectFile(index);
@@ -1435,6 +1456,7 @@ function PreviewPanel({
   fileTreeMode,
   height,
   findTitle,
+  showFrontmatter,
   onFocusPanel,
   onSelectFile,
   onScrollFiles,
@@ -1451,6 +1473,7 @@ function PreviewPanel({
   fileTreeMode: "split" | "hidden" | "only";
   height: number;
   findTitle: string | undefined;
+  showFrontmatter: boolean;
   onFocusPanel: (panel: "content" | "files") => void;
   onSelectFile: (index: number) => void;
   onScrollFiles: (delta: number) => void;
@@ -1486,11 +1509,11 @@ function PreviewPanel({
   const treeWin = windowOf(0, treeIndex, treeRows.length, treeViewport);
   const extension = extname(data.file).slice(1).toLowerCase();
   const markdown = extension === "md" || extension === "mdx";
-  const content = markdown ? markdownBody(data.file, data.content) : data.content;
+  const content = markdown ? markdownBody(data.file, data.content, showFrontmatter) : data.content;
   const showTree = fileTreeMode !== "hidden";
   const treeW = treeOnly ? width : fileTreeWidth;
   const docW = treeOnly ? 0 : showTree ? Math.max(1, width - treeW - 1) : width;
-  const docDetail = [treeOnly ? "" : `· ${data.file}`, findTitle ?? ""].filter(Boolean).join("  ");
+  const docDetail = [treeOnly ? "" : `· ${data.file}`, showFrontmatter && markdown ? "· meta" : "", findTitle ?? ""].filter(Boolean).join("  ");
 
   const tree = showTree ? (
     <box
