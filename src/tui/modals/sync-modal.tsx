@@ -17,7 +17,8 @@ const WIDTH = 86;
 
 /** Body rows the log gets at this terminal height; App uses it to clamp scrolling. */
 export function syncLogRows(rows: number): number {
-  return Math.max(3, rows - 9);
+  // Modal chrome with a subtitle is 7 rows plus a 2-row screen margin.
+  return Math.max(1, rows - 9);
 }
 
 export function syncLogLength(flow: SyncFlow): number {

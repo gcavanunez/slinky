@@ -3,8 +3,13 @@ import { Modal, TextLine } from "../components.tsx";
 import { colors } from "../theme.ts";
 import { fitCell } from "../util.ts";
 
-export function HelpModal({ cols, rows, editor }: { cols: number; rows: number; editor: string }) {
-  const groups: Array<{ title: string; lines: Array<[string, string]> }> = [
+/** Help body rows at this terminal height; App clamps scrolling with it. */
+export function helpRows(rows: number): number {
+  return Math.max(1, rows - 8);
+}
+
+function helpGroups(editor: string): Array<{ title: string; lines: Array<[string, string]> }> {
+  return [
     {
       title: "NAVIGATE",
       lines: [
@@ -56,21 +61,44 @@ export function HelpModal({ cols, rows, editor }: { cols: number; rows: number; 
       ],
     },
   ];
-  const bodyRows = groups.reduce((sum, group, index) => sum + group.lines.length + 1 + (index > 0 ? 1 : 0), 0);
+}
+
+/** Rows the help body needs: every line plus a blank between groups. */
+export function helpLength(editor: string): number {
+  return helpGroups(editor).reduce((sum, group, index) => sum + group.lines.length + 1 + (index > 0 ? 1 : 0), 0);
+}
+
+export function HelpModal({ cols, rows, editor, scroll }: { cols: number; rows: number; editor: string; scroll: number }) {
+  const groups = helpGroups(editor);
+  const all = groups.flatMap((group, index) => [
+    ...(index > 0 ? [<box key={`gap-${group.title}`} height={1} />] : []),
+    <TextLine key={group.title} fg={colors.muted}>
+      {group.title}
+    </TextLine>,
+    ...group.lines.map(([keys, label]) => (
+      <TextLine key={keys}>
+        <span fg={colors.count}>{fitCell(keys, 18)}</span>
+        <span fg={colors.text}>{label}</span>
+      </TextLine>
+    )),
+  ]);
+  const bodyRows = Math.min(all.length, helpRows(rows));
+  const start = Math.max(0, Math.min(scroll, all.length - bodyRows));
+  const overflow = all.length > bodyRows;
   return (
-    <Modal title="Help" width={76} cols={cols} rows={rows} bodyRows={bodyRows} footer={[{ key: "? / esc", label: "close" }]}>
-      {groups.flatMap((group, index) => [
-        ...(index > 0 ? [<box key={`gap-${group.title}`} height={1} />] : []),
-        <TextLine key={group.title} fg={colors.muted}>
-          {group.title}
-        </TextLine>,
-        ...group.lines.map(([keys, label]) => (
-          <TextLine key={keys}>
-            <span fg={colors.count}>{fitCell(keys, 18)}</span>
-            <span fg={colors.text}>{label}</span>
-          </TextLine>
-        )),
-      ])}
+    <Modal
+      title="Help"
+      headerRight={overflow ? `${start + 1}-${start + bodyRows}/${all.length}` : undefined}
+      width={76}
+      cols={cols}
+      rows={rows}
+      bodyRows={bodyRows}
+      footer={[
+        { key: "j/k", label: "scroll", when: overflow },
+        { key: "? / esc", label: "close" },
+      ]}
+    >
+      {all.slice(start, start + bodyRows)}
     </Modal>
   );
 }

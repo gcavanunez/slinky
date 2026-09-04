@@ -54,21 +54,20 @@ export function SeparatorColumn(props: { height: number; junctions?: ReadonlyArr
 
 /**
  * Uppercase pane heading; accent+bold when the pane has focus. `columns` is a
- * right-aligned column header, laid out to end at `width` like the rows beneath;
- * the detail gives way to it when both cannot fit.
+ * right-aligned column header, laid out to end at `width` like the rows beneath.
+ * When both cannot fit, the columns give way: the detail may carry an active
+ * filter, which the user must be able to see.
  */
 export function PaneTitle(props: { title: string; detail?: string; columns?: string; focused: boolean; width?: number; onMouseDown?: (event: MouseEvent) => void }) {
   const title = props.title.toUpperCase();
-  let detail = props.detail;
+  const detail = props.detail;
+  let columns = props.columns;
   let gap = "";
-  if (props.columns && props.width) {
+  if (columns && props.width) {
     const leftLen = 1 + title.length + (detail ? 1 + detail.length : 0);
-    let pad = props.width - leftLen - props.columns.length;
-    if (pad < 1 && detail) {
-      detail = undefined;
-      pad = props.width - 1 - title.length - props.columns.length;
-    }
-    gap = " ".repeat(Math.max(1, pad));
+    const pad = props.width - leftLen - columns.length;
+    if (pad < 1) columns = undefined;
+    else gap = " ".repeat(pad);
   }
   return (
     <TextLine width={props.width} onMouseDown={props.onMouseDown}>
@@ -77,7 +76,7 @@ export function PaneTitle(props: { title: string; detail?: string; columns?: str
         {title}
       </span>
       {detail ? <span fg={props.focused ? colors.count : colors.separator}>{` ${detail}`}</span> : null}
-      {props.columns ? <span fg={props.focused ? colors.muted : colors.separator}>{`${gap}${props.columns}`}</span> : null}
+      {columns ? <span fg={props.focused ? colors.muted : colors.separator}>{`${gap}${columns}`}</span> : null}
     </TextLine>
   );
 }

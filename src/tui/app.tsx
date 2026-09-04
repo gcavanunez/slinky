@@ -52,7 +52,7 @@ import { useAppKeybindings } from "./use-app-keybindings.ts";
 import type { AppCommand, AppKeymapState } from "./use-app-keybindings.ts";
 import { DetailModal } from "./modals/detail-modal.tsx";
 import { DiffModal } from "./modals/diff-modal.tsx";
-import { HelpModal } from "./modals/help-modal.tsx";
+import { HelpModal, helpLength, helpRows } from "./modals/help-modal.tsx";
 import { IndexSkillModal } from "./modals/index-skill-modal.tsx";
 import { LinkModal } from "./modals/link-modal.tsx";
 import { ProfilesModal } from "./modals/profiles-modal.tsx";
@@ -86,6 +86,7 @@ function skillItemName(item: SkillItem): string {
 }
 
 interface AuthorGroup {
+  id: string;
   label: string;
   enabledCount: number | null;
   hasDrift: boolean;
@@ -117,7 +118,7 @@ export interface IndexFlow {
 
 type Interaction =
   | { kind: "browse" }
-  | { kind: "help" }
+  | { kind: "help"; scroll: number }
   | { kind: "detail"; item: SkillItem }
   | { kind: "profiles"; index: number }
   | { kind: "theme"; index: number; saved: ThemeId }
@@ -148,7 +149,7 @@ function keymapStateFor(interaction: Interaction, textInputActive: boolean): App
     case "browse":
       return { ...inactive, listActive: !textInputActive };
     case "help":
-      return { ...inactive, overlayActive: true, helpActive: true };
+      return { ...inactive, overlayActive: true, helpActive: true, logActive: true };
     case "detail":
       return { ...inactive, overlayActive: true };
     case "profiles":
@@ -230,6 +231,8 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
     setActiveTheme(id);
     return id;
   });
+  // What config.json holds. Paths reads the file once at startup, so track saves here.
+  const [savedTheme, setSavedTheme] = useState<ThemeId>(() => catalog.theme ?? defaultThemeId);
 
   const quitting = useRef(false);
   const mounted = useRef(true);
@@ -237,6 +240,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
   const indexTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const syncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const storeGeneration = useRef(0);
+  const storeAbort = useRef<AbortController | null>(null);
   const upstreamGeneration = useRef(0);
   const upstreamAbort = useRef<AbortController | null>(null);
   const previewScroll = useRef<ScrollBoxRenderable | null>(null);
@@ -261,6 +265,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
       if (indexTimer.current) clearTimeout(indexTimer.current);
       if (syncTimer.current) clearTimeout(syncTimer.current);
       storeGeneration.current += 1;
+      storeAbort.current?.abort();
     };
   }, []);
 
@@ -269,9 +274,13 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
   // launch, on r, and after a sync, not on every catalog mutation.
   const checkStore = () => {
     const generation = ++storeGeneration.current;
+    storeAbort.current?.abort();
+    const controller = new AbortController();
+    storeAbort.current = controller;
     setStore({ kind: "checking" });
-    void runPromiseResult(compareWithUpstream(catalog.repo, tryGitAsync)).then((outcome) => {
+    void runPromiseResult(compareWithUpstream(catalog.repo, tryGitAsync), { signal: controller.signal }).then((outcome) => {
       if (!mounted.current || generation !== storeGeneration.current) return;
+      storeAbort.current = null;
       setStore(outcome.ok ? outcome.value : { kind: "failed", message: outcome.message });
     });
   };
@@ -295,23 +304,10 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
     const projectNames = new Set(catalog.projectSkills.map((skill) => skill.name));
     const availableRows = filtered.filter(isSkillAvailableHere);
     const availableUnindexed = unindexed.filter((skill) => projectNames.has(skill.name));
-    const available: SkillItem[] = [
-      ...availableRows.map((row) => ({ kind: "skill" as const, row })),
-      ...availableUnindexed.map((skill) => ({ kind: "unindexed-skill" as const, skill })),
-      ...projectOnly.map((skill) => ({ kind: "project-skill" as const, skill })),
-    ].sort((a, b) => skillItemName(a).localeCompare(skillItemName(b)));
-    if (catalogView === "available") {
-      out.push({
-        label: "all available",
-        enabledCount: null,
-        hasDrift: availableRows.some((row) => row.live === "drift"),
-        rows: null,
-        skills: available,
-      });
-    }
     const scopedUnindexed = catalogView === "available" ? availableUnindexed : unindexed;
     if (scopedUnindexed.length > 0) {
       out.push({
+        id: "unindexed",
         label: "unindexed",
         enabledCount: null,
         hasDrift: false,
@@ -321,6 +317,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
     }
     if (projectOnly.length > 0) {
       out.push({
+        id: "project",
         label: "project only",
         enabledCount: null,
         hasDrift: false,
@@ -344,6 +341,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
     for (const key of keys) {
       const rows = byOwner.get(key) ?? [];
       out.push({
+        id: `owner:${key}`,
         label: key,
         enabledCount: rows.filter((r) => r.enabled).length,
         hasDrift: rows.some((row) => row.live === "drift"),
@@ -702,19 +700,19 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
   /** h in the catalog: from an item jump to its heading; from an open heading fold it. */
   const foldCurrent = () => {
     if (!currentRow) return;
-    if (currentRow.kind === "item") setSelection({ group: currentRow.group.label });
-    else if (!currentRow.collapsed && !filterText) setFolded(currentRow.group.label, true);
+    if (currentRow.kind === "item") setSelection({ group: currentRow.group.id });
+    else if (!currentRow.collapsed && !filterText) setFolded(currentRow.group.id, true);
   };
   const toggleFold = () => {
     if (!currentRow || currentRow.kind !== "group") return;
     if (filterText) return notify("clear the filter to fold groups", true);
-    setFolded(currentRow.group.label, !currentRow.collapsed);
+    setFolded(currentRow.group.id, !currentRow.collapsed);
   };
   const toggleFoldAll = () => {
     if (filterText) return notify("clear the filter to fold groups", true);
-    const allFolded = groups.every((group) => collapsed.has(group.label));
-    setCollapsed(allFolded ? new Set() : new Set(groups.map((group) => group.label)));
-    if (!allFolded && currentGroup) setSelection({ group: currentGroup.label });
+    const allFolded = groups.every((group) => collapsed.has(group.id));
+    setCollapsed(allFolded ? new Set() : new Set(groups.map((group) => group.id)));
+    if (!allFolded && currentGroup) setSelection({ group: currentGroup.id });
   };
   const moveFile = (delta: number) => {
     if (!previewData) return;
@@ -863,8 +861,13 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
         if (interaction.kind === "theme") {
           const id = themeIds[interaction.index] ?? defaultThemeId;
           const outcome = runSyncResult(saveTheme(id));
-          if (outcome.ok) notify(`theme set to ${id}`);
-          else notify(outcome.message, true);
+          if (outcome.ok) {
+            setSavedTheme(id);
+            notify(`theme set to ${id}`);
+          } else {
+            previewTheme(interaction.saved);
+            notify(outcome.message, true);
+          }
           setInteraction({ kind: "browse" });
           return;
         }
@@ -890,7 +893,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
       }
       case "panel.next":
         // l on a folded heading opens it before moving right.
-        if (panel === "catalog" && currentRow?.kind === "group" && currentRow.collapsed) setFolded(currentRow.group.label, false);
+        if (panel === "catalog" && currentRow?.kind === "group" && currentRow.collapsed) setFolded(currentRow.group.id, false);
         else movePanel(1);
         return;
       case "panel.previous":
@@ -1012,7 +1015,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
         editCurrentSkill();
         return;
       case "help.open":
-        setInteraction({ kind: "help" });
+        setInteraction({ kind: "help", scroll: 0 });
         return;
       case "upstream.check": {
         notify("checking upstream\u2026");
@@ -1058,6 +1061,13 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
       case "log.page-up":
       case "log.top":
       case "log.bottom": {
+        if (interaction.kind === "help") {
+          const page = helpRows(rowsAvail);
+          const delta = { "log.down": 1, "log.up": -1, "log.page-down": page, "log.page-up": -page, "log.top": -Infinity, "log.bottom": Infinity }[command];
+          const top = Math.max(0, helpLength(catalog.editorCommand[0]) - page);
+          setInteraction({ kind: "help", scroll: clamp(interaction.scroll + delta, 0, top) });
+          return;
+        }
         if (interaction.kind !== "sync") return;
         const page = syncLogRows(rowsAvail);
         const top = Math.max(0, syncLogLength(interaction.flow) - page);
@@ -1069,8 +1079,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
         return;
       }
       case "theme.open": {
-        const saved = catalog.theme ?? themeId;
-        setInteraction({ kind: "theme", index: Math.max(0, themeIds.indexOf(themeId)), saved });
+        setInteraction({ kind: "theme", index: Math.max(0, themeIds.indexOf(themeId)), saved: savedTheme });
         return;
       }
       case "profiles.open":
@@ -1314,7 +1323,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
       const count = group.skills.length;
       const status = group.enabledCount === null ? `${count}` : `${group.enabledCount}/${count}`;
       return (
-        <TextLine key={`g:${group.label}`} fg={focusedRow ? colors.selectedText : colors.count} bg={bg} onMouseDown={onMouseDown}>
+        <TextLine key={`g:${group.id}`} fg={focusedRow ? colors.selectedText : colors.count} bg={bg} onMouseDown={onMouseDown}>
           <span> </span>
           <span fg={focusedRow ? colors.accent : colors.separator}>{row.collapsed ? "▸ " : "▾ "}</span>
           <span attributes={TextAttributes.BOLD}>{fitCell(group.label, groupW)}</span>
@@ -1350,7 +1359,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
     const skill = item.row;
     const placement = placementCell(projectPlacement(skill));
     return (
-      <TextLine key={`s:${row.group.label}:${skill.name}`} fg={fg} bg={bg} onMouseDown={onMouseDown}>
+      <TextLine key={`s:${row.group.id}:${skill.name}`} fg={fg} bg={bg} onMouseDown={onMouseDown}>
         <span>{"   "}</span>
         <span attributes={bold}>{fitCell(skill.name, nameW)}</span>
         <span fg={skill.enabled ? colors.green : colors.muted}>{fitCell(skill.enabled ? "on" : "off", 5, "right")}</span>
@@ -1421,7 +1430,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
       case "browse":
         return null;
       case "help":
-        return <HelpModal cols={cols} rows={rowsAvail} editor={catalog.editorCommand[0]} />;
+        return <HelpModal cols={cols} rows={rowsAvail} editor={catalog.editorCommand[0]} scroll={interaction.scroll} />;
       case "detail":
         switch (interaction.item.kind) {
           case "skill":

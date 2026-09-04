@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { firstItemIndex, selectionOf, treeIndex, treeRows } from "./catalog-tree.ts";
 
 const groups = [
-  { label: "local", skills: ["alpha", "beta"] },
-  { label: "acme", skills: ["gamma"] },
+  { id: "local", label: "local", skills: ["alpha", "beta"] },
+  { id: "acme", label: "acme", skills: ["gamma"] },
 ];
 const name = (item: string) => item;
 

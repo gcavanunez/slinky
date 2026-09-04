@@ -457,16 +457,21 @@ test("groups fold from their heading and space toggles the whole set", async () 
 test("launch reports unpulled store commits and S syncs them down", async () => {
   const setup = await mount();
   try {
-    // The store check is a background git fetch resolving outside act; give it
-    // real time inside act so its state update is flushed.
-    const settle = () => act(() => Bun.sleep(400));
-    await settle();
-    const behind = await setup.waitForFrame((value) => value.includes("⇣ 1 to pull"));
+    // The store check and the sync resolve outside act; poll inside act so
+    // their state updates are flushed, however long git takes under load.
+    const settleUntil = async (predicate: (frame: string) => boolean) => {
+      const deadline = Date.now() + 10_000;
+      while (!predicate(setup.captureCharFrame())) {
+        if (Date.now() > deadline) throw new Error(`timed out; last frame:\n${setup.captureCharFrame()}`);
+        await act(() => Bun.sleep(50));
+      }
+      return setup.captureCharFrame();
+    };
+    const behind = await settleUntil((value) => value.includes("⇣ 1 to pull"));
     expect(behind).toContain("S sync");
 
     await input(() => setup.mockInput.pressKey("S"));
-    await settle();
-    const done = await setup.waitForFrame((value) => value.includes("Sync") && value.includes("done"));
+    const done = await settleUntil((value) => value.includes("Sync") && value.includes("done"));
     expect(done).toContain("esc close");
 
     // The log is longer than the modal: g jumps to the top, G back to the tail.
@@ -476,8 +481,7 @@ test("launch reports unpulled store commits and S syncs them down", async () => 
     expect(await setup.waitForFrame((value) => !value.includes("done · 1-"))).toContain("RESTORE");
     await closeOverlay(setup);
 
-    await settle();
-    expect(await setup.waitForFrame((value) => !value.includes("to pull"))).not.toContain("⇣");
+    expect(await settleUntil((value) => !value.includes("to pull"))).not.toContain("⇣");
     expect(Bun.spawnSync(["git", "rev-list", "--count", "HEAD..origin/main"], { cwd: host }).stdout.toString().trim()).toBe("0");
   } finally {
     destroy(setup);

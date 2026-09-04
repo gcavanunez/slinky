@@ -161,11 +161,11 @@ slinky restore all      # restore every drifting live vendor from the catalog
 
 Pager mode opens one clean patch stream for all selected drifting skills. Use `--hunk` for interactive review, `--delta` for terminal rendering, or the equivalent `--pager hunk|delta` form.
 
-In the TUI, dragging across text copies it automatically. `Ctrl-C` copies an active text selection; without a selection it retains the normal quit behavior. `v` and `V` cycle forward or backward through three panes, a contextual two-pane layout, and the focused pane at full width; `<` and `>` resize the focused side of a two-pane split. On a local catalog skill or unindexed local skill, `e` suspends the TUI and opens the skill from the skills host directory. The editor resolves from the configured `editor`, then `$VISUAL`, `$EDITOR`, and `nvim`; vendor, staging-inbox, and project-only copies are excluded.
+In the TUI, dragging across text copies it automatically. `Ctrl-C` copies an active text selection; without a selection it retains the normal quit behavior. The catalog is one tree of author headings with their skills beneath: `space` on a heading toggles the whole group, `z` folds it, `Z` folds or unfolds all. `v` and `V` cycle between the split, catalog only, and document only; `<` and `>` resize the split. `f` shows `SKILL.md` frontmatter, `t` picks a theme, and `S` runs `slinky sync` when the tab row reports commits waiting on the store. On a local catalog skill or unindexed local skill, `e` suspends the TUI and opens the skill from the skills host directory. The editor resolves from the configured `editor`, then `$VISUAL`, `$EDITOR`, and `nvim`; vendor, staging-inbox, and project-only copies are excluded.
 
-In the TUI, author and category rows show a yellow `⚠` when any of their visible skills has confirmed drift. Select a drifting vendor skill and press `d`. The drift review accepts `a` to vendor the live global copy, `r` to restore the repository baseline, `h` to open Hunk, and `d` to open Delta.
+In the TUI, group headings show a yellow `⚠` when any of their visible skills has confirmed drift. Select a drifting vendor skill and press `d`. The drift review accepts `a` to vendor the live global copy, `r` to restore the repository baseline, `h` to open Hunk, and `d` to open Delta.
 
-Do not use `update --yes` unless the user explicitly wants every detected change accepted without individual review. Host baseline changes must be committed or stashed before updating.
+Do not use `update --yes` unless the user explicitly wants every detected change accepted without individual review. Host baseline changes must be committed or stashed before updating, and `update` refuses to run while the store has unpulled commits; run `slinky sync` first.
 
 ## Adopting Existing Skills
 

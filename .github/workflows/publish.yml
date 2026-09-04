@@ -11,6 +11,8 @@ permissions:
 
 jobs:
   verify:
+    # Forks inherit this workflow; only the canonical repo may publish.
+    if: github.repository == 'gcavanunez/slinky'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

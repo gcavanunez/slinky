@@ -3,11 +3,14 @@ import { getActiveProfile, getProfile } from "../../domain/model.ts";
 import { Modal, TextLine, modalInner } from "../components.tsx";
 import type { Catalog } from "../data.ts";
 import { colors } from "../theme.ts";
-import { fitCell } from "../util.ts";
+import { fitCell, windowOf } from "../util.ts";
 
 export function ProfilesModal({ cols, rows, catalog, names, index }: { cols: number; rows: number; catalog: Catalog; names: string[]; index: number }) {
   const { contentWidth } = modalInner(56, cols);
   const active = getActiveProfile(catalog.manifest, catalog.state);
+  // Modal chrome with a subtitle is 7 rows; keep the selection on screen.
+  const bodyRows = Math.max(1, Math.min(names.length, rows - 9));
+  const start = windowOf(0, index, names.length, bodyRows);
   return (
     <Modal
       title="Profiles"
@@ -16,14 +19,15 @@ export function ProfilesModal({ cols, rows, catalog, names, index }: { cols: num
       width={56}
       cols={cols}
       rows={rows}
-      bodyRows={names.length}
+      bodyRows={bodyRows}
       footer={[
         { key: "↑↓", label: "move" },
         { key: "enter", label: "apply" },
         { key: "esc", label: "close" },
       ]}
     >
-      {names.map((name, i) => {
+      {names.slice(start, start + bodyRows).map((name, offset) => {
+        const i = start + offset;
         const isSel = i === index;
         const isActive = active === name;
         const members = getProfile(catalog.manifest, name) ?? [];

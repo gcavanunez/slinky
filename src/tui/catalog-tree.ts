@@ -5,6 +5,8 @@
  */
 
 export interface TreeGroup {
+  /** Stable identity for folding and selection; labels are for display and may repeat. */
+  readonly id: string;
   readonly label: string;
   readonly skills: ReadonlyArray<unknown>;
 }
@@ -15,7 +17,7 @@ export type TreeRow<Group extends TreeGroup> =
   | { readonly kind: "group"; readonly group: Group; readonly collapsed: boolean }
   | { readonly kind: "item"; readonly group: Group; readonly item: ItemOf<Group> };
 
-/** Where the cursor is: a heading (no item) or an item within its group. */
+/** Where the cursor is: a heading (no item) or an item within its group, by group id. */
 export interface TreeSelection {
   readonly group: string;
   readonly item?: string;
@@ -25,7 +27,7 @@ export interface TreeSelection {
 export function treeRows<Group extends TreeGroup>(groups: ReadonlyArray<Group>, collapsed: ReadonlySet<string>, expandAll: boolean): TreeRow<Group>[] {
   const rows: TreeRow<Group>[] = [];
   for (const group of groups) {
-    const folded = !expandAll && collapsed.has(group.label);
+    const folded = !expandAll && collapsed.has(group.id);
     rows.push({ kind: "group", group, collapsed: folded });
     if (folded) continue;
     // SAFETY: ItemOf<Group> is defined as the element type of Group["skills"], so the
@@ -47,13 +49,13 @@ export function firstItemIndex<Group extends TreeGroup>(rows: ReadonlyArray<Tree
 export function treeIndex<Group extends TreeGroup>(rows: ReadonlyArray<TreeRow<Group>>, selection: TreeSelection | null, itemName: (item: ItemOf<Group>) => string): number {
   if (selection === null) return firstItemIndex(rows);
   if (selection.item !== undefined) {
-    const exact = rows.findIndex((row) => row.kind === "item" && row.group.label === selection.group && itemName(row.item) === selection.item);
+    const exact = rows.findIndex((row) => row.kind === "item" && row.group.id === selection.group && itemName(row.item) === selection.item);
     if (exact !== -1) return exact;
   }
-  const heading = rows.findIndex((row) => row.kind === "group" && row.group.label === selection.group);
+  const heading = rows.findIndex((row) => row.kind === "group" && row.group.id === selection.group);
   return heading === -1 ? firstItemIndex(rows) : heading;
 }
 
 export function selectionOf<Group extends TreeGroup>(row: TreeRow<Group>, itemName: (item: ItemOf<Group>) => string): TreeSelection {
-  return row.kind === "group" ? { group: row.group.label } : { group: row.group.label, item: itemName(row.item) };
+  return row.kind === "group" ? { group: row.group.id } : { group: row.group.id, item: itemName(row.item) };
 }
