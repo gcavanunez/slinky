@@ -1,3 +1,4 @@
+import { Match } from "effect";
 import type { AdoptionResult } from "../lib/adopt.ts";
 import type { ActionResult } from "../lib/catalog-actions.ts";
 import type { ConvergenceEvent } from "../lib/convergence.ts";
@@ -21,16 +22,14 @@ export function renderConvergenceEvent(event: ConvergenceEvent): void {
     if (output) console.log(output);
     return;
   }
-  const rendered =
-    event.tone === "dim"
-      ? c.dim(event.message)
-      : event.tone === "error"
-        ? c.red(event.message)
-        : event.tone === "success"
-          ? c.green(event.message)
-          : event.tone === "warning"
-            ? c.yellow(event.message)
-            : event.message;
+  const rendered = Match.value(event.tone).pipe(
+    Match.when("dim", () => c.dim(event.message)),
+    Match.when("error", () => c.red(event.message)),
+    Match.when("success", () => c.green(event.message)),
+    Match.when("warning", () => c.yellow(event.message)),
+    Match.when(Match.undefined, () => event.message),
+    Match.exhaustive,
+  );
   console.log(rendered);
 }
 
