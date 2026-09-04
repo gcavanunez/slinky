@@ -4,7 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Config, Context, Data, Effect, Layer, Option, Schema } from "effect";
 import { ConfigFileError, errorDetail, isMissingFile, SlinkyConfig, version } from "../domain/model.ts";
-import type { DiffPager } from "../domain/model.ts";
+import type { DiffPager, ThemeId } from "../domain/model.ts";
 import { resolveEditor } from "./editor.ts";
 import type { EditorCommand } from "./editor.ts";
 
@@ -47,6 +47,7 @@ interface ConfigFields {
   readonly host: string;
   readonly diffPager?: DiffPager | undefined;
   readonly editor?: string | undefined;
+  readonly theme?: ThemeId | undefined;
 }
 
 /** Build a config value, omitting unset optional fields rather than writing nulls. */
@@ -54,7 +55,8 @@ function configWith(fields: ConfigFields): SlinkyConfig {
   const base = { version, host: fields.host };
   const withPager = fields.diffPager === undefined ? base : { ...base, diffPager: fields.diffPager };
   const withEditor = fields.editor === undefined ? withPager : { ...withPager, editor: fields.editor };
-  return Schema.decodeUnknownSync(SlinkyConfig)(withEditor);
+  const withTheme = fields.theme === undefined ? withEditor : { ...withEditor, theme: fields.theme };
+  return Schema.decodeUnknownSync(SlinkyConfig)(withTheme);
 }
 
 /** Read and decode the config file. Absent is not an error; the caller falls back to discovery. */
@@ -125,11 +127,15 @@ export interface PathsInterface {
   readonly editor: string | undefined;
   /** Editor argv actually spawned: config, then $VISUAL, then $EDITOR, then nvim. */
   readonly editorCommand: EditorCommand;
+  /** Configured TUI theme; undefined means the default palette. */
+  readonly theme: ThemeId | undefined;
   readonly saveHostConfig: (repo: string) => Effect.Effect<void, ConfigFileError>;
   /** Persist the preferred diff pager; null clears it. */
   readonly saveDiffPager: (pager: DiffPager | null) => Effect.Effect<void, ConfigFileError>;
   /** Persist the preferred editor command; null clears it. */
   readonly saveEditor: (editor: string | null) => Effect.Effect<void, ConfigFileError>;
+  /** Persist the TUI theme; null clears it. */
+  readonly saveTheme: (theme: ThemeId | null) => Effect.Effect<void, ConfigFileError>;
 }
 
 export class Paths extends Context.Service<Paths, PathsInterface>()("slinky/Paths") {
@@ -180,6 +186,10 @@ export class Paths extends Context.Service<Paths, PathsInterface>()("slinky/Path
         yield* changeConfig((current) => ({ ...current, editor: editor ?? undefined }));
       });
 
+      const saveTheme = Effect.fn("Paths.saveTheme")(function* (theme: ThemeId | null) {
+        yield* changeConfig((current) => ({ ...current, theme: theme ?? undefined }));
+      });
+
       return Paths.of({
         home,
         slinkyConfig,
@@ -198,9 +208,11 @@ export class Paths extends Context.Service<Paths, PathsInterface>()("slinky/Path
           visual: Option.getOrUndefined(visual),
           env: Option.getOrUndefined(envEditor),
         }),
+        theme: loaded.config?.theme,
         saveHostConfig,
         saveDiffPager,
         saveEditor,
+        saveTheme,
       });
     }),
   );

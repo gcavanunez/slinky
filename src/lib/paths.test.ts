@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ConfigProvider, Effect, Layer } from "effect";
@@ -69,6 +69,41 @@ describe("skills host discovery", () => {
 
     expect(RepoResolution.$is("Invalid")(resolution)).toBe(true);
     if (RepoResolution.$is("Invalid")(resolution)) expect(resolution.error._tag).toBe("ConfigFileError");
+  });
+});
+
+describe("theme preference", () => {
+  test("round-trips through config.json without disturbing other fields", () => {
+    const root = mkdtempSync(join(tmpdir(), "slinky-theme-"));
+    roots.push(root);
+    const home = join(root, "home");
+    const host = join(root, "skills-host");
+    mkdirSync(host);
+    writeFileSync(join(host, "skills.manifest.json"), "{}\n");
+    mkdirSync(join(home, ".config", "slinky"), { recursive: true });
+    writeFileSync(join(home, ".config", "slinky", "config.json"), `${JSON.stringify({ version: 1, host, editor: "code -w" })}\n`);
+    const layer = Paths.layer.pipe(Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({ HOME: home, SLINKY_REPO: "" }))));
+    const pathsIn = (effect: (paths: Paths["Service"]) => Effect.Effect<unknown, unknown>) => Effect.runSync(Effect.flatMap(Paths, effect).pipe(Effect.provide(layer)));
+
+    expect(pathsIn((paths) => Effect.succeed(paths.theme))).toBeUndefined();
+    pathsIn((paths) => paths.saveTheme("nord"));
+    expect(pathsIn((paths) => Effect.succeed(paths.theme))).toBe("nord");
+    expect(JSON.parse(readFileSync(join(home, ".config", "slinky", "config.json"), "utf8"))).toEqual({ version: 1, host, editor: "code -w", theme: "nord" });
+
+    pathsIn((paths) => paths.saveTheme(null));
+    expect(JSON.parse(readFileSync(join(home, ".config", "slinky", "config.json"), "utf8"))).toEqual({ version: 1, host, editor: "code -w" });
+  });
+
+  test("rejects an unknown theme id", () => {
+    const root = mkdtempSync(join(tmpdir(), "slinky-theme-bad-"));
+    roots.push(root);
+    const home = join(root, "home");
+    mkdirSync(join(home, ".config", "slinky"), { recursive: true });
+    writeFileSync(join(home, ".config", "slinky", "config.json"), `${JSON.stringify({ version: 1, host: "/x", theme: "neon" })}\n`);
+
+    const resolution = resolutionFor({ HOME: home, SLINKY_REPO: "" });
+
+    expect(RepoResolution.$is("Invalid")(resolution)).toBe(true);
   });
 });
 

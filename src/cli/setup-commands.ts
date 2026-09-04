@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { Effect, Option } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import packageJson from "../../package.json" with { type: "json" };
-import { alignStateWithManifest, getDisabledSkills } from "../domain/model.ts";
+import { alignStateWithManifest, defaultThemeId, getDisabledSkills, themeIds } from "../domain/model.ts";
 import { findForeign } from "../lib/adopt.ts";
 import { adoptSkills } from "../lib/adopt.ts";
 import { backupGlobalDirs } from "../lib/bootstrap.ts";
@@ -183,6 +183,7 @@ const configShow = Effect.gen(function* () {
   console.log(`${pad("diff-pager", 12)}${paths.diffPager ?? c.dim("(none: diffs print inline)")}`);
   const editorSource = paths.editor !== undefined ? "" : c.dim(`  (from ${process.env["VISUAL"] ? "$VISUAL" : process.env["EDITOR"] ? "$EDITOR" : "default"})`);
   console.log(`${pad("editor", 12)}${paths.editorCommand.join(" ")}${editorSource}`);
+  console.log(`${pad("theme", 12)}${paths.theme ?? c.dim(`(default: ${defaultThemeId})`)}`);
   console.log(c.dim(`\n${paths.slinkyConfig}`));
 });
 
@@ -218,9 +219,22 @@ const configEditorCommand = Command.make("editor", { value: Argument.string("com
   }),
 ).pipe(Command.withDescription('Show or set the editor for the TUI (e.g. "code -w", or none to fall back to $VISUAL/$EDITOR)'));
 
+const configThemeCommand = Command.make("theme", { value: Argument.choice("value", [...themeIds, "none"] as const).pipe(Argument.optional) }, ({ value }) =>
+  Effect.gen(function* () {
+    const paths = yield* Paths;
+    if (Option.isNone(value)) {
+      console.log(paths.theme ?? defaultThemeId);
+      return;
+    }
+    const next = value.value === "none" ? null : value.value;
+    yield* paths.saveTheme(next);
+    console.log(next === null ? `theme cleared; using ${defaultThemeId}` : `theme set to ${next}`);
+  }),
+).pipe(Command.withDescription("Show or set the TUI theme (press t in the TUI to preview; none restores the default)"));
+
 export const configCommand = Command.make("config", {}, () => configShow).pipe(
-  Command.withDescription("Show Slinky configuration or set the diff pager and editor"),
-  Command.withSubcommands([configDiffPagerCommand, configEditorCommand]),
+  Command.withDescription("Show Slinky configuration or set the diff pager, editor, and theme"),
+  Command.withSubcommands([configDiffPagerCommand, configEditorCommand, configThemeCommand]),
 );
 
 export const versionCommand = Command.make("version", {}, () => Effect.sync(() => console.log(`slinky ${packageJson.version}`))).pipe(

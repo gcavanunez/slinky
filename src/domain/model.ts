@@ -249,6 +249,40 @@ export const PersistedState = Schema.Union([StateV1, State]);
 export const DiffPager = Schema.Literals(["hunk", "delta"]);
 export type DiffPager = typeof DiffPager.Type;
 
+/** TUI colour themes. Palettes live in src/tui/theme.ts, keyed by these ids. */
+export const themeIds = [
+  "slinky",
+  "tokyo-night",
+  "tokyo-night-storm",
+  "catppuccin",
+  "catppuccin-latte",
+  "rose-pine",
+  "rose-pine-dawn",
+  "gruvbox",
+  "gruvbox-light",
+  "nord",
+  "dracula",
+  "kanagawa",
+  "one-dark",
+  "one-light",
+  "monokai",
+  "solarized-dark",
+  "solarized-light",
+  "everforest",
+  "vesper",
+  "vague",
+  "ayu",
+  "ayu-mirage",
+  "ayu-light",
+  "github-dark-dimmed",
+  "palenight",
+  "opencode",
+  "cursor",
+] as const;
+export const ThemeId = Schema.Literals(themeIds);
+export type ThemeId = typeof ThemeId.Type;
+export const defaultThemeId: ThemeId = "slinky";
+
 export const SlinkyConfig = Schema.Struct({
   version: Schema.Literal(version),
   host: HostPath,
@@ -256,6 +290,8 @@ export const SlinkyConfig = Schema.Struct({
   diffPager: Schema.optional(DiffPager),
   /** Editor command spec, flags included. Absent falls back to $VISUAL, $EDITOR, then nvim. */
   editor: Schema.optional(Schema.NonEmptyString.check(Schema.makeFilter((value) => value.trim() !== "", { expected: "a non-blank editor command" }))),
+  /** TUI theme. Absent means the default slinky palette. */
+  theme: Schema.optional(ThemeId),
 });
 export type SlinkyConfig = typeof SlinkyConfig.Type;
 

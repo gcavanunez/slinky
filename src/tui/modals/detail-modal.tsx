@@ -1,67 +1,70 @@
 /** @jsxImportSource @opentui/react */
+import type { ReactNode } from "react";
 import { formatUtc } from "../../domain/model.ts";
 import { liveColor, liveLabel } from "../app.tsx";
-import { Modal, TextLine } from "../components.tsx";
+import { Field, Modal, TextLine, modalInner } from "../components.tsx";
 import { linksForSkill, skillDescription } from "../data.ts";
 import type { Catalog, CatalogRow } from "../data.ts";
 import { colors } from "../theme.ts";
-import { fitCell } from "../util.ts";
+import { wrapText } from "../util.ts";
 
-export function DetailModal({ cols, row, catalog }: { cols: number; row: CatalogRow; catalog: Catalog }) {
+const WIDTH = 76;
+
+export function DetailModal({ cols, rows, row, catalog }: { cols: number; rows: number; row: CatalogRow; catalog: Catalog }) {
+  const { contentWidth } = modalInner(WIDTH, cols);
   const desc = skillDescription(catalog.repo, row.meta);
   const links = linksForSkill(catalog.state, row.name);
   const upstream = row.meta.origin === "vendor" ? row.meta.upstream : null;
   const source = upstream?.kind === "github" ? upstream.repository : upstream?.kind === "well-known" ? upstream.source : null;
   const sourceUrl = upstream?.kind === "unknown" ? null : upstream?.url;
-  const field = (label: string, value: string, fg: string = colors.text) => (
-    <TextLine key={label}>
-      <span fg={colors.muted}>{fitCell(label, 12)}</span>
-      <span fg={fg}>{value}</span>
-    </TextLine>
-  );
+
+  const here = row.projectLink
+    ? {
+        value: `${row.projectSkill ? `${row.projectLink.mode} · ${row.projectLink.excludedTargets.includes(`.agents/skills/${row.name}`) ? "hidden" : "tracked"}` : "missing"} · ${catalog.project}`,
+        fg: row.projectSkill ? colors.link : colors.red,
+      }
+    : row.projectSkill
+      ? {
+          value: `unmanaged (${[row.projectSkill.agents ? ".agents" : "", row.projectSkill.claude ? ".claude" : ""].filter(Boolean).join(" + ")}) · ${catalog.project}`,
+          fg: colors.yellow,
+        }
+      : { value: "not present", fg: colors.muted };
+
+  const lines: ReactNode[] = [];
+  if (desc) {
+    for (const [index, line] of wrapText(desc, contentWidth).entries()) lines.push(<TextLine key={`desc-${index}`}>{line}</TextLine>);
+    lines.push(<box key="desc-gap" height={1} />);
+  }
+  lines.push(<Field key="origin" label="origin" value={row.origin} />);
+  lines.push(<Field key="path" label="path" value={row.meta.path} />);
+  if (source) lines.push(<Field key="source" label="source" value={source} />);
+  if (sourceUrl) lines.push(<Field key="url" label="url" value={sourceUrl} fg={colors.link} />);
+  lines.push(<Field key="enabled" label="enabled" value={row.enabled ? "yes" : "no"} fg={row.enabled ? colors.green : colors.muted} />);
+  lines.push(<Field key="live" label="live" value={liveLabel[row.live]} fg={liveColor(row.live)} />);
+  lines.push(<Field key="claude" label="claude" value={row.claude ? "linked" : "not linked"} />);
+  lines.push(<Field key="here" label="here" value={here.value} fg={here.fg} />);
+  lines.push(<Field key="hash" label="hash" value={`${row.meta.contentHash.slice(0, 16)}\u2026`} />);
+  if (row.meta.origin === "vendor" && row.meta.vendoredAt) lines.push(<Field key="vendored" label="vendored" value={formatUtc(row.meta.vendoredAt).slice(0, 10)} />);
+  if (links.length > 0) {
+    lines.push(<box key="links-gap" height={1} />);
+    lines.push(
+      <TextLine key="links" fg={colors.muted}>
+        PROJECT LINKS
+      </TextLine>,
+    );
+    for (const link of links) {
+      lines.push(
+        <TextLine key={`link-${link.project}`}>
+          <span fg={colors.text}>{`  ${link.project}`}</span>
+          <span fg={colors.muted}>{` (${link.mode})`}</span>
+        </TextLine>,
+      );
+    }
+  }
+
   return (
-    <Modal title={row.name} width={76} cols={cols}>
-      {desc ? (
-        <box paddingBottom={1}>
-          <text fg={colors.text} wrapMode="word">
-            {desc}
-          </text>
-        </box>
-      ) : null}
-      {field("origin", row.origin)}
-      {field("path", row.meta.path)}
-      {source ? field("source", source) : null}
-      {sourceUrl ? field("url", sourceUrl, colors.accent) : null}
-      {field("enabled", row.enabled ? "yes" : "no", row.enabled ? colors.green : colors.muted)}
-      {field("live", liveLabel[row.live], liveColor[row.live])}
-      {field("claude", row.claude ? "linked" : "not linked")}
-      {row.projectLink
-        ? field(
-            "here",
-            `${row.projectSkill ? `${row.projectLink.mode} · ${row.projectLink.excludedTargets.includes(`.agents/skills/${row.name}`) ? "hidden" : "tracked"}` : "missing"} · ${catalog.project}`,
-            row.projectSkill ? colors.accent : colors.red,
-          )
-        : row.projectSkill
-          ? field(
-              "here",
-              `unmanaged (${[row.projectSkill.agents ? ".agents" : "", row.projectSkill.claude ? ".claude" : ""].filter(Boolean).join(" + ")}) · ${catalog.project}`,
-              colors.yellow,
-            )
-          : field("here", "not present", colors.muted)}
-      {field("hash", row.meta.contentHash.slice(0, 16) + "\u2026")}
-      {row.meta.origin === "vendor" && row.meta.vendoredAt ? field("vendored", formatUtc(row.meta.vendoredAt).slice(0, 10)) : null}
-      {links.length > 0 ? (
-        <box flexDirection="column" paddingTop={1}>
-          <TextLine fg={colors.muted}>{"project links:"}</TextLine>
-          {links.map((l) => (
-            <TextLine key={l.project}>
-              <span fg={colors.text}>{`  ${l.project}`}</span>
-              <span fg={colors.muted}>{` (${l.mode})`}</span>
-            </TextLine>
-          ))}
-        </box>
-      ) : null}
-      <TextLine fg={colors.muted}>{"esc to close"}</TextLine>
+    <Modal title={row.name} headerRight={row.origin} width={WIDTH} cols={cols} rows={rows} bodyRows={lines.length} footer={[{ key: "esc", label: "close" }]}>
+      {lines}
     </Modal>
   );
 }

@@ -13,7 +13,7 @@ import type { DirDiff } from "../lib/diff.ts";
 import type { EditorCommand } from "../lib/editor.ts";
 import { isGlobalStoreProject } from "../lib/linker.ts";
 import { isSkillEnabled } from "../domain/model.ts";
-import type { Manifest, ProjectLink, Skill, State } from "../domain/model.ts";
+import type { Manifest, ProjectLink, Skill, State, ThemeId } from "../domain/model.ts";
 import { ManifestStore } from "../lib/manifest.ts";
 import { claudeRelTarget } from "../domain/reconcile-plan.ts";
 import { HostRepo, Paths } from "../lib/paths.ts";
@@ -21,6 +21,9 @@ import { observe, observeEntry } from "../lib/reconcile.ts";
 import type { UpstreamState } from "../lib/update.ts";
 
 export type LiveStatus = CatalogLiveStatus;
+
+/** Persist the TUI theme to ~/.config/slinky/config.json. */
+export const saveTheme = (theme: ThemeId | null) => Effect.flatMap(Paths, (paths) => paths.saveTheme(theme));
 
 export interface CatalogRow {
   name: string;
@@ -47,6 +50,8 @@ export interface Catalog {
   repo: string;
   agentsSkills: string;
   editorCommand: EditorCommand;
+  /** Configured theme; undefined means the default. */
+  theme: ThemeId | undefined;
 }
 
 export interface ProjectSkill {
@@ -147,7 +152,18 @@ export const loadCatalog = Effect.fn("Tui.loadCatalog")(function* () {
       meta,
     };
   });
-  return { manifest, state, project, projectSkills, unindexedSkills, rows, repo, agentsSkills: paths.agentsSkills, editorCommand: paths.editorCommand } satisfies Catalog;
+  return {
+    manifest,
+    state,
+    project,
+    projectSkills,
+    unindexedSkills,
+    rows,
+    repo,
+    agentsSkills: paths.agentsSkills,
+    editorCommand: paths.editorCommand,
+    theme: paths.theme,
+  } satisfies Catalog;
 });
 
 /** Hash-verify one vendor row (the slow part, run incrementally). */

@@ -1,31 +1,36 @@
 /** @jsxImportSource @opentui/react */
+import type { ReactNode } from "react";
 import type { UnindexedSkill } from "../../lib/adopt.ts";
-import { Modal, TextLine } from "../components.tsx";
+import { Field, Modal, TextLine, modalInner } from "../components.tsx";
 import { unindexedSkillDescription } from "../data.ts";
 import { colors } from "../theme.ts";
-import { fitCell } from "../util.ts";
+import { wrapText } from "../util.ts";
 
-export function UnindexedSkillModal({ cols, skill }: { cols: number; skill: UnindexedSkill }) {
+const WIDTH = 76;
+
+export function UnindexedSkillModal({ cols, rows, skill }: { cols: number; rows: number; skill: UnindexedSkill }) {
+  const { contentWidth } = modalInner(WIDTH, cols);
   const desc = unindexedSkillDescription(skill);
+  const lines: ReactNode[] = [];
+  if (desc) {
+    for (const [index, line] of wrapText(desc, contentWidth).entries()) lines.push(<TextLine key={`desc-${index}`}>{line}</TextLine>);
+    lines.push(<box key="desc-gap" height={1} />);
+  }
+  lines.push(<Field key="origin" label="origin" value={skill.origin} />);
+  lines.push(<Field key="path" label="path" value={skill.path} fg={colors.link} />);
+  lines.push(<Field key="catalog" label="catalog" value="present in the host but absent from skills.manifest.json" fg={colors.yellow} />);
   return (
-    <Modal title={`${skill.name} · unindexed`} width={76} cols={cols}>
-      {desc ? (
-        <box paddingBottom={1}>
-          <text fg={colors.text} wrapMode="word">
-            {desc}
-          </text>
-        </box>
-      ) : null}
-      <TextLine>
-        <span fg={colors.muted}>{fitCell("origin", 12)}</span>
-        <span fg={colors.text}>{skill.origin}</span>
-      </TextLine>
-      <TextLine>
-        <span fg={colors.muted}>{fitCell("path", 12)}</span>
-        <span fg={colors.accent}>{skill.path}</span>
-      </TextLine>
-      <TextLine fg={colors.yellow}>{"present in the host but absent from skills.manifest.json"}</TextLine>
-      <TextLine fg={colors.muted}>{"esc, then a to index with a skills.sh source"}</TextLine>
+    <Modal
+      title={skill.name}
+      headerRight="unindexed"
+      subtitle={<TextLine fg={colors.muted}>{"Close, then press a to index it with a skills.sh source"}</TextLine>}
+      width={WIDTH}
+      cols={cols}
+      rows={rows}
+      bodyRows={lines.length}
+      footer={[{ key: "esc", label: "close" }]}
+    >
+      {lines}
     </Modal>
   );
 }

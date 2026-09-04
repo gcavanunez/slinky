@@ -25,9 +25,11 @@ const pathsLayer = (home: string) =>
       diffPager: undefined,
       editor: undefined,
       editorCommand: ["nvim"],
+      theme: undefined,
       saveHostConfig: () => Effect.void,
       saveDiffPager: () => Effect.void,
       saveEditor: () => Effect.void,
+      saveTheme: () => Effect.void,
     }),
   );
 

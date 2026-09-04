@@ -325,9 +325,11 @@ describe("adoptSkills transaction", () => {
           diffPager: undefined,
           editor: undefined,
           editorCommand: ["nvim"],
+          theme: undefined,
           saveHostConfig: () => Effect.void,
           saveDiffPager: () => Effect.void,
           saveEditor: () => Effect.void,
+          saveTheme: () => Effect.void,
         }),
       );
       const storeLayer = ManifestStore.layer.pipe(Layer.provide(hostLayer));
@@ -385,9 +387,11 @@ describe("adoptSkills transaction", () => {
         diffPager: undefined,
         editor: undefined,
         editorCommand: ["nvim"],
+        theme: undefined,
         saveHostConfig: () => Effect.void,
         saveDiffPager: () => Effect.void,
         saveEditor: () => Effect.void,
+        saveTheme: () => Effect.void,
       }),
     );
     const storeLayer = ManifestStore.layer.pipe(Layer.provide(hostLayer));
@@ -451,9 +455,11 @@ describe("adoptSkills transaction", () => {
         diffPager: undefined,
         editor: undefined,
         editorCommand: ["nvim"],
+        theme: undefined,
         saveHostConfig: () => Effect.void,
         saveDiffPager: () => Effect.void,
         saveEditor: () => Effect.void,
+        saveTheme: () => Effect.void,
       }),
     );
     const githubLayer = Layer.succeed(GitHub, GitHub.of({ contentsShas: () => Effect.succeed(new Map()) }));

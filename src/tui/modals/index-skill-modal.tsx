@@ -4,20 +4,44 @@ import type { IndexFlow } from "../app.tsx";
 import { Modal, TextLine } from "../components.tsx";
 import { colors } from "../theme.ts";
 
-export function IndexSkillModal({ cols, skill, flow }: { cols: number; skill: UnindexedSkill; flow: IndexFlow }) {
+export function IndexSkillModal({ cols, rows, skill, flow }: { cols: number; rows: number; skill: UnindexedSkill; flow: IndexFlow }) {
+  const bodyRows = 3 + (flow.running ? 1 : 0) + (flow.error ? 1 : 0);
   return (
-    <Modal title={`index ${skill.name}`} width={86} cols={cols}>
-      <TextLine fg={colors.muted}>{"skills.sh source or add command:"}</TextLine>
+    <Modal
+      title={`Index ${skill.name}`}
+      headerRight={flow.running ? "working" : undefined}
+      subtitle={
+        <TextLine fg={colors.muted}>
+          <span>{"source: "}</span>
+          <span fg={colors.text}>{skill.path}</span>
+        </TextLine>
+      }
+      width={86}
+      cols={cols}
+      rows={rows}
+      bodyRows={bodyRows}
+      footer={
+        flow.running
+          ? [{ key: "…", label: "please wait", disabled: true }]
+          : [
+              { key: "enter", label: "index" },
+              { key: "esc", label: "cancel" },
+            ]
+      }
+    >
+      <TextLine fg={colors.muted}>{"skills.sh source or add command"}</TextLine>
       <TextLine>
-        <span fg={colors.accent}>{" > "}</span>
+        <span fg={colors.count}>{"> "}</span>
         <span fg={colors.text}>{flow.input}</span>
-        <span fg={colors.accent}>{flow.running ? "" : "\u2588"}</span>
+        {flow.running ? null : (
+          <span bg={colors.accent} fg={colors.background}>
+            {" "}
+          </span>
+        )}
       </TextLine>
       <TextLine fg={colors.muted}>{`example: skills add kitlangton/skills --skill ${skill.name}`}</TextLine>
-      <TextLine fg={colors.muted}>{`source: ${skill.path}`}</TextLine>
       {flow.running ? <TextLine fg={colors.yellow}>{"installing, indexing, and syncing..."}</TextLine> : null}
-      {flow.error ? <TextLine fg={colors.red}>{` ${flow.error}`}</TextLine> : null}
-      <TextLine fg={colors.muted}>{flow.running ? "please wait" : "enter index · esc cancel"}</TextLine>
+      {flow.error ? <TextLine fg={colors.error}>{flow.error}</TextLine> : null}
     </Modal>
   );
 }

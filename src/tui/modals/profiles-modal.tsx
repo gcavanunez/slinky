@@ -1,27 +1,40 @@
 /** @jsxImportSource @opentui/react */
 import { getActiveProfile, getProfile } from "../../domain/model.ts";
-import { Modal, TextLine } from "../components.tsx";
+import { Modal, TextLine, modalInner } from "../components.tsx";
 import type { Catalog } from "../data.ts";
 import { colors } from "../theme.ts";
 import { fitCell } from "../util.ts";
 
-export function ProfilesModal({ cols, catalog, names, index }: { cols: number; catalog: Catalog; names: string[]; index: number }) {
+export function ProfilesModal({ cols, rows, catalog, names, index }: { cols: number; rows: number; catalog: Catalog; names: string[]; index: number }) {
+  const { contentWidth } = modalInner(56, cols);
+  const active = getActiveProfile(catalog.manifest, catalog.state);
   return (
-    <Modal title="profiles" width={56} cols={cols}>
+    <Modal
+      title="Profiles"
+      headerRight={`${index + 1}/${names.length}`}
+      subtitle={<TextLine fg={colors.muted}>{"Applying a profile disables everything outside it"}</TextLine>}
+      width={56}
+      cols={cols}
+      rows={rows}
+      bodyRows={names.length}
+      footer={[
+        { key: "↑↓", label: "move" },
+        { key: "enter", label: "apply" },
+        { key: "esc", label: "close" },
+      ]}
+    >
       {names.map((name, i) => {
         const isSel = i === index;
-        const active = getActiveProfile(catalog.manifest, catalog.state) === name;
+        const isActive = active === name;
         const members = getProfile(catalog.manifest, name) ?? [];
         return (
           <TextLine key={name} fg={isSel ? colors.selectedText : colors.text} bg={isSel ? colors.selectedBg : undefined}>
-            <span>{` ${fitCell(name, 20)}`}</span>
-            <span fg={colors.muted}>{fitCell(`${members.length} skills`, 12)}</span>
-            <span fg={colors.green}>{active ? "active" : ""}</span>
+            <span fg={isActive ? colors.green : colors.muted}>{isActive ? "✓ " : "  "}</span>
+            <span>{fitCell(name, Math.max(8, contentWidth - 16))}</span>
+            <span fg={colors.muted}>{fitCell(`${members.length} skills`, 12, "right")}</span>
           </TextLine>
         );
       })}
-      <TextLine fg={colors.yellow}>{"applying a profile disables everything outside it"}</TextLine>
-      <TextLine fg={colors.muted}>{"enter apply · esc close"}</TextLine>
     </Modal>
   );
 }

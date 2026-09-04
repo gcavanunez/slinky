@@ -1,24 +1,28 @@
 /** @jsxImportSource @opentui/react */
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { existsSync } from "node:fs";
 import { basename, extname, join } from "node:path";
 import { Match } from "effect";
 import { useKeyboard, usePaste, useRenderer, useSelectionHandler, useTerminalDimensions } from "@opentui/react";
+import { TextAttributes } from "@opentui/core";
 import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core";
 import { acceptVendorDrift, applyProfile, linkProjectSkill, restoreVendorDrift, setSkillsEnabled } from "../lib/catalog-actions.ts";
 import type { ActionResult } from "../lib/catalog-actions.ts";
 import { isClean, pagePatch, unifiedDiff } from "../lib/diff.ts";
 import type { DiffPager } from "../lib/diff.ts";
-import { getActiveProfile } from "../domain/model.ts";
+import { defaultThemeId, getActiveProfile, themeIds } from "../domain/model.ts";
+import type { ThemeId } from "../domain/model.ts";
 import { addSkillFromSource, parseSkillsAddSource } from "../lib/skills-add.ts";
 import { checkUpstream } from "../lib/update.ts";
 import type { UpstreamStatus } from "../lib/update.ts";
 import type { UnindexedSkill } from "../lib/adopt.ts";
 import { runPromiseResult, runSync, runSyncResult } from "./runtime.ts";
 import type { RunResult } from "./runtime.ts";
-import { Hint, TextLine } from "./components.tsx";
-import { colors, createMarkdownSyntax } from "./theme.ts";
-import { clamp, fileTreeRows, fitCell, markdownBody, markdownHeadingLines, printable, searchMatchLines, singleLinePaste, windowOf } from "./util.ts";
+import { Divider, Filler, HintRow, PaneTitle, PlainLine, SeparatorColumn, TextLine } from "./components.tsx";
+import type { Junction } from "./components.tsx";
+import { activeTheme, colors, createMarkdownSyntax, mixHex, setActiveTheme, themes } from "./theme.ts";
+import { centerCell, clamp, fileTreeRows, fitCell, markdownBody, markdownHeadingLines, printable, searchMatchLines, singleLinePaste, windowOf } from "./util.ts";
 import { scrollRowForLine } from "./doc-nav.ts";
 import type { DocRenderable } from "./doc-nav.ts";
 import { copySelection, handleSelectionKey } from "./clipboard.ts";
@@ -35,6 +39,7 @@ import { IndexSkillModal } from "./modals/index-skill-modal.tsx";
 import { LinkModal } from "./modals/link-modal.tsx";
 import { ProfilesModal } from "./modals/profiles-modal.tsx";
 import { ProjectSkillModal } from "./modals/project-skill-modal.tsx";
+import { ThemeModal } from "./modals/theme-modal.tsx";
 import { UnindexedSkillModal } from "./modals/unindexed-skill-modal.tsx";
 import {
   diffSkill,
@@ -46,6 +51,7 @@ import {
   readProjectSkillFile,
   readSkillFile,
   readUnindexedSkillFile,
+  saveTheme,
   skillFiles,
   unindexedSkillFiles,
   verifyRow,
@@ -94,6 +100,7 @@ type Interaction =
   | { kind: "help" }
   | { kind: "detail"; item: SkillItem }
   | { kind: "profiles"; index: number }
+  | { kind: "theme"; index: number; saved: ThemeId }
   | { kind: "diff"; row: CatalogRow; result: DiffResult }
   | { kind: "link"; row: CatalogRow; flow: LinkFlow }
   | { kind: "index"; skill: UnindexedSkill; flow: IndexFlow };
@@ -121,6 +128,7 @@ function keymapStateFor(interaction: Interaction, textInputActive: boolean): App
     case "detail":
       return { ...inactive, overlayActive: true };
     case "profiles":
+    case "theme":
       return { ...inactive, overlayActive: true, profilesActive: true };
     case "diff":
       return { ...inactive, overlayActive: true, diffActive: true };
@@ -132,15 +140,20 @@ function keymapStateFor(interaction: Interaction, textInputActive: boolean): App
   }
 }
 
-export const liveColor = {
-  ok: colors.green,
-  drift: colors.yellow,
-  missing: colors.red,
-  off: colors.muted,
-  stale: colors.yellow,
-  checking: colors.muted,
-  unowned: colors.yellow,
-} satisfies Record<LiveStatus, string>;
+const liveColorKey = {
+  ok: "green",
+  drift: "yellow",
+  missing: "red",
+  off: "muted",
+  stale: "yellow",
+  checking: "muted",
+  unowned: "yellow",
+} satisfies Record<LiveStatus, keyof typeof colors>;
+
+/** Resolved against the active theme at call time. */
+export function liveColor(status: LiveStatus): string {
+  return colors[liveColorKey[status]];
+}
 
 export const liveLabel = {
   ok: "ok",
@@ -152,15 +165,20 @@ export const liveLabel = {
   unowned: "unowned",
 } satisfies Record<LiveStatus, string>;
 
-const placementCell = {
-  none: { label: "-", fg: colors.muted },
-  "link-hidden": { label: "link·hid", fg: colors.accent },
-  "link-tracked": { label: "link·git", fg: colors.accent },
-  "copy-hidden": { label: "copy·hid", fg: colors.accent },
-  "copy-tracked": { label: "copy·git", fg: colors.accent },
-  missing: { label: "missing", fg: colors.red },
-  unmanaged: { label: "unmanaged", fg: colors.yellow },
-} satisfies Record<ProjectPlacement, { label: string; fg: string }>;
+const placementCells = {
+  none: { label: "-", fg: "muted" },
+  "link-hidden": { label: "link·hid", fg: "link" },
+  "link-tracked": { label: "link·git", fg: "link" },
+  "copy-hidden": { label: "copy·hid", fg: "link" },
+  "copy-tracked": { label: "copy·git", fg: "link" },
+  missing: { label: "missing", fg: "red" },
+  unmanaged: { label: "unmanaged", fg: "yellow" },
+} satisfies Record<ProjectPlacement, { label: string; fg: keyof typeof colors }>;
+
+function placementCell(placement: ProjectPlacement) {
+  const cell = placementCells[placement];
+  return { label: cell.label, fg: colors[cell.fg] };
+}
 
 export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: AppProps) {
   const renderer = useRenderer();
@@ -181,6 +199,11 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
   const [docFind, setDocFind] = useState<{ typing: boolean; query: string }>({ typing: false, query: "" });
   const [flash, setFlash] = useState<{ text: string; error?: boolean } | null>(null);
   const [previewState, setPreviewState] = useState<{ skill: string | null; file: number; restore: number }>({ skill: null, file: 0, restore: 0 });
+  const [themeId, setThemeId] = useState<ThemeId>(() => {
+    const id = catalog.theme ?? defaultThemeId;
+    setActiveTheme(id);
+    return id;
+  });
 
   const quitting = useRef(false);
   const mounted = useRef(true);
@@ -191,7 +214,14 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
   const previewScroll = useRef<ScrollBoxRenderable | null>(null);
   const previewDoc = useRef<DocRenderable | null>(null);
   const findPos = useRef(-1);
-  const syntaxStyle = useMemo(() => createMarkdownSyntax(), []);
+  // Rebuilt per theme: the style bakes in palette colours at creation.
+  const syntaxStyle = useMemo(() => createMarkdownSyntax(themes[themeId].colors), [themeId]);
+
+  useEffect(() => () => syntaxStyle.destroy(), [syntaxStyle]);
+
+  useEffect(() => {
+    renderer.setBackgroundColor(colors.background);
+  }, [renderer, themeId]);
 
   useEffect(() => {
     mounted.current = true;
@@ -201,9 +231,14 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
       upstreamAbort.current?.abort();
       if (notificationTimer.current) clearTimeout(notificationTimer.current);
       if (indexTimer.current) clearTimeout(indexTimer.current);
-      syntaxStyle.destroy();
     };
-  }, [syntaxStyle]);
+  }, []);
+
+  /** Switch the live palette; the state change re-renders every consumer of `colors`. */
+  const previewTheme = (id: ThemeId) => {
+    if (activeTheme() !== id) setActiveTheme(id);
+    setThemeId(id);
+  };
 
   const filtered = useMemo(() => (filterText ? catalog.rows.filter((r) => r.name.includes(filterText.toLowerCase())) : catalog.rows), [catalog.rows, filterText]);
 
@@ -276,7 +311,8 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
     return out;
   }, [catalog.manifest.skills, catalog.projectSkills, catalog.unindexedSkills, catalogView, filtered, filterText]);
 
-  const viewport = Math.max(3, rowsAvail - 4 - (filterMode || filterText ? 1 : 0) - (docFind.typing || docFind.query ? 1 : 0));
+  // Chrome: header, rail, tabs, rail, [body], rail, footer.
+  const viewport = Math.max(3, rowsAvail - 6);
   const authorIndex = clamp(selectedAuthor, 0, Math.max(0, groups.length - 1));
   const currentGroup = groups[authorIndex];
   const skillIndex = clamp(selectedSkill, 0, Math.max(0, (currentGroup?.skills.length ?? 1) - 1));
@@ -685,6 +721,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
         return;
       case "overlay.close":
       case "help.close":
+        if (interaction.kind === "theme") previewTheme(interaction.saved);
         setInteraction({ kind: "browse" });
         return;
       case "diff.accept": {
@@ -732,12 +769,26 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
         return;
       }
       case "profiles.next":
-        setInteraction((previous) => (previous.kind === "profiles" ? { ...previous, index: clamp(previous.index + 1, 0, profileNames.length - 1) } : previous));
+      case "profiles.previous": {
+        const delta = command === "profiles.next" ? 1 : -1;
+        if (interaction.kind === "theme") {
+          const index = clamp(interaction.index + delta, 0, themeIds.length - 1);
+          previewTheme(themeIds[index] ?? defaultThemeId);
+          setInteraction({ ...interaction, index });
+          return;
+        }
+        setInteraction((previous) => (previous.kind === "profiles" ? { ...previous, index: clamp(previous.index + delta, 0, profileNames.length - 1) } : previous));
         return;
-      case "profiles.previous":
-        setInteraction((previous) => (previous.kind === "profiles" ? { ...previous, index: clamp(previous.index - 1, 0, profileNames.length - 1) } : previous));
-        return;
+      }
       case "profiles.apply": {
+        if (interaction.kind === "theme") {
+          const id = themeIds[interaction.index] ?? defaultThemeId;
+          const outcome = runSyncResult(saveTheme(id));
+          if (outcome.ok) notify(`theme set to ${id}`);
+          else notify(outcome.message, true);
+          setInteraction({ kind: "browse" });
+          return;
+        }
         if (interaction.kind !== "profiles") return;
         const name = profileNames[interaction.index];
         if (name) {
@@ -907,6 +958,11 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
         })();
         return;
       }
+      case "theme.open": {
+        const saved = catalog.theme ?? themeId;
+        setInteraction({ kind: "theme", index: Math.max(0, themeIds.indexOf(themeId)), saved });
+        return;
+      }
       case "profiles.open":
         if (profileNames.length === 0) {
           notify("no profiles defined in skills.manifest.json", true);
@@ -1002,23 +1058,30 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
   const showAuthors = expanded ? expanded === "authors" : narrow ? focusedPrimary === "authors" : twoPane !== "document";
   const showSkills = expanded ? expanded === "skills" : narrow ? focusedPrimary === "skills" : true;
   const showContent = expanded ? expanded === "content" : narrow ? focusedPrimary === "content" : twoPane !== "catalog";
+  const visiblePanes = [showAuthors, showSkills, showContent].filter(Boolean).length;
+  // Content widths; every rail between two panes costs one more column.
+  const railCols = Math.max(0, visiblePanes - 1);
   const authorW = Math.max(18, Math.min(25, Math.floor(cols * 0.19)));
   const skillW = Math.max(33, Math.min(42, Math.floor(cols * 0.31)));
-  const catalogAuthorW = Math.max(18, Math.min(cols - 33, Math.floor(cols * catalogSplit)));
-  const catalogSkillW = cols - catalogAuthorW;
-  const documentSkillW = Math.max(33, Math.min(cols - 30, Math.floor(cols * documentSplit)));
+  const catalogAuthorW = Math.max(18, Math.min(cols - 34, Math.floor(cols * catalogSplit)));
+  const documentSkillW = Math.max(33, Math.min(cols - 31, Math.floor(cols * documentSplit)));
   const fileTreeW = Math.max(18, Math.min(28, Math.floor(cols * 0.21)));
-  const authorViewport = Math.max(1, viewport - 2);
+  const authorViewport = Math.max(1, viewport - 1);
   const authorWin = windowOf(0, authorIndex, groups.length, authorViewport);
-  const skillViewport = Math.max(1, viewport - 2);
+  const skillViewport = Math.max(1, viewport - 1);
   const skillWin = windowOf(0, skillIndex, currentGroup?.skills.length ?? 0, skillViewport);
-  const authorsWidth = expanded === "authors" || narrow ? cols : twoPane === "catalog" ? catalogAuthorW : authorW;
-  let skillsWidth = skillW;
-  if (expanded === "skills" || narrow) skillsWidth = cols;
-  else if (twoPane === "catalog") skillsWidth = catalogSkillW;
-  else if (twoPane === "document") skillsWidth = documentSkillW;
-  const authorLabelW = Math.max(4, authorsWidth - 10);
-  const skillLabelW = Math.max(4, skillsWidth - 29);
+  const authorsWidth = !showAuthors ? 0 : visiblePanes === 1 ? cols : twoPane === "catalog" ? catalogAuthorW : authorW;
+  let skillsWidth = 0;
+  if (showSkills) {
+    if (visiblePanes === 1) skillsWidth = cols;
+    else if (twoPane === "catalog") skillsWidth = cols - catalogAuthorW - 1;
+    else if (twoPane === "document") skillsWidth = documentSkillW;
+    else skillsWidth = skillW;
+  }
+  const contentWidth = showContent ? Math.max(20, cols - authorsWidth - skillsWidth - railCols) : 0;
+  const authorLabelW = Math.max(4, authorsWidth - 9);
+  const skillLabelW = Math.max(4, skillsWidth - 26);
+  const fileTreeMode: "split" | "hidden" | "only" = tiny ? (panel === "files" ? "only" : "hidden") : "split";
 
   const upstreamCell = (row: CatalogRow): { label: string; fg: string } =>
     Match.value(row.upstream).pipe(
@@ -1029,11 +1092,18 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
     );
 
   const header = (
-    <box height={1} width="100%" flexDirection="row" justifyContent="space-between" backgroundColor={colors.headerBg}>
+    <box height={1} width="100%" flexDirection="row" justifyContent="space-between">
       <text wrapMode="none" truncate>
-        <span fg={colors.accent}>{" slinky "}</span>
-        <span fg={colors.muted}>{compactHeader ? "· " : " project: "}</span>
-        <span fg={colors.text}>{projectName}</span>
+        <span> </span>
+        <span fg={colors.accent} attributes={TextAttributes.BOLD}>
+          slinky
+        </span>
+        <span fg={colors.separator} attributes={TextAttributes.BOLD}>
+          {" / "}
+        </span>
+        <span fg={colors.text} attributes={TextAttributes.BOLD}>
+          {projectName}
+        </span>
       </text>
       {!compactHeader ? (
         <text wrapMode="none" truncate>
@@ -1045,32 +1115,53 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
     </box>
   );
 
+  const tabDefs = [
+    { view: "available" as const, label: compactHeader ? "AVAILABLE" : "AVAILABLE HERE", count: availableCount },
+    { view: "all" as const, label: compactHeader ? "ALL" : "ALL SKILLS", count: allCount },
+  ];
+  // Column of each `│` between/after tabs, so the rails above and below can meet it.
+  const tabRailColumns: number[] = [];
+  {
+    let column = 0;
+    for (const tab of tabDefs) {
+      column += ` ${tab.label} ${tab.count} `.length;
+      tabRailColumns.push(column);
+      column += 1;
+    }
+  }
+  const activeProfile = getActiveProfile(catalog.manifest, catalog.state);
   const tabs = (
-    <box height={1} width="100%" flexDirection="row" justifyContent="space-between" backgroundColor={colors.panelBg}>
+    <box height={1} width="100%" flexDirection="row" justifyContent="space-between">
       <box height={1} flexDirection="row">
-        <text
-          wrapMode="none"
-          truncate
-          fg={catalogView === "available" ? colors.selectedText : colors.muted}
-          bg={catalogView === "available" ? colors.selectedBg : undefined}
-          marginLeft={1}
-          onMouseDown={() => {
-            if (interaction.kind === "browse") switchCatalogView("available");
-          }}
-        >{` 1 ${compactHeader ? "available" : "available here"} ${availableCount} `}</text>
-        <text
-          wrapMode="none"
-          truncate
-          fg={catalogView === "all" ? colors.selectedText : colors.muted}
-          bg={catalogView === "all" ? colors.selectedBg : undefined}
-          marginLeft={1}
-          onMouseDown={() => {
-            if (interaction.kind === "browse") switchCatalogView("all");
-          }}
-        >{` 2 ${compactHeader ? "all" : "all skills"} ${allCount} `}</text>
+        {tabDefs.map((tab, index) => {
+          const active = catalogView === tab.view;
+          return (
+            <box key={tab.view} height={1} flexDirection="row">
+              {index > 0 ? <PlainLine text="│" fg={colors.separator} /> : null}
+              <text
+                wrapMode="none"
+                truncate
+                onMouseDown={() => {
+                  if (interaction.kind === "browse") switchCatalogView(tab.view);
+                }}
+              >
+                <span> </span>
+                <span fg={active ? colors.accent : colors.muted} attributes={active ? TextAttributes.BOLD : 0}>
+                  {tab.label}
+                </span>
+                <span fg={active ? mixHex(colors.separator, colors.accent, 0.45) : colors.separator}>{` ${tab.count} `}</span>
+              </text>
+            </box>
+          );
+        })}
+        <PlainLine text="│" fg={colors.separator} />
       </box>
-      {getActiveProfile(catalog.manifest, catalog.state) && !tiny ? (
-        <text fg={colors.muted} wrapMode="none" truncate>{`profile: ${getActiveProfile(catalog.manifest, catalog.state)} `}</text>
+      {activeProfile && !tiny ? (
+        <text wrapMode="none" truncate>
+          <span fg={colors.muted}>{"profile "}</span>
+          <span fg={colors.count}>{activeProfile}</span>
+          <span> </span>
+        </text>
       ) : null}
     </box>
   );
@@ -1112,10 +1203,11 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
         bg={selected ? colors.selectedBg : undefined}
         onMouseDown={clickAuthorRow(itemIndex)}
       >
-        <span fg={selected ? colors.accent : colors.muted}>{selected ? " › " : "   "}</span>
-        <span>{fitCell(group.label, authorLabelW)}</span>
+        <span> </span>
+        <span attributes={selected && panel === "authors" ? TextAttributes.BOLD : 0}>{fitCell(group.label, authorLabelW)}</span>
         <span fg={colors.yellow}>{group.hasDrift ? " ⚠" : "  "}</span>
-        <span fg={colors.muted}>{fitCell(status, 5, "right")}</span>
+        <span fg={selected && panel === "authors" ? colors.count : colors.muted}>{fitCell(status, 5, "right")}</span>
+        <span> </span>
       </TextLine>
     );
   });
@@ -1123,83 +1215,92 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
   const skillRows = (currentGroup?.skills ?? []).slice(skillWin, skillWin + skillViewport).map((item, index) => {
     const itemIndex = skillWin + index;
     const selected = itemIndex === skillIndex;
-    const fg = selected && panel === "skills" ? colors.selectedText : colors.text;
+    const focusedRow = selected && panel === "skills";
+    const fg = focusedRow ? colors.selectedText : colors.text;
     const bg = selected ? colors.selectedBg : undefined;
+    const bold = focusedRow ? TextAttributes.BOLD : 0;
     const onMouseDown = clickSkillRow(itemIndex);
     if (item.kind === "project-skill") {
       return (
         <TextLine key={`p:${item.skill.name}`} fg={fg} bg={bg} onMouseDown={onMouseDown}>
-          <span fg={selected ? colors.accent : colors.muted}>{selected ? " › " : "   "}</span>
-          <span>{fitCell(item.skill.name, skillLabelW)}</span>
-          <span fg={colors.yellow}>{fitCell("project", 9, "right")}</span>
+          <span> </span>
+          <span attributes={bold}>{fitCell(item.skill.name, skillLabelW)}</span>
+          <span fg={colors.yellow}>{fitCell("project", 24, "right")}</span>
+          <span> </span>
         </TextLine>
       );
     }
     if (item.kind === "unindexed-skill") {
       return (
         <TextLine key={`u:${item.skill.path}`} fg={fg} bg={bg} onMouseDown={onMouseDown}>
-          <span fg={selected ? colors.accent : colors.muted}>{selected ? " › " : "   "}</span>
-          <span>{fitCell(item.skill.name, skillLabelW)}</span>
-          <span fg={colors.yellow}>{fitCell("unindexed", 12, "right")}</span>
+          <span> </span>
+          <span attributes={bold}>{fitCell(item.skill.name, skillLabelW)}</span>
+          <span fg={colors.yellow}>{fitCell("unindexed", 24, "right")}</span>
+          <span> </span>
         </TextLine>
       );
     }
     const row = item.row;
-    const placement = placementCell[projectPlacement(row)];
+    const placement = placementCell(projectPlacement(row));
     return (
       <TextLine key={row.name} fg={fg} bg={bg} onMouseDown={onMouseDown}>
-        <span fg={selected ? colors.accent : colors.muted}>{selected ? " › " : "   "}</span>
-        <span>{fitCell(row.name, skillLabelW)}</span>
+        <span> </span>
+        <span attributes={bold}>{fitCell(row.name, skillLabelW)}</span>
         <span fg={row.enabled ? colors.green : colors.muted}>{fitCell(row.enabled ? "on" : "off", 5, "right")}</span>
-        <span fg={liveColor[row.live]}>{fitCell(liveLabel[row.live], 7, "right")}</span>
+        <span fg={liveColor(row.live)}>{fitCell(liveLabel[row.live], 7, "right")}</span>
         <span fg={placement.fg}>{fitCell(placement.label, 9, "right")}</span>
         <span fg={upstreamCell(row).fg}>{fitCell(upstreamCell(row).label, 3, "right")}</span>
+        <span> </span>
       </TextLine>
     );
   });
 
-  const filterBar =
-    filterMode || filterText ? (
-      <TextLine fg={colors.text}>
-        <span fg={colors.accent}>{" /"}</span>
-        <span>{filterText}</span>
-        <span fg={colors.accent}>{filterMode ? "\u2588" : ""}</span>
-        <span fg={colors.muted}>{`  (${matchCount} match${matchCount === 1 ? "" : "es"})`}</span>
-      </TextLine>
-    ) : null;
+  // A committed filter lives in the pane title; while typing it takes over the footer.
+  const filterTitle = filterText && !filterMode ? `/ ${filterText}` : undefined;
+  const findTitle = docFind.query && !docFind.typing ? `/ ${docFind.query} · ${docMatches.length} match${docMatches.length === 1 ? "" : "es"}` : undefined;
 
-  const findBar =
-    docFind.typing || docFind.query ? (
-      <TextLine fg={colors.text}>
-        <span fg={colors.accent}>{" doc /"}</span>
-        <span>{docFind.query}</span>
-        <span fg={colors.accent}>{docFind.typing ? "\u2588" : ""}</span>
-        <span fg={colors.muted}>{docFind.query ? `  (${docMatches.length} match${docMatches.length === 1 ? "" : "es"}${docFind.typing ? "" : " \u00b7 n/N to jump"})` : ""}</span>
-      </TextLine>
-    ) : null;
-
-  const footer = flash ? (
-    <TextLine fg={flash.error ? colors.red : colors.green}>{` ${flash.text}`}</TextLine>
-  ) : (
+  const footer = filterMode ? (
     <TextLine>
-      <span> </span>
-      <Hint keys="h/l" label="pane" />
-      <Hint keys="tab" label="next" />
-      <Hint keys="j/k" label={panel === "content" ? "scroll" : "move"} />
-      <Hint keys="x" label={expanded ? "restore" : "zoom"} />
-      <Hint keys="v/V" label="layout" />
-      {twoPane && !expanded ? <Hint keys="</>" label="size" /> : null}
-      {showContent && previewData && panel !== "authors" ? <Hint keys="[/]" label="file" /> : null}
-      {(panel === "authors" && currentGroup?.rows) || (panel === "skills" && current) ? <Hint keys="space" label="toggle" /> : null}
-      {currentUnindexedSkill ? <Hint keys="a" label="index" /> : null}
-      {editableSkillPath ? <Hint keys="e" label="edit" /> : null}
-      <Hint keys="i" label="details" />
-      <Hint keys="1/2" label="view" />
-      <Hint keys="/" label={panel === "content" ? "search" : "filter"} />
-      {docFind.query ? <Hint keys="n/N" label="match" /> : null}
-      <Hint keys="?" label="help" />
-      <Hint keys="q" label="quit" />
+      <span fg={colors.accent}>{" / "}</span>
+      <span>{filterText}</span>
+      <span bg={colors.accent} fg={colors.background}>
+        {" "}
+      </span>
+      <span fg={colors.muted}>{`  ${matchCount} match${matchCount === 1 ? "" : "es"}`}</span>
     </TextLine>
+  ) : docFind.typing ? (
+    <TextLine>
+      <span fg={colors.accent}>{" / "}</span>
+      <span>{docFind.query}</span>
+      <span bg={colors.accent} fg={colors.background}>
+        {" "}
+      </span>
+      <span fg={colors.muted}>{docFind.query ? `  ${docMatches.length} match${docMatches.length === 1 ? "" : "es"} in document` : "  search the document"}</span>
+    </TextLine>
+  ) : flash ? (
+    <TextLine fg={flash.error ? colors.error : colors.count}>{` ${flash.text}`}</TextLine>
+  ) : (
+    <HintRow
+      leading=" "
+      items={[
+        { key: "h/l", label: "pane" },
+        { key: "tab", label: "next" },
+        { key: "j/k", label: panel === "content" ? "scroll" : "move" },
+        { key: "x", label: expanded ? "restore" : "zoom" },
+        { key: "v/V", label: "layout" },
+        { key: "</>", label: "size", when: twoPane !== null && !expanded },
+        { key: "[/]", label: "file", when: showContent && previewData !== null && panel !== "authors" },
+        { key: "space", label: "toggle", when: (panel === "authors" && currentGroup?.rows !== null) || (panel === "skills" && current !== undefined) },
+        { key: "a", label: "index", when: currentUnindexedSkill !== undefined },
+        { key: "e", label: "edit", when: editableSkillPath !== null },
+        { key: "i", label: "details" },
+        { key: "1/2", label: "view" },
+        { key: "/", label: panel === "content" ? "search" : "filter" },
+        { key: "n/N", label: "match", when: docFind.query.length > 0 },
+        { key: "?", label: "help" },
+        { key: "q", label: "quit" },
+      ]}
+    />
   );
 
   const overlay = (() => {
@@ -1207,92 +1308,118 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
       case "browse":
         return null;
       case "help":
-        return <HelpModal cols={cols} editor={catalog.editorCommand[0]} />;
+        return <HelpModal cols={cols} rows={rowsAvail} editor={catalog.editorCommand[0]} />;
       case "detail":
         switch (interaction.item.kind) {
           case "skill":
-            return <DetailModal cols={cols} row={interaction.item.row} catalog={catalog} />;
+            return <DetailModal cols={cols} rows={rowsAvail} row={interaction.item.row} catalog={catalog} />;
           case "project-skill":
-            return <ProjectSkillModal cols={cols} skill={interaction.item.skill} catalog={catalog} />;
+            return <ProjectSkillModal cols={cols} rows={rowsAvail} skill={interaction.item.skill} catalog={catalog} />;
           case "unindexed-skill":
-            return <UnindexedSkillModal cols={cols} skill={interaction.item.skill} />;
+            return <UnindexedSkillModal cols={cols} rows={rowsAvail} skill={interaction.item.skill} />;
           default:
             return assertNever(interaction.item);
         }
       case "profiles":
-        return <ProfilesModal cols={cols} catalog={catalog} names={profileNames} index={interaction.index} />;
+        return <ProfilesModal cols={cols} rows={rowsAvail} catalog={catalog} names={profileNames} index={interaction.index} />;
+      case "theme":
+        return <ThemeModal cols={cols} rows={rowsAvail} index={interaction.index} saved={interaction.saved} />;
       case "diff":
-        return <DiffModal cols={cols} row={interaction.row} result={interaction.result} />;
+        return <DiffModal cols={cols} rows={rowsAvail} row={interaction.row} result={interaction.result} />;
       case "link":
-        return <LinkModal cols={cols} row={interaction.row} flow={interaction.flow} recents={catalog.state.recentProjects} />;
+        return <LinkModal cols={cols} rows={rowsAvail} row={interaction.row} flow={interaction.flow} recents={catalog.state.recentProjects} />;
       case "index":
-        return <IndexSkillModal cols={cols} skill={interaction.skill} flow={interaction.flow} />;
+        return <IndexSkillModal cols={cols} rows={rowsAvail} skill={interaction.skill} flow={interaction.flow} />;
       default:
         return assertNever(interaction);
     }
   })();
 
+  // Panes in display order, with their content widths. Rails go between them,
+  // and the rails above/below the body meet each rail with ┬ / ┴.
+  const panes: Array<{ key: Panel; width: number; node: ReactNode }> = [];
+  if (showAuthors) {
+    panes.push({
+      key: "authors",
+      width: authorsWidth,
+      node: (
+        <box width={authorsWidth} height={viewport} flexDirection="column" onMouseDown={clickPanel("authors")} onMouseScroll={wheelList(moveAuthor)}>
+          <PaneTitle title="authors" detail={groups.length ? `${authorIndex + 1}/${groups.length}` : undefined} focused={panel === "authors"} />
+          {authorRows}
+          {groups.length === 0 ? <TextLine fg={colors.muted}>{" - No authors."}</TextLine> : null}
+        </box>
+      ),
+    });
+  }
+  if (showSkills) {
+    const detail = [currentGroup ? `· ${currentGroup.label}` : "", filterTitle ?? ""].filter(Boolean).join("  ");
+    panes.push({
+      key: "skills",
+      width: skillsWidth,
+      node: (
+        <box width={skillsWidth} height={viewport} flexDirection="column" onMouseDown={clickPanel("skills")} onMouseScroll={wheelList(moveSkill)}>
+          <PaneTitle title="skills" detail={detail || undefined} focused={panel === "skills"} />
+          {skillRows}
+          {matchCount === 0 ? <TextLine fg={colors.muted}>{filterText ? " - No skills match." : " - No skills."}</TextLine> : null}
+        </box>
+      ),
+    });
+  }
+  if (showContent) {
+    panes.push({
+      key: "content",
+      width: contentWidth,
+      node: (
+        <PreviewPanel
+          data={previewData}
+          skill={currentName}
+          panel={panel}
+          scrollRef={previewScroll}
+          docRef={previewDoc}
+          restoreScroll={previewRestore}
+          syntaxStyle={syntaxStyle}
+          width={contentWidth}
+          fileTreeWidth={fileTreeW}
+          fileTreeMode={fileTreeMode}
+          height={viewport}
+          findTitle={findTitle}
+          onFocusPanel={(target) => clickPanel(target)()}
+          onSelectFile={(index) => {
+            if (interaction.kind === "browse") selectFile(index);
+          }}
+          onScrollFiles={(delta) => {
+            if (interaction.kind === "browse") moveFile(delta);
+          }}
+        />
+      ),
+    });
+  }
+  const paneRailColumns: number[] = [];
+  {
+    let column = 0;
+    panes.forEach((pane, index) => {
+      if (index > 0) paneRailColumns.push(column);
+      column += pane.width + (index > 0 ? 1 : 0);
+    });
+    // The rail between document and file tree also meets the body rails.
+    if (showContent && previewData && fileTreeMode === "split") {
+      const contentLeft = column - contentWidth;
+      paneRailColumns.push(contentLeft + Math.max(1, contentWidth - fileTreeW - 1));
+    }
+  }
+  const tabRailSet = new Set(tabRailColumns);
+  const belowTabsJunctions: Junction[] = [...tabRailColumns.map((at) => ({ at, char: "┴" })), ...paneRailColumns.map((at) => ({ at, char: tabRailSet.has(at) ? "┼" : "┬" }))];
+
   return (
-    <box width="100%" height="100%" flexDirection="column">
+    <box width="100%" height="100%" flexDirection="column" backgroundColor={colors.background}>
       {header}
+      <Divider width={cols} junctions={tabRailColumns.map((at) => ({ at, char: "┬" }))} />
       {tabs}
-      {filterBar}
-      {findBar}
-      <box flexGrow={1} flexDirection="row" backgroundColor={colors.panelBg}>
-        {showAuthors ? (
-          <box
-            width={authorsWidth}
-            flexDirection="column"
-            border
-            borderStyle="single"
-            borderColor={panel === "authors" ? colors.accent : colors.modalBorder}
-            title={` authors ${groups.length ? `${authorIndex + 1}/${groups.length}` : ""} `}
-            titleColor={panel === "authors" ? colors.accent : colors.muted}
-            onMouseDown={clickPanel("authors")}
-            onMouseScroll={wheelList(moveAuthor)}
-          >
-            {authorRows}
-            {groups.length === 0 ? <TextLine fg={colors.muted}>{"  no authors"}</TextLine> : null}
-          </box>
-        ) : null}
-        {showSkills ? (
-          <box
-            width={skillsWidth}
-            flexDirection="column"
-            border
-            borderStyle="single"
-            borderColor={panel === "skills" ? colors.accent : colors.modalBorder}
-            title={` skills · ${currentGroup?.label ?? "-"} `}
-            titleColor={panel === "skills" ? colors.accent : colors.muted}
-            onMouseDown={clickPanel("skills")}
-            onMouseScroll={wheelList(moveSkill)}
-          >
-            {skillRows}
-            {matchCount === 0 ? <TextLine fg={colors.muted}>{"  no skills match"}</TextLine> : null}
-          </box>
-        ) : null}
-        {showContent ? (
-          <PreviewPanel
-            data={previewData}
-            skill={currentName}
-            panel={panel}
-            scrollRef={previewScroll}
-            docRef={previewDoc}
-            restoreScroll={previewRestore}
-            syntaxStyle={syntaxStyle}
-            fileTreeWidth={fileTreeW}
-            fileTreeMode={tiny ? (panel === "files" ? "only" : "hidden") : "split"}
-            height={viewport}
-            onFocusPanel={(target) => clickPanel(target)()}
-            onSelectFile={(index) => {
-              if (interaction.kind === "browse") selectFile(index);
-            }}
-            onScrollFiles={(delta) => {
-              if (interaction.kind === "browse") moveFile(delta);
-            }}
-          />
-        ) : null}
+      <Divider width={cols} junctions={belowTabsJunctions} />
+      <box height={viewport} flexDirection="row">
+        {panes.flatMap((pane, index) => [...(index > 0 ? [<SeparatorColumn key={`rail-${pane.key}`} height={viewport} />] : []), <box key={pane.key}>{pane.node}</box>])}
       </box>
+      <Divider width={cols} junctions={paneRailColumns.map((at) => ({ at, char: "┴" }))} />
       {footer}
       {overlay}
     </box>
@@ -1309,9 +1436,11 @@ function PreviewPanel({
   docRef,
   restoreScroll,
   syntaxStyle,
+  width,
   fileTreeWidth,
   fileTreeMode,
   height,
+  findTitle,
   onFocusPanel,
   onSelectFile,
   onScrollFiles,
@@ -1323,9 +1452,11 @@ function PreviewPanel({
   docRef: { current: DocRenderable | null };
   restoreScroll: number;
   syntaxStyle: ReturnType<typeof createMarkdownSyntax>;
+  width: number;
   fileTreeWidth: number;
   fileTreeMode: "split" | "hidden" | "only";
   height: number;
+  findTitle: string | undefined;
   onFocusPanel: (panel: "content" | "files") => void;
   onSelectFile: (index: number) => void;
   onScrollFiles: (delta: number) => void;
@@ -1340,10 +1471,15 @@ function PreviewPanel({
     return () => clearTimeout(timer);
   }, [data?.file, restoreScroll, scrollRef, treeOnly]);
 
+  const focused = panel === "content" || panel === "files";
   if (!data || !skill) {
+    const top = Math.max(0, Math.floor((height - 1) / 2) - 1);
     return (
-      <box border borderStyle="single" borderColor={colors.modalBorder} flexGrow={1} paddingLeft={2}>
-        <text fg={colors.muted}>{"Select a skill to read its documentation."}</text>
+      <box width={width} height={height} flexDirection="column" onMouseDown={() => onFocusPanel("content")}>
+        <PaneTitle title="document" focused={focused} />
+        <Filler rows={top} />
+        <PlainLine text={centerCell("No skill selected", width)} fg={colors.count} bold />
+        <PlainLine text={centerCell("Use j/k to move", width)} fg={colors.muted} />
       </box>
     );
   }
@@ -1352,35 +1488,62 @@ function PreviewPanel({
     0,
     treeRows.findIndex((row) => row.kind === "file" && row.path === data.file),
   );
-  const treeViewport = Math.max(1, height - 4);
+  const treeViewport = Math.max(1, height - 1);
   const treeWin = windowOf(0, treeIndex, treeRows.length, treeViewport);
   const extension = extname(data.file).slice(1).toLowerCase();
   const markdown = extension === "md" || extension === "mdx";
   const content = markdown ? markdownBody(data.file, data.content) : data.content;
-  return (
+  const showTree = fileTreeMode !== "hidden";
+  const treeW = treeOnly ? width : fileTreeWidth;
+  const docW = treeOnly ? 0 : showTree ? Math.max(1, width - treeW - 1) : width;
+  const docDetail = [treeOnly ? "" : `· ${data.file}`, findTitle ?? ""].filter(Boolean).join("  ");
+
+  const tree = showTree ? (
     <box
-      border
-      borderStyle="single"
-      borderColor={panel === "content" || panel === "files" ? colors.accent : colors.modalBorder}
-      flexGrow={1}
+      width={treeW}
+      height={height}
       flexDirection="column"
-      title={treeOnly ? ` files · ${skill} ` : fileTreeMode === "hidden" ? ` document · ${data.file} ` : ` document · ${skill} / ${data.file} `}
-      titleColor={panel === "content" || panel === "files" ? colors.accent : colors.muted}
-      backgroundColor={colors.panelBg}
-      onMouseDown={() => onFocusPanel("content")}
+      onMouseDown={(event) => {
+        event.stopPropagation();
+        onFocusPanel("files");
+      }}
+      onMouseScroll={(event) => {
+        event.stopPropagation();
+        if (event.scroll?.direction === "up") onScrollFiles(-1);
+        else if (event.scroll?.direction === "down") onScrollFiles(1);
+      }}
     >
-      <box flexGrow={1} flexDirection="row">
-        {!treeOnly ? (
-          <scrollbox
-            ref={scrollRef}
-            flexGrow={1}
-            paddingLeft={1}
-            viewportOptions={{ paddingRight: 1 }}
-            verticalScrollbarOptions={{
-              visible: true,
-              trackOptions: { backgroundColor: colors.panelBg, foregroundColor: colors.modalBorder },
+      <PaneTitle title="files" detail={`${data.idx + 1}/${data.files.length}`} focused={panel === "files"} />
+      {treeRows.slice(treeWin, treeWin + treeViewport).map((row) => {
+        const selected = row.kind === "file" && row.path === data.file;
+        const fileIndex = row.kind === "file" ? data.files.indexOf(row.path) : -1;
+        return (
+          <TextLine
+            key={`${row.kind}:${row.path}`}
+            fg={row.kind === "folder" ? colors.muted : selected && panel === "files" ? colors.selectedText : colors.text}
+            bg={selected ? colors.selectedBg : undefined}
+            onMouseDown={(event) => {
+              event.stopPropagation();
+              onFocusPanel("files");
+              if (fileIndex !== -1) onSelectFile(fileIndex);
             }}
           >
+            <span>{` ${"  ".repeat(row.depth)}`}</span>
+            <span fg={row.kind === "folder" ? colors.separator : undefined}>{row.kind === "folder" ? "▾ " : "  "}</span>
+            <span attributes={selected && panel === "files" ? TextAttributes.BOLD : 0}>{fitCell(row.label, Math.max(1, treeW - 4 - row.depth * 2))}</span>
+            <span> </span>
+          </TextLine>
+        );
+      })}
+    </box>
+  ) : null;
+
+  return (
+    <box width={width} height={height} flexDirection="row" onMouseDown={() => onFocusPanel("content")}>
+      {!treeOnly ? (
+        <box width={docW} height={height} flexDirection="column">
+          <PaneTitle title="document" detail={docDetail || undefined} focused={panel === "content"} />
+          <scrollbox ref={scrollRef} flexGrow={1} paddingLeft={1} viewportOptions={{ paddingRight: 1 }} verticalScrollbarOptions={{ visible: false }}>
             {markdown ? (
               <markdown
                 ref={(node) => {
@@ -1402,7 +1565,7 @@ function PreviewPanel({
                 tableOptions={{ style: "grid", widthMode: "full", wrapMode: "word" }}
                 conceal
                 fg={colors.text}
-                bg={colors.panelBg}
+                bg={colors.background}
               />
             ) : (
               <code
@@ -1418,48 +1581,10 @@ function PreviewPanel({
               />
             )}
           </scrollbox>
-        ) : null}
-        {fileTreeMode !== "hidden" ? (
-          <box
-            width={treeOnly ? "100%" : fileTreeWidth}
-            flexDirection="column"
-            border={treeOnly ? [] : ["left"]}
-            borderStyle="single"
-            borderColor={panel === "files" ? colors.accent : colors.modalBorder}
-            paddingLeft={1}
-            onMouseDown={(event) => {
-              event.stopPropagation();
-              onFocusPanel("files");
-            }}
-            onMouseScroll={(event) => {
-              event.stopPropagation();
-              if (event.scroll?.direction === "up") onScrollFiles(-1);
-              else if (event.scroll?.direction === "down") onScrollFiles(1);
-            }}
-          >
-            <TextLine fg={panel === "files" ? colors.accent : colors.muted}>{` FILES  ${data.idx + 1}/${data.files.length}`}</TextLine>
-            {treeRows.slice(treeWin, treeWin + treeViewport).map((row) => {
-              const selected = row.kind === "file" && row.path === data.file;
-              const prefix = row.kind === "folder" ? "▾ " : selected ? "› " : "  ";
-              const fileIndex = row.kind === "file" ? data.files.indexOf(row.path) : -1;
-              return (
-                <TextLine
-                  key={`${row.kind}:${row.path}`}
-                  fg={row.kind === "folder" ? colors.accent : selected ? colors.selectedText : colors.text}
-                  bg={selected ? colors.selectedBg : undefined}
-                  onMouseDown={(event) => {
-                    event.stopPropagation();
-                    onFocusPanel("files");
-                    if (fileIndex !== -1) onSelectFile(fileIndex);
-                  }}
-                >
-                  {`${"  ".repeat(row.depth)}${prefix}${row.label}`}
-                </TextLine>
-              );
-            })}
-          </box>
-        ) : null}
-      </box>
+        </box>
+      ) : null}
+      {!treeOnly && showTree ? <SeparatorColumn height={height} /> : null}
+      {tree}
     </box>
   );
 }

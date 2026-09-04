@@ -114,8 +114,9 @@ Symlink links use `"mode": "symlink"` and omit `snapshotHash`. Targets are limit
   "version": 1,
   "host": "/absolute/path/to/my-agent-skills",
   "diffPager": "delta",
-  "editor": "code -w"
+  "editor": "code -w",
+  "theme": "nord"
 }
 ```
 
-`diffPager` is optional and accepts `hunk` or `delta`. `editor` is an optional nonblank command specification, including arguments. Clearing either setting removes its property rather than writing `null` or `"none"`. The editor resolves from the configured value, then `$VISUAL`, `$EDITOR`, and finally `nvim`. `SLINKY_REPO` can override the configured host for one invocation.
+`diffPager` is optional and accepts `hunk` or `delta`. `editor` is an optional nonblank command specification, including arguments. `theme` is an optional TUI palette id (the `t` picker in the TUI lists them, e.g. `nord`, `catppuccin-latte`); absent means `slinky`. Clearing any of these settings removes its property rather than writing `null` or `"none"`. The editor resolves from the configured value, then `$VISUAL`, `$EDITOR`, and finally `nvim`. `SLINKY_REPO` can override the configured host for one invocation.

@@ -66,7 +66,7 @@ Open the terminal UI:
 slinky
 ```
 
-The TUI is arranged as `authors | skills | document`, with a related-file tree on the document's right edge. Use `h/j/k/l` or the arrow keys to focus and navigate panels, `gg`/`G` to jump to boundaries, and `x` to directly expand the focused primary panel. Press `v` to cycle forward and `V` to cycle backward through three panes, a contextual two-pane layout, and the focused pane at full width. With authors or skills focused, the two-pane step is `authors | skills` at 33/67; with the document or file tree focused, it is `skills | document` at 40/60. Use `<` and `>` to shrink or grow the focused side of either split. Press `e` on a local catalog skill or an unindexed local skill to suspend the TUI and open that skill in `nvim` with the skills host as the working directory; vendor baselines, the temporary staging inbox, and project-only copies are intentionally excluded.
+The TUI is arranged as `authors | skills | document`, with a related-file tree on the document's right edge. Use `h/j/k/l` or the arrow keys to focus and navigate panels, `gg`/`G` to jump to boundaries, and `x` to directly expand the focused primary panel. Press `v` to cycle forward and `V` to cycle backward through three panes, a contextual two-pane layout, and the focused pane at full width. With authors or skills focused, the two-pane step is `authors | skills` at 33/67; with the document or file tree focused, it is `skills | document` at 40/60. Use `<` and `>` to shrink or grow the focused side of either split. The focused pane is the one whose uppercase title is highlighted. Press `t` to pick a colour theme: moving through the list previews it live, `enter` records it in `~/.config/slinky/config.json`, and `esc` restores the saved one. Press `e` on a local catalog skill or an unindexed local skill to suspend the TUI and open that skill in `nvim` with the skills host as the working directory; vendor baselines, the temporary staging inbox, and project-only copies are intentionally excluded.
 
 Or inspect the catalog from the CLI:
 
@@ -269,7 +269,8 @@ Record a pager once instead of passing a flag every time:
 ```bash
 slinky config diff-pager delta   # or hunk, or none to print inline
 slinky config editor "code -w"   # or none to fall back to $VISUAL/$EDITOR
-slinky config                    # show the recorded host, pager, and editor
+slinky config theme nord         # or none for the default; t in the TUI previews them
+slinky config                    # show the recorded host, pager, editor, and theme
 ```
 
 `diff` and `update` both use it. `update` collects every changed skill into a single patch and opens that one session before asking about each skill, so the whole update is reviewable in one pass. A flag overrides the recorded pager for one run, and `--no-pager` forces inline output.
@@ -304,9 +305,10 @@ slinky enable <skill...>
 slinky disable <skill...> [--force]
 slinky profile list
 slinky profile apply <name> [--force]
-slinky config                         # show recorded host, diff pager, and editor
+slinky config                         # show recorded host, diff pager, editor, and theme
 slinky config diff-pager [hunk|delta|none]
 slinky config editor [<command>|none] # e.g. "code -w"; falls back to $VISUAL, $EDITOR, nvim
+slinky config theme [<id>|none]       # e.g. nord, catppuccin-latte; t in the TUI lists them
 slinky update --check
 slinky update [skill...] [--yes] [--hunk|--delta|--pager <hunk|delta>|--no-pager]
 slinky skills add <source> [--skill <name>...]

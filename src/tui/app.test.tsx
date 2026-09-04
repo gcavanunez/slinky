@@ -125,8 +125,8 @@ test("mounts and renders the catalog chrome", async () => {
   try {
     const frame = await setup.waitForFrame((value) => value.includes("slinky"));
     expect(frame).toContain("slinky");
-    expect(frame).toContain("available here");
-    expect(frame).toContain("all skills");
+    expect(frame).toContain("AVAILABLE HERE");
+    expect(frame).toContain("ALL SKILLS");
   } finally {
     destroy(setup);
   }
@@ -157,7 +157,7 @@ test("? opens help and esc closes it", async () => {
 
     await input(() => setup.mockInput.pressKey("?"));
     const help = await setup.waitForFrame((value) => value.includes("focus the previous or next panel"));
-    expect(help).toContain("help");
+    expect(help).toContain("Help");
 
     await input(async () => {
       setup.mockInput.pressEscape();
@@ -183,15 +183,16 @@ test("overlays are exclusive and render the payload captured when opened", async
 
     await input(() => setup.mockInput.pressKey("i"));
     const detail = await setup.waitForFrame((value) => value.includes("gamma unindexed fixture skill."));
-    expect(detail).toContain("gamma · unindexed");
+    expect(detail).toContain("gamma");
+    expect(detail).toContain("unindexed");
 
     // List bindings are inactive while an overlay owns the interaction state.
     await input(() => setup.mockInput.pressKey("p"));
-    expect(await setup.waitForFrame((value) => value.includes("gamma unindexed fixture skill."))).not.toContain("applying a profile");
+    expect(await setup.waitForFrame((value) => value.includes("gamma unindexed fixture skill."))).not.toContain("Applying a profile");
     await closeOverlay(setup);
 
     await input(() => setup.mockInput.pressKey("a"));
-    const index = await setup.waitForFrame((value) => value.includes("index gamma"));
+    const index = await setup.waitForFrame((value) => value.includes("Index gamma"));
     expect(index).toContain("source: skills/gamma");
     await closeOverlay(setup);
 
@@ -200,20 +201,20 @@ test("overlays are exclusive and render the payload captured when opened", async
     await input(() => setup.mockInput.pressKey("l"));
 
     await input(() => setup.mockInput.pressKey("d"));
-    const diff = await setup.waitForFrame((value) => value.includes("diff alpha"));
+    const diff = await setup.waitForFrame((value) => value.includes("Diff alpha"));
     expect(diff).toContain("local skill: lives in the repo, nothing to diff");
     await closeOverlay(setup);
 
     await input(() => setup.mockInput.pressKey("l", { shift: true }));
-    const link = await setup.waitForFrame((value) => value.includes("link alpha"));
-    expect(link).toContain("project directory:");
+    const link = await setup.waitForFrame((value) => value.includes("Link alpha"));
+    expect(link).toContain("Project directory");
     await closeOverlay(setup);
 
     await input(() => setup.mockInput.pressKey("p"));
-    const profiles = await setup.waitForFrame((value) => value.includes("applying a profile disables"));
+    const profiles = await setup.waitForFrame((value) => value.includes("Applying a profile disables"));
     expect(profiles).toContain("focus");
     await closeOverlay(setup);
-    expect(await setup.waitForFrame((value) => !value.includes("applying a profile disables"))).toContain("alpha");
+    expect(await setup.waitForFrame((value) => !value.includes("Applying a profile disables"))).toContain("alpha");
   } finally {
     destroy(setup);
     rmSync(gamma, { recursive: true, force: true });

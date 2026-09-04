@@ -11,6 +11,38 @@ export function fitCell(s: string, width: number, align: "left" | "right" = "lef
   return align === "left" ? s.padEnd(width) : s.padStart(width);
 }
 
+/** Centre text within `width`, padding both sides so a row background fills fully. */
+export function centerCell(s: string, width: number): string {
+  if (width <= 0) return "";
+  if (s.length >= width) return fitCell(s, width);
+  const left = Math.floor((width - s.length) / 2);
+  return `${" ".repeat(left)}${s}`.padEnd(width);
+}
+
+/** Greedy word wrap; words longer than `width` are split. Always yields at least one line. */
+export function wrapText(text: string, width: number): string[] {
+  const lines: string[] = [];
+  for (const paragraph of text.split(/\r?\n/)) {
+    let line = "";
+    for (const word of paragraph.split(/\s+/).filter(Boolean)) {
+      if (line.length === 0) {
+        line = word;
+      } else if (line.length + 1 + word.length <= width) {
+        line += ` ${word}`;
+      } else {
+        lines.push(line);
+        line = word;
+      }
+      while (line.length > width && width > 0) {
+        lines.push(line.slice(0, width));
+        line = line.slice(width);
+      }
+    }
+    lines.push(line);
+  }
+  return lines.length > 0 ? lines : [""];
+}
+
 /** Sliding window that keeps `selected` visible within `viewport` rows. */
 export function windowOf(offset: number, selected: number, total: number, viewport: number): number {
   if (total <= viewport) return 0;
