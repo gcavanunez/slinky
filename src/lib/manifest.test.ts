@@ -3,7 +3,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Cause, Effect, Exit, Layer, Schema } from "effect";
-import { getDisabledSkills, isSkillEnabled, ManifestStore, stateVersion } from "./manifest.ts";
+import { getDisabledSkills, isSkillEnabled, stateVersion } from "../domain/model.ts";
+import { ManifestStore } from "./manifest.ts";
 import type { ManifestStoreInterface } from "./manifest.ts";
 import { HostRepo, hostRepoPaths } from "./paths.ts";
 

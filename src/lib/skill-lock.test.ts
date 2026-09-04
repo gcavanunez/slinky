@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { ConfigProvider, Effect, Layer } from "effect";
 import type { Manifest } from "../domain/model.ts";
 import { HostRepo, Paths } from "./paths.ts";
-import { absorbGlobalSkillLockEntries, ensureHostSkillLock, pruneGlobalSkillLockEntries, readSkillLockFile, restoreGlobalSkillLock, seedGlobalSkillLock } from "./skillLock.ts";
+import { absorbGlobalSkillLockEntries, ensureHostSkillLock, pruneGlobalSkillLockEntries, readSkillLockFile, restoreGlobalSkillLock, seedGlobalSkillLock } from "./skill-lock.ts";
 
 const roots: string[] = [];
 

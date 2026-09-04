@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseSkillsAddSource } from "./skillsAdd.ts";
+import { parseSkillsAddSource } from "./skills-add.ts";
 
 describe("parseSkillsAddSource", () => {
   test("accepts a source by itself", () => {

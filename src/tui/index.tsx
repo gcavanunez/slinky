@@ -7,7 +7,7 @@ import type { CliRenderer, CliRendererConfig, ClipboardService, HostClipboardSer
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui";
 import { KeymapProvider } from "@opentui/keymap/react";
 import { createRoot } from "@opentui/react";
-import { App } from "./App.tsx";
+import { App } from "./app.tsx";
 import { runtime } from "./runtime.ts";
 
 /** Resolve once the renderer has released the terminal, however that happened. */

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Schema } from "effect";
 import { contentHash } from "./hash.ts";
-import { Manifest, version } from "./manifest.ts";
+import { Manifest, version } from "../domain/model.ts";
 import { refreshLocalHashes } from "./rehash.ts";
 
 const STALE = "0".repeat(64);

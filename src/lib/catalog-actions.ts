@@ -4,12 +4,13 @@ import { dirname, join } from "node:path";
 import { Cause, Effect, Exit } from "effect";
 import { errorDetail, OperationFailed } from "../domain/model.ts";
 import type { Manifest, SkillLockDecodeError, State } from "../domain/model.ts";
-import { getProfile, getSkill, ManifestStore, withProfile, withSkillEnabled } from "./manifest.ts";
+import { getProfile, getSkill, withProfile, withSkillEnabled } from "../domain/model.ts";
+import { ManifestStore } from "./manifest.ts";
 import { applyUnlink, linkSkill, prepareUnlink, unlinkSkill } from "./linker.ts";
 import type { LinkOptions } from "./linker.ts";
 import { apply, observeAndPlan } from "./reconcile.ts";
-import { absorbGlobalSkillLockEntries, loadHostSkillLock, readSkillLockFile, restoreHostSkillLock } from "./skillLock.ts";
-import { vendorAccept, vendorRestore } from "./vendorOps.ts";
+import { absorbGlobalSkillLockEntries, loadHostSkillLock, readSkillLockFile, restoreHostSkillLock } from "./skill-lock.ts";
+import { vendorAccept, vendorRestore } from "./vendor-ops.ts";
 import { HostRepo, Paths } from "./paths.ts";
 
 export interface ActionResult {

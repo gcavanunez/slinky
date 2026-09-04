@@ -34,7 +34,7 @@ function rowInCode(code: CodeRenderable, line: number): number {
  * code renderable, and under the default "coalesced" mode the whole document
  * collapses into one block, so a jump to the first heading after a table lands
  * two rows short. Both modes look identical on documents made only of headings
- * and paragraphs, which is why docNav.test.tsx pins a fixture containing a table
+ * and paragraphs, which is why doc-nav.test.tsx pins a fixture containing a table
  * and a list.
  *
  * Together they are why @opentui/core is pinned exactly rather than by range: a

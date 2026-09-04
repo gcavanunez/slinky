@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { CatalogLiveStatus, LiveEntry, Placement, VendorHashState } from "./catalogInspection.ts";
-import { inspectCatalogEntry } from "./catalogInspection.ts";
+import type { CatalogLiveStatus, LiveEntry, Placement, VendorHashState } from "./catalog-inspection.ts";
+import { inspectCatalogEntry } from "./catalog-inspection.ts";
 
 const EXPECTED = "/repo/skills/example";
 

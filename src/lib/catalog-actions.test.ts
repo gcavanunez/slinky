@@ -3,12 +3,12 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Cause, ConfigProvider, Effect, Exit, Layer } from "effect";
-import { acceptVendorDrift, acceptVendorDrifts, applyProfile, linkProjectSkill, restoreVendorDrift, setSkillsEnabled, unlinkProjectSkill } from "./catalogActions.ts";
+import { acceptVendorDrift, acceptVendorDrifts, applyProfile, linkProjectSkill, restoreVendorDrift, setSkillsEnabled, unlinkProjectSkill } from "./catalog-actions.ts";
 import { ManifestFileError } from "../domain/model.ts";
 import { contentHash } from "./hash.ts";
 import { ManifestStore } from "./manifest.ts";
 import { HostRepo, Paths } from "./paths.ts";
-import { assertVendorUpdatePlacements } from "./vendorOps.ts";
+import { assertVendorUpdatePlacements } from "./vendor-ops.ts";
 
 const roots: string[] = [];
 const version = 1;

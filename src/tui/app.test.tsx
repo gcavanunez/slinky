@@ -3,7 +3,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AppProps } from "./App.tsx";
+import type { AppProps } from "./app.tsx";
 import type { UpstreamStatus } from "../lib/update.ts";
 import type { RunResult } from "./runtime.ts";
 
@@ -43,7 +43,7 @@ const { createTestRenderer } = await import("@opentui/core/testing");
 const { createDefaultOpenTuiKeymap } = await import("@opentui/keymap/opentui");
 const { KeymapProvider } = await import("@opentui/keymap/react");
 const { createRoot } = await import("@opentui/react");
-const { App } = await import("./App.tsx");
+const { App } = await import("./app.tsx");
 const { rendererOptions } = await import("./index.tsx");
 const { runtime } = await import("./runtime.ts");
 

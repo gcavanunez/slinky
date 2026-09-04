@@ -1,10 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { resolve } from "node:path";
 import { Schema } from "effect";
-import { Manifest, State, stateVersion, version, withManifestSkill } from "./manifest.ts";
-import type { Observation } from "./reconcile.ts";
-import { planSync } from "./reconcile.ts";
-import { claudeRelTarget } from "./paths.ts";
+import { Manifest, State, stateVersion, version, withManifestSkill } from "./model.ts";
+import type { Observation } from "./reconcile-plan.ts";
+import { claudeRelTarget, planSync } from "./reconcile-plan.ts";
 
 const CLAUDE_SKILLS = "/home/user/.claude/skills";
 

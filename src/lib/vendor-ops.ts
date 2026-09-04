@@ -3,12 +3,12 @@ import { join, resolve } from "node:path";
 import { Effect, Schema } from "effect";
 import { errorDetail, formatUtc, getSkill, isMissingFile, nowUtc, OperationFailed, Skill, withManifestSkill } from "../domain/model.ts";
 import type { Manifest, SkillLockDecodeError } from "../domain/model.ts";
-import { classifyPlacement } from "./catalogInspection.ts";
+import { classifyPlacement } from "../domain/catalog-inspection.ts";
 import { contentHash } from "./hash.ts";
 import { HostRepo, Paths } from "./paths.ts";
 import { observe } from "./reconcile.ts";
-import { readSkillLockFile, upstreamFromLock } from "./skillLock.ts";
-import type { SkillLockSnapshot } from "./skillLock.ts";
+import { readSkillLockFile, upstreamFromLock } from "./skill-lock.ts";
+import type { SkillLockSnapshot } from "./skill-lock.ts";
 
 const decodeSkill = Schema.decodeUnknownSync(Skill);
 

@@ -24,9 +24,6 @@ function walkUp(start: string): string | null {
   return null;
 }
 
-/** Relative symlink target used inside ~/.claude/skills. */
-export const claudeRelTarget = (name: string) => join("..", "..", ".agents", "skills", name);
-
 /**
  * Outcome of skills-repo discovery. Resolution order:
  *   1. $SLINKY_REPO

@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, sy
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Cause, Effect, Exit, Layer, Schema } from "effect";
-import { Manifest, ProjectLink, State, stateVersion, version } from "./manifest.ts";
+import { Manifest, ProjectLink, State, stateVersion, version } from "../domain/model.ts";
 import { applyUnlink, checkLink, isGlobalStoreProject, linkSkill, prepareUnlink, unlinkSkill } from "./linker.ts";
 import { HostRepo, hostRepoPaths, Paths, RepoResolution } from "./paths.ts";
 

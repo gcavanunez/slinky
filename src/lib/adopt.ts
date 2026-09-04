@@ -1,20 +1,16 @@
 import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, posix, resolve } from "node:path";
 import { Cause, Effect, Exit, Schema } from "effect";
-import { errorDetail, formatUtc, isMissingFile, nowUtc, OperationFailed, Skill, withManifestSkill } from "../domain/model.ts";
+import { alignStateWithManifest, errorDetail, formatUtc, isMissingFile, nowUtc, OperationFailed, Skill, withManifestSkill } from "../domain/model.ts";
 import type { Manifest, State } from "../domain/model.ts";
 import type { SkillLockDecodeError } from "../domain/model.ts";
 import { readdirIfExists } from "./fs.ts";
 import { contentHash } from "./hash.ts";
-import { alignStateWithManifest } from "./manifest.ts";
 import type { ManifestStoreInterface } from "./manifest.ts";
 import { HostRepo, Paths } from "./paths.ts";
-import { canonicalLockEntry, ensureHostSkillLock, loadHostSkillLock, readSkillLockFile, restoreHostSkillLock, saveHostSkillLock, upstreamFromLock } from "./skillLock.ts";
-import type { LockMeta, SkillLockEntry } from "./skillLock.ts";
+import { canonicalLockEntry, ensureHostSkillLock, loadHostSkillLock, readSkillLockFile, restoreHostSkillLock, saveHostSkillLock, upstreamFromLock } from "./skill-lock.ts";
+import type { LockMeta, SkillLockEntry } from "./skill-lock.ts";
 import { GitHub } from "./update.ts";
-
-export { decodeSkillLock, upstreamFromLock } from "./skillLock.ts";
-export type { LockMeta, SkillLockInput, SkillLockSnapshot } from "./skillLock.ts";
 
 const AdoptionDestination = Schema.Union([Schema.String.check(Schema.isPattern(/^skills\/[^/]+$/)), Schema.String.check(Schema.isPattern(/^vendor\/[^/]+\/[^/]+$/))]);
 const decodeAdoptionDestination = Schema.decodeUnknownSync(AdoptionDestination);

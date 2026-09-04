@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Schema } from "effect";
 import { contentHash } from "../lib/hash.ts";
-import { State, stateVersion } from "../lib/manifest.ts";
+import { State, stateVersion } from "../domain/model.ts";
 import {
   diffSkill,
   discoverProjectSkills,

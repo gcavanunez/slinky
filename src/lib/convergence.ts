@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import {
   copyFileSync,
   cpSync,
@@ -18,14 +17,16 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, posix, resolve } from "node:path";
 import { Cause, Effect, Exit, Schema } from "effect";
-import { errorDetail, ExternalToolError, isMissingFile, OperationFailed } from "../domain/model.ts";
+import { alignStateForTransition, alignStateWithManifest, errorDetail, ExternalToolError, isMissingFile, Manifest, OperationFailed, withSkillEnabled } from "../domain/model.ts";
+import type { State } from "../domain/model.ts";
+import { planSync } from "../domain/reconcile-plan.ts";
+import type { Plan } from "../domain/reconcile-plan.ts";
 import { findUnindexedSkills } from "./adopt.ts";
+import { assertGitRoot, conflictedPaths, requireCleanWorktree, requireUpstream, runGit, temporaryWorktree, tryGit } from "./git.ts";
 import { contentHash, findSymlinks, walkFiles } from "./hash.ts";
-import { alignStateForTransition, alignStateWithManifest, Manifest, ManifestStore, withSkillEnabled } from "./manifest.ts";
-import type { State } from "./manifest.ts";
+import { ManifestStore } from "./manifest.ts";
 import { HostRepo, Paths } from "./paths.ts";
-import { apply, observe, planSync, reconcileCatalog } from "./reconcile.ts";
-import type { Plan } from "./reconcile.ts";
+import { apply, observe, reconcileCatalog } from "./reconcile.ts";
 import { refreshLocalHashes } from "./rehash.ts";
 import {
   ensureHostSkillLock,
@@ -38,9 +39,9 @@ import {
   seedGlobalSkillLock,
   skillLockVersion,
   validateSkillLock,
-} from "./skillLock.ts";
-import type { SkillLockEntry, SkillLockSnapshot } from "./skillLock.ts";
-import { findDriftingVendors, vendorRestore } from "./vendorOps.ts";
+} from "./skill-lock.ts";
+import type { SkillLockEntry, SkillLockSnapshot } from "./skill-lock.ts";
+import { findDriftingVendors, vendorRestore } from "./vendor-ops.ts";
 
 export type ConvergenceTone = "dim" | "error" | "success" | "warning";
 
@@ -114,52 +115,10 @@ const loadHostState = Effect.gen(function* () {
   return { store, manifest, state };
 });
 
-/** Run Git without inheriting repository variables from the caller. */
-const tryGit = Effect.fn("Convergence.tryGit")(function* (repo: string, args: ReadonlyArray<string>) {
-  const env = { ...process.env };
-  for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX"]) {
-    delete env[name];
-  }
-  const result = yield* Effect.sync(() => spawnSync("git", ["--literal-pathspecs", ...args], { cwd: repo, encoding: "utf8", env }));
-  if (result.error) return yield* Effect.fail(new ExternalToolError({ tool: "git", message: result.error.message }));
-  return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
-});
-
-const runGit = Effect.fn("Convergence.runGit")(function* (repo: string, args: ReadonlyArray<string>) {
-  const result = yield* tryGit(repo, args);
-  if (result.status !== 0) {
-    const detail = (result.stderr || result.stdout || "").trim();
-    return yield* Effect.fail(new ExternalToolError({ tool: "git", message: detail || `git exited with ${result.status ?? "unknown"}` }));
-  }
-  return { stdout: result.stdout, stderr: result.stderr };
-});
-
 const emitGitOutput = (sink: ConvergenceEventSink | undefined, result: { readonly stdout: string; readonly stderr: string }) => {
   if (!`${result.stdout}${result.stderr}`.trim()) return Effect.void;
   return send(sink, { type: "git-output", stdout: result.stdout, stderr: result.stderr });
 };
-
-const assertGitRoot = Effect.fn("Convergence.assertGitRoot")(function* (repo: string) {
-  const topLevel = yield* runGit(repo, ["rev-parse", "--show-toplevel"]);
-  if (realpathSync(topLevel.stdout.trim()) !== realpathSync(repo)) return yield* bail(`skills host must be a Git repository root: ${repo}`);
-});
-
-const requireCleanWorktree = Effect.fn("Convergence.requireCleanWorktree")(function* (repo: string) {
-  const status = yield* runGit(repo, ["status", "--porcelain", "--untracked-files=normal"]);
-  if (status.stdout.trim()) return yield* bail("skills host worktree must be clean; save, commit, or remove local changes first");
-});
-
-const requireUpstream = Effect.fn("Convergence.requireUpstream")(function* (repo: string) {
-  const branch = (yield* runGit(repo, ["branch", "--show-current"])).stdout.trim();
-  if (!branch) return yield* bail("skills host is on a detached HEAD; check out a branch first");
-  const upstream = yield* runGit(repo, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]).pipe(
-    Effect.map((result) => result.stdout.trim()),
-    Effect.mapError(() => new OperationFailed({ message: `branch ${branch} has no upstream; configure one with git push --set-upstream` })),
-  );
-  const remote = (yield* runGit(repo, ["config", "--get", `branch.${branch}.remote`])).stdout.trim();
-  const mergeRef = (yield* runGit(repo, ["config", "--get", `branch.${branch}.merge`])).stdout.trim();
-  return { upstream, remote, mergeRef };
-});
 
 const loadCommittedManifest = Effect.fn("Convergence.loadCommittedManifest")(function* (repo: string) {
   const committed = yield* runGit(repo, ["show", "HEAD:skills.manifest.json"]);
@@ -322,21 +281,6 @@ const applyRetirement = Effect.fn("Convergence.applyRetirement")(function* (
   yield* pruneGlobalSkillLockEntries(manifest, oldLockEntries, removed, options.force ?? false);
 });
 
-const temporaryWorktree = Effect.fn("Convergence.temporaryWorktree")(function* (repo: string, prefix: string, commit: string) {
-  return yield* Effect.acquireRelease(
-    Effect.gen(function* () {
-      const directory = mkdtempSync(join(tmpdir(), prefix));
-      yield* runGit(repo, ["worktree", "add", "--detach", directory, commit]).pipe(Effect.onError(() => Effect.sync(() => rmSync(directory, { recursive: true, force: true }))));
-      return directory;
-    }),
-    (directory) =>
-      Effect.gen(function* () {
-        yield* runGit(repo, ["worktree", "remove", "--force", directory]).pipe(Effect.ignore);
-        yield* Effect.sync(() => rmSync(directory, { recursive: true, force: true }));
-      }),
-  );
-});
-
 const loadIncomingCatalog = Effect.fn("Convergence.loadIncomingCatalog")(function* (repo: string, commit: string, sink: ConvergenceEventSink | undefined) {
   return yield* Effect.scoped(
     Effect.gen(function* () {
@@ -369,13 +313,6 @@ const loadCatalogTree = Effect.fn("Convergence.loadCatalogTree")(function* (repo
     }),
   );
 });
-
-function conflictedPaths(mergeTreeStdout: string): ReadonlyArray<string> {
-  const lines = mergeTreeStdout.split("\n").slice(1);
-  const end = lines.indexOf("");
-  const entries = end === -1 ? lines : lines.slice(0, end);
-  return [...new Set(entries.map((line) => line.split("\t")[1]).filter((path): path is string => path !== undefined))];
-}
 
 const rebaseDivergence = Effect.fn("Convergence.rebaseDivergence")(function* (
   repo: string,

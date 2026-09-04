@@ -4,7 +4,7 @@ import { SyntaxStyle } from "@opentui/core";
 import type { CodeRenderable, MarkdownRenderable, ScrollBoxRenderable } from "@opentui/core";
 import { testRender } from "@opentui/react/test-utils";
 import { useEffect, useRef, useState } from "react";
-import { scrollRowForLine } from "./docNav.ts";
+import { scrollRowForLine } from "./doc-nav.ts";
 
 /**
  * scrollRowForLine reads MarkdownRenderable._parseState and ._blockStates,

@@ -3,13 +3,14 @@ import { join, posix, resolve } from "node:path";
 import { Cache, Context, Duration, Effect, Exit, Layer, Schedule, Schema } from "effect";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
 import { errorDetail, ExternalToolError, isSkillEnabled } from "../domain/model.ts";
-import { inspectCatalogEntry } from "./catalogInspection.ts";
-import type { LiveEntry } from "./catalogInspection.ts";
+import type { Manifest, State } from "../domain/model.ts";
+import { inspectCatalogEntry } from "../domain/catalog-inspection.ts";
+import type { LiveEntry } from "../domain/catalog-inspection.ts";
+import { runGit } from "./git.ts";
 import { contentHash } from "./hash.ts";
-import type { Manifest, State } from "./manifest.ts";
 import { HostRepo, Paths } from "./paths.ts";
 import { observe } from "./reconcile.ts";
-import { seedGlobalSkillLock } from "./skillLock.ts";
+import { seedGlobalSkillLock } from "./skill-lock.ts";
 
 export type UpstreamState = "current" | "update" | "gone" | "unchecked";
 
@@ -223,14 +224,6 @@ export const detectChanges = Effect.fn("Update.detectChanges")(function* (manife
 /** True when the baseline (vendor/, skills/, manifest, lock) has uncommitted changes. */
 export const baselineDirty = Effect.fn("Update.baselineDirty")(function* () {
   const { repo } = yield* HostRepo;
-  const res = yield* Effect.sync(() =>
-    spawnSync("git", ["status", "--porcelain", "--", "vendor", "skills", "skills.manifest.json", ".skill-lock.json"], { cwd: repo, encoding: "utf8" }),
-  );
-  if (res.error) {
-    return yield* Effect.fail(new ExternalToolError({ tool: "git", message: `git status failed: ${res.error.message}` }));
-  }
-  if (res.status !== 0) {
-    return yield* Effect.fail(new ExternalToolError({ tool: "git", message: `git status failed (${res.status ?? "unknown"}): ${(res.stderr ?? "").trim()}` }));
-  }
-  return (res.stdout ?? "").trim().length > 0;
+  const status = yield* runGit(repo, ["status", "--porcelain", "--", "vendor", "skills", "skills.manifest.json", ".skill-lock.json"]);
+  return status.stdout.trim().length > 0;
 });

@@ -5,45 +5,48 @@ import { basename, extname, join } from "node:path";
 import { Match } from "effect";
 import { useKeyboard, usePaste, useRenderer, useSelectionHandler, useTerminalDimensions } from "@opentui/react";
 import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core";
-import { acceptVendorDrift, applyProfile, linkProjectSkill, restoreVendorDrift, setSkillsEnabled } from "../lib/catalogActions.ts";
-import type { ActionResult } from "../lib/catalogActions.ts";
+import { acceptVendorDrift, applyProfile, linkProjectSkill, restoreVendorDrift, setSkillsEnabled } from "../lib/catalog-actions.ts";
+import type { ActionResult } from "../lib/catalog-actions.ts";
 import { isClean, pagePatch, unifiedDiff } from "../lib/diff.ts";
-import type { DiffPager, DirDiff } from "../lib/diff.ts";
-import { formatUtc, getActiveProfile, getProfile } from "../lib/manifest.ts";
-import { addSkillFromSource, parseSkillsAddSource } from "../lib/skillsAdd.ts";
+import type { DiffPager } from "../lib/diff.ts";
+import { getActiveProfile } from "../domain/model.ts";
+import { addSkillFromSource, parseSkillsAddSource } from "../lib/skills-add.ts";
 import { checkUpstream } from "../lib/update.ts";
 import type { UpstreamStatus } from "../lib/update.ts";
 import type { UnindexedSkill } from "../lib/adopt.ts";
 import { runPromiseResult, runSync, runSyncResult } from "./runtime.ts";
 import type { RunResult } from "./runtime.ts";
-import { Hint, Modal, TextLine } from "./components.tsx";
+import { Hint, TextLine } from "./components.tsx";
 import { colors, createMarkdownSyntax } from "./theme.ts";
 import { clamp, fileTreeRows, fitCell, markdownBody, markdownHeadingLines, printable, searchMatchLines, singleLinePaste, windowOf } from "./util.ts";
-import { scrollRowForLine } from "./docNav.ts";
-import type { DocRenderable } from "./docNav.ts";
+import { scrollRowForLine } from "./doc-nav.ts";
+import type { DocRenderable } from "./doc-nav.ts";
 import { copySelection, handleSelectionKey } from "./clipboard.ts";
 import type { SelectionClipboard } from "./clipboard.ts";
 import { editableHostSkillPath, editSkillInEditor, withSuspendedRenderer } from "./external.ts";
 import { cycleLayout, primaryPanel, resizeFocusedSplit } from "./layout.ts";
 import type { Panel, PrimaryPanel, TwoPanePair } from "./layout.ts";
-import { useAppKeybindings } from "./useAppKeybindings.ts";
-import type { AppCommand, AppKeymapState } from "./useAppKeybindings.ts";
+import { useAppKeybindings } from "./use-app-keybindings.ts";
+import type { AppCommand, AppKeymapState } from "./use-app-keybindings.ts";
+import { DetailModal } from "./modals/detail-modal.tsx";
+import { DiffModal } from "./modals/diff-modal.tsx";
+import { HelpModal } from "./modals/help-modal.tsx";
+import { IndexSkillModal } from "./modals/index-skill-modal.tsx";
+import { LinkModal } from "./modals/link-modal.tsx";
+import { ProfilesModal } from "./modals/profiles-modal.tsx";
+import { ProjectSkillModal } from "./modals/project-skill-modal.tsx";
+import { UnindexedSkillModal } from "./modals/unindexed-skill-modal.tsx";
 import {
   diffSkill,
   expandHome,
   isSkillAvailableHere,
-  linksForSkill,
   loadCatalog,
-  projectSkillDescription,
   projectSkillFiles,
-  projectSkillPath,
   projectPlacement,
   readProjectSkillFile,
   readSkillFile,
   readUnindexedSkillFile,
-  skillDescription,
   skillFiles,
-  unindexedSkillDescription,
   unindexedSkillFiles,
   verifyRow,
 } from "./data.ts";
@@ -70,7 +73,7 @@ function ownerOf(row: CatalogRow): string {
   return row.meta.path.split("/")[1] ?? "vendor";
 }
 
-interface LinkFlow {
+export interface LinkFlow {
   step: "project" | "mode" | "options";
   input: string;
   recentIndex: number; // -1 = free text
@@ -80,7 +83,7 @@ interface LinkFlow {
   error?: string;
 }
 
-interface IndexFlow {
+export interface IndexFlow {
   input: string;
   running: boolean;
   error?: string;
@@ -129,7 +132,7 @@ function keymapStateFor(interaction: Interaction, textInputActive: boolean): App
   }
 }
 
-const liveColor = {
+export const liveColor = {
   ok: colors.green,
   drift: colors.yellow,
   missing: colors.red,
@@ -139,7 +142,7 @@ const liveColor = {
   unowned: colors.yellow,
 } satisfies Record<LiveStatus, string>;
 
-const liveLabel = {
+export const liveLabel = {
   ok: "ok",
   drift: "drift",
   missing: "missing",
@@ -1458,321 +1461,5 @@ function PreviewPanel({
         ) : null}
       </box>
     </box>
-  );
-}
-
-// ---- overlays ------------------------------------------------------------
-
-function HelpModal({ cols, editor }: { cols: number; editor: string }) {
-  const lines: Array<[string, string]> = [
-    ["h/l, left/right", "focus the previous or next panel"],
-    ["tab", "focus the next panel, wrapping at the end"],
-    ["j/k, up/down", "move or scroll within the focused panel"],
-    ["0 / $", "focus the first / last panel"],
-    ["gg / G", "first / last item or document boundary"],
-    ["ctrl-d / ctrl-u", "half-page down / up"],
-    ["ctrl-f / ctrl-b", "full page down / up"],
-    ["ctrl-e / ctrl-y", "scroll the document one line from any panel"],
-    ["x", "expand or restore the focused primary panel"],
-    ["v / V", "cycle layouts forward / backward: three, two, focused"],
-    ["< / >", "shrink / grow the focused pane in a two-pane layout"],
-    ["J / K, PgUp/PgDn", "scroll the document from any panel"],
-    ["[ / ]", "previous / next related file"],
-    ["{ / }", "previous / next markdown heading in the document"],
-    ["n / N", "next / previous document search match"],
-    ["enter", "enter the next panel; from document, show details"],
-    ["i", "show skill details"],
-    ["e", `edit a local or unindexed host skill in ${editor}`],
-    ["1 / 2", "available here / all skills view"],
-    ["a", "index selected unindexed .agents skill"],
-    ["space", "toggle a skill or every skill by the focused author"],
-    ["u", "check vendor skills for upstream updates"],
-    ["L", "link skill into a project (copy or symlink)"],
-    ["d", "diff live global copy vs repo baseline"],
-    ["p", "profile picker (exact-set apply)"],
-    ["/", "filter lists; in the document pane, search the document"],
-    ["r", "reload catalog"],
-    ["drag / ctrl-c", "copy selected text to clipboard"],
-    ["q / ctrl-c", "quit (ctrl-c only without a text selection)"],
-    ["mouse", "click rows/tabs/panels; drag text to copy; wheel scrolls"],
-  ];
-  return (
-    <Modal title="help" width={76} cols={cols}>
-      {lines.map(([keys, label]) => (
-        <TextLine key={keys}>
-          <span fg={colors.accent}>{fitCell(keys, 18)}</span>
-          <span fg={colors.text}>{label}</span>
-        </TextLine>
-      ))}
-      <TextLine fg={colors.muted}>{"esc to close"}</TextLine>
-    </Modal>
-  );
-}
-
-function DetailModal({ cols, row, catalog }: { cols: number; row: CatalogRow; catalog: Catalog }) {
-  const desc = skillDescription(catalog.repo, row.meta);
-  const links = linksForSkill(catalog.state, row.name);
-  const upstream = row.meta.origin === "vendor" ? row.meta.upstream : null;
-  const source = upstream?.kind === "github" ? upstream.repository : upstream?.kind === "well-known" ? upstream.source : null;
-  const sourceUrl = upstream?.kind === "unknown" ? null : upstream?.url;
-  const field = (label: string, value: string, fg: string = colors.text) => (
-    <TextLine key={label}>
-      <span fg={colors.muted}>{fitCell(label, 12)}</span>
-      <span fg={fg}>{value}</span>
-    </TextLine>
-  );
-  return (
-    <Modal title={row.name} width={76} cols={cols}>
-      {desc ? (
-        <box paddingBottom={1}>
-          <text fg={colors.text} wrapMode="word">
-            {desc}
-          </text>
-        </box>
-      ) : null}
-      {field("origin", row.origin)}
-      {field("path", row.meta.path)}
-      {source ? field("source", source) : null}
-      {sourceUrl ? field("url", sourceUrl, colors.accent) : null}
-      {field("enabled", row.enabled ? "yes" : "no", row.enabled ? colors.green : colors.muted)}
-      {field("live", liveLabel[row.live], liveColor[row.live])}
-      {field("claude", row.claude ? "linked" : "not linked")}
-      {row.projectLink
-        ? field(
-            "here",
-            `${row.projectSkill ? `${row.projectLink.mode} · ${row.projectLink.excludedTargets.includes(`.agents/skills/${row.name}`) ? "hidden" : "tracked"}` : "missing"} · ${catalog.project}`,
-            row.projectSkill ? colors.accent : colors.red,
-          )
-        : row.projectSkill
-          ? field(
-              "here",
-              `unmanaged (${[row.projectSkill.agents ? ".agents" : "", row.projectSkill.claude ? ".claude" : ""].filter(Boolean).join(" + ")}) · ${catalog.project}`,
-              colors.yellow,
-            )
-          : field("here", "not present", colors.muted)}
-      {field("hash", row.meta.contentHash.slice(0, 16) + "\u2026")}
-      {row.meta.origin === "vendor" && row.meta.vendoredAt ? field("vendored", formatUtc(row.meta.vendoredAt).slice(0, 10)) : null}
-      {links.length > 0 ? (
-        <box flexDirection="column" paddingTop={1}>
-          <TextLine fg={colors.muted}>{"project links:"}</TextLine>
-          {links.map((l) => (
-            <TextLine key={l.project}>
-              <span fg={colors.text}>{`  ${l.project}`}</span>
-              <span fg={colors.muted}>{` (${l.mode})`}</span>
-            </TextLine>
-          ))}
-        </box>
-      ) : null}
-      <TextLine fg={colors.muted}>{"esc to close"}</TextLine>
-    </Modal>
-  );
-}
-
-function ProjectSkillModal({ cols, skill, catalog }: { cols: number; skill: ProjectSkill; catalog: Catalog }) {
-  const desc = projectSkillDescription(catalog.project, skill);
-  const stores = [skill.agents ? ".agents" : "", skill.claude ? ".claude" : ""].filter(Boolean).join(" + ");
-  const field = (label: string, value: string, fg: string = colors.text) => (
-    <TextLine key={label}>
-      <span fg={colors.muted}>{fitCell(label, 12)}</span>
-      <span fg={fg}>{value}</span>
-    </TextLine>
-  );
-  return (
-    <Modal title={`${skill.name} · project only`} width={76} cols={cols}>
-      {desc ? (
-        <box paddingBottom={1}>
-          <text fg={colors.text} wrapMode="word">
-            {desc}
-          </text>
-        </box>
-      ) : null}
-      {field("project", catalog.project)}
-      {field("stores", stores)}
-      {field("source", projectSkillPath(catalog.project, skill), colors.accent)}
-      {field("catalog", "not managed by Slinky", colors.yellow)}
-      <TextLine fg={colors.muted}>{"esc to close · use the document panel to review files"}</TextLine>
-    </Modal>
-  );
-}
-
-function UnindexedSkillModal({ cols, skill }: { cols: number; skill: UnindexedSkill }) {
-  const desc = unindexedSkillDescription(skill);
-  return (
-    <Modal title={`${skill.name} · unindexed`} width={76} cols={cols}>
-      {desc ? (
-        <box paddingBottom={1}>
-          <text fg={colors.text} wrapMode="word">
-            {desc}
-          </text>
-        </box>
-      ) : null}
-      <TextLine>
-        <span fg={colors.muted}>{fitCell("origin", 12)}</span>
-        <span fg={colors.text}>{skill.origin}</span>
-      </TextLine>
-      <TextLine>
-        <span fg={colors.muted}>{fitCell("path", 12)}</span>
-        <span fg={colors.accent}>{skill.path}</span>
-      </TextLine>
-      <TextLine fg={colors.yellow}>{"present in the host but absent from skills.manifest.json"}</TextLine>
-      <TextLine fg={colors.muted}>{"esc, then a to index with a skills.sh source"}</TextLine>
-    </Modal>
-  );
-}
-
-function IndexSkillModal({ cols, skill, flow }: { cols: number; skill: UnindexedSkill; flow: IndexFlow }) {
-  return (
-    <Modal title={`index ${skill.name}`} width={86} cols={cols}>
-      <TextLine fg={colors.muted}>{"skills.sh source or add command:"}</TextLine>
-      <TextLine>
-        <span fg={colors.accent}>{" > "}</span>
-        <span fg={colors.text}>{flow.input}</span>
-        <span fg={colors.accent}>{flow.running ? "" : "\u2588"}</span>
-      </TextLine>
-      <TextLine fg={colors.muted}>{`example: skills add kitlangton/skills --skill ${skill.name}`}</TextLine>
-      <TextLine fg={colors.muted}>{`source: ${skill.path}`}</TextLine>
-      {flow.running ? <TextLine fg={colors.yellow}>{"installing, indexing, and syncing..."}</TextLine> : null}
-      {flow.error ? <TextLine fg={colors.red}>{` ${flow.error}`}</TextLine> : null}
-      <TextLine fg={colors.muted}>{flow.running ? "please wait" : "enter index · esc cancel"}</TextLine>
-    </Modal>
-  );
-}
-
-function ProfilesModal({ cols, catalog, names, index }: { cols: number; catalog: Catalog; names: string[]; index: number }) {
-  return (
-    <Modal title="profiles" width={56} cols={cols}>
-      {names.map((name, i) => {
-        const isSel = i === index;
-        const active = getActiveProfile(catalog.manifest, catalog.state) === name;
-        const members = getProfile(catalog.manifest, name) ?? [];
-        return (
-          <TextLine key={name} fg={isSel ? colors.selectedText : colors.text} bg={isSel ? colors.selectedBg : undefined}>
-            <span>{` ${fitCell(name, 20)}`}</span>
-            <span fg={colors.muted}>{fitCell(`${members.length} skills`, 12)}</span>
-            <span fg={colors.green}>{active ? "active" : ""}</span>
-          </TextLine>
-        );
-      })}
-      <TextLine fg={colors.yellow}>{"applying a profile disables everything outside it"}</TextLine>
-      <TextLine fg={colors.muted}>{"enter apply · esc close"}</TextLine>
-    </Modal>
-  );
-}
-
-function DiffModal({ cols, row, result }: { cols: number; row: CatalogRow; result: DiffResult }) {
-  if (result.kind === "local") {
-    return (
-      <Modal title={`diff ${row.name}`} width={64} cols={cols}>
-        <TextLine fg={colors.muted}>{"local skill: lives in the repo, nothing to diff"}</TextLine>
-        <TextLine fg={colors.muted}>{"esc to close"}</TextLine>
-      </Modal>
-    );
-  }
-  if (result.kind === "not-installed") {
-    return (
-      <Modal title={`diff ${row.name}`} width={64} cols={cols}>
-        <TextLine fg={colors.muted}>{"not installed globally (disabled?)"}</TextLine>
-        <TextLine fg={colors.muted}>{"esc to close"}</TextLine>
-      </Modal>
-    );
-  }
-  if (result.kind === "unowned") {
-    return (
-      <Modal title={`diff ${row.name}`} width={64} cols={cols}>
-        <TextLine fg={colors.yellow}>{"live path is not owned by this catalog"}</TextLine>
-        <TextLine fg={colors.muted}>{"inspect it before using --force"}</TextLine>
-        <TextLine fg={colors.muted}>{"esc to close"}</TextLine>
-      </Modal>
-    );
-  }
-  const d: DirDiff = result.diff;
-  const cap = 14;
-  const entries: Array<{ sign: string; fg: string; file: string }> = [
-    ...d.added.map((f) => ({ sign: "+", fg: colors.green, file: f })),
-    ...d.removed.map((f) => ({ sign: "-", fg: colors.red, file: f })),
-    ...d.modified.map((f) => ({ sign: "~", fg: colors.yellow, file: f })),
-  ];
-  return (
-    <Modal title={`diff ${row.name}`} width={76} cols={cols}>
-      {entries.length === 0 ? (
-        <TextLine fg={colors.green}>{`in sync (${d.unchanged} files match the repo baseline)`}</TextLine>
-      ) : (
-        <box flexDirection="column">
-          <TextLine fg={colors.yellow}>{"live global copy differs from repo baseline:"}</TextLine>
-          {entries.slice(0, cap).map((e) => (
-            <TextLine key={`${e.sign}${e.file}`}>
-              <span fg={e.fg}>{` ${e.sign} ${e.file}`}</span>
-            </TextLine>
-          ))}
-          {entries.length > cap ? <TextLine fg={colors.muted}>{`  \u2026 ${entries.length - cap} more`}</TextLine> : null}
-          <TextLine>
-            <span fg={colors.accent}>{"a"}</span>
-            <span fg={colors.muted}>{" accept global  "}</span>
-            <span fg={colors.accent}>{"r"}</span>
-            <span fg={colors.muted}>{" restore baseline  "}</span>
-            <span fg={colors.accent}>{"h"}</span>
-            <span fg={colors.muted}>{" hunk  "}</span>
-            <span fg={colors.accent}>{"d"}</span>
-            <span fg={colors.muted}>{" delta"}</span>
-          </TextLine>
-        </box>
-      )}
-      <TextLine fg={colors.muted}>{"esc to close"}</TextLine>
-    </Modal>
-  );
-}
-
-function LinkModal({ cols, row, flow, recents }: { cols: number; row: CatalogRow; flow: LinkFlow; recents: ReadonlyArray<string> }) {
-  return (
-    <Modal title={`link ${row.name}`} width={76} cols={cols}>
-      {flow.step === "project" ? (
-        <box flexDirection="column">
-          <TextLine fg={colors.muted}>{"project directory:"}</TextLine>
-          <TextLine>
-            <span fg={colors.accent}>{" > "}</span>
-            <span fg={colors.text}>{flow.input}</span>
-            <span fg={colors.accent}>{"\u2588"}</span>
-          </TextLine>
-          {flow.error ? <TextLine fg={colors.red}>{` ${flow.error}`}</TextLine> : null}
-          {recents.length > 0 ? (
-            <box flexDirection="column" paddingTop={1}>
-              <TextLine fg={colors.muted}>{"recent (up/down):"}</TextLine>
-              {recents.slice(0, 5).map((p, i) => (
-                <TextLine key={p} fg={i === flow.recentIndex ? colors.selectedText : colors.muted} bg={i === flow.recentIndex ? colors.selectedBg : undefined}>
-                  {`  ${p}`}
-                </TextLine>
-              ))}
-            </box>
-          ) : null}
-          <TextLine fg={colors.muted}>{"enter continue · esc cancel"}</TextLine>
-        </box>
-      ) : null}
-      {flow.step === "mode" ? (
-        <box flexDirection="column">
-          <TextLine fg={colors.muted}>{`into ${flow.input}`}</TextLine>
-          <TextLine fg={flow.mode === "copy" ? colors.selectedText : colors.muted} bg={flow.mode === "copy" ? colors.selectedBg : undefined}>
-            {" copy     snapshot; project owns its copy (drift is tracked)"}
-          </TextLine>
-          <TextLine fg={flow.mode === "symlink" ? colors.selectedText : colors.muted} bg={flow.mode === "symlink" ? colors.selectedBg : undefined}>
-            {" symlink  live; project always sees the repo version"}
-          </TextLine>
-          <TextLine fg={colors.muted}>{"j/k or c/s choose · enter continue · esc cancel"}</TextLine>
-        </box>
-      ) : null}
-      {flow.step === "options" ? (
-        <box flexDirection="column">
-          <TextLine fg={colors.muted}>{`${flow.mode} into ${flow.input}`}</TextLine>
-          <TextLine>
-            <span fg={colors.accent}>{" e "}</span>
-            <span fg={colors.text}>{`[${flow.exclude ? "x" : " "}] add to .git/info/exclude`}</span>
-          </TextLine>
-          <TextLine>
-            <span fg={colors.accent}>{" c "}</span>
-            <span fg={colors.text}>{`[${flow.claude ? "x" : " "}] .claude/skills symlink (when .claude exists)`}</span>
-          </TextLine>
-          <TextLine fg={colors.muted}>{"enter link it · esc cancel"}</TextLine>
-        </box>
-      ) : null}
-    </Modal>
   );
 }

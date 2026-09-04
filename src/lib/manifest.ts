@@ -18,29 +18,6 @@ import {
 import type { FileOperation } from "../domain/model.ts";
 import { HostRepo } from "./paths.ts";
 
-export {
-  Manifest,
-  ProjectLink,
-  Skill,
-  State,
-  alignStateWithManifest,
-  alignStateForTransition,
-  formatUtc,
-  getActiveProfile,
-  getDisabledSkills,
-  getProfile,
-  getSkill,
-  isSkillEnabled,
-  nowUtc,
-  stateVersion,
-  version,
-  withManifestSkill,
-  withProfile,
-  withProjectLink,
-  withSkillEnabled,
-  withoutProjectLink,
-} from "../domain/model.ts";
-
 const strict = { errors: "all", onExcessProperty: "error" } as const;
 const decodeJson = Schema.decodeUnknownSync(Schema.Json);
 
