@@ -1,10 +1,10 @@
 # Slinky
 
 ```text
-skills host                  global agent stores
-├─ skills/      ─┐           ~/.agents/skills/
-├─ vendor/       ├─ slinky ─> ~/.claude/skills/
-└─ skills.manifest.json ┘    project-local skills
+skills host                          global agent stores
+├─ skills/              ┐            ~/.agents/skills/
+├─ vendor/              ├─ slinky ─> ~/.claude/skills/
+└─ skills.manifest.json ┘            project-local skills
 ```
 
 Agent-first skill catalog management. Slinky keeps local and vendored skills in a versioned host repository, then reconciles them into the global stores used by coding agents.
