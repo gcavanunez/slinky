@@ -26,6 +26,8 @@ export type AppCommand =
   | "layout.previous"
   | "layout.shrink"
   | "layout.grow"
+  | "catalog.fold"
+  | "catalog.fold-all"
   | "app.escape"
   | "document.next-heading"
   | "document.previous-heading"
@@ -91,6 +93,8 @@ const listCommands: ReadonlyArray<CommandDefinition> = [
   { name: "layout.previous", title: "Previous layout", keys: ["shift+v"] },
   { name: "layout.shrink", title: "Shrink focused pane", keys: ["<", "shift+,"] },
   { name: "layout.grow", title: "Grow focused pane", keys: [">", "shift+."] },
+  { name: "catalog.fold", title: "Fold or unfold the current group", keys: ["z"] },
+  { name: "catalog.fold-all", title: "Fold or unfold every group", keys: ["shift+z"] },
   { name: "app.escape", title: "Leave the current view", keys: ["escape"] },
   { name: "document.next-heading", title: "Next document heading", keys: ["}", "shift+]"] },
   { name: "document.previous-heading", title: "Previous document heading", keys: ["{", "shift+["] },

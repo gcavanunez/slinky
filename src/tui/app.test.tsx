@@ -196,9 +196,9 @@ test("overlays are exclusive and render the payload captured when opened", async
     expect(index).toContain("source: skills/gamma");
     await closeOverlay(setup);
 
-    await input(() => setup.mockInput.pressKey("h"));
+    // gamma -> "local" heading -> alpha
     await input(() => setup.mockInput.pressKey("j"));
-    await input(() => setup.mockInput.pressKey("l"));
+    await input(() => setup.mockInput.pressKey("j"));
 
     await input(() => setup.mockInput.pressKey("d"));
     const diff = await setup.waitForFrame((value) => value.includes("Diff alpha"));
@@ -391,12 +391,42 @@ test("keymap routes list movement and the gg sequence", async () => {
       await Bun.sleep(60);
     });
     await setup.waitForFrame((value) => !value.includes("beta fixture skill."));
+    // gg lands on the group heading; the first skill is one row below.
     await input(() => {
       setup.mockInput.pressKey("g");
       setup.mockInput.pressKey("g");
     });
+    await input(() => setup.mockInput.pressKey("j"));
     await input(() => setup.mockInput.pressKey("i"));
     expect(await setup.waitForFrame((value) => value.includes("alpha fixture skill."))).toContain("alpha fixture skill.");
+  } finally {
+    destroy(setup);
+  }
+});
+
+test("groups fold from their heading and space toggles the whole set", async () => {
+  const setup = await mount();
+  try {
+    await setup.waitForFrame((value) => value.includes("slinky"));
+    await input(() => setup.mockInput.pressKey("2"));
+    await setup.waitForFrame((value) => value.includes("▾ local"));
+
+    // h from a skill jumps to its heading; z folds it and the skills disappear.
+    await input(() => setup.mockInput.pressKey("h"));
+    await input(() => setup.mockInput.pressKey("z"));
+    const folded = await setup.waitForFrame((value) => value.includes("▸ local"));
+    expect(folded).not.toContain("alpha");
+
+    // l on a folded heading opens it again without leaving the pane.
+    await input(() => setup.mockInput.pressKey("l"));
+    expect(await setup.waitForFrame((value) => value.includes("▾ local"))).toContain("alpha");
+
+    // space on the heading disables every skill in the group.
+    await input(() => setup.mockInput.pressKey(" "));
+    const off = await setup.waitForFrame((value) => value.includes("disabled local"));
+    expect(off).toContain("0/2");
+    await input(() => setup.mockInput.pressKey(" "));
+    expect(await setup.waitForFrame((value) => value.includes("enabled local"))).toContain("2/2");
   } finally {
     destroy(setup);
   }

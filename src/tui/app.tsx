@@ -29,7 +29,9 @@ import { copySelection, handleSelectionKey } from "./clipboard.ts";
 import type { SelectionClipboard } from "./clipboard.ts";
 import { editableHostSkillPath, editSkillInEditor, withSuspendedRenderer } from "./external.ts";
 import { cycleLayout, primaryPanel, resizeFocusedSplit } from "./layout.ts";
-import type { Panel, PrimaryPanel, TwoPanePair } from "./layout.ts";
+import type { Layout, Panel } from "./layout.ts";
+import { selectionOf, treeIndex, treeRows } from "./catalog-tree.ts";
+import type { TreeRow, TreeSelection } from "./catalog-tree.ts";
 import { useAppKeybindings } from "./use-app-keybindings.ts";
 import type { AppCommand, AppKeymapState } from "./use-app-keybindings.ts";
 import { DetailModal } from "./modals/detail-modal.tsx";
@@ -185,14 +187,12 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
   const { width: cols, height: rowsAvail } = useTerminalDimensions();
 
   const [catalog, setCatalog] = useState<Catalog>(() => runSync(loadCatalog()));
-  const [selectedAuthor, setSelectedAuthor] = useState(0);
-  const [selectedSkill, setSelectedSkill] = useState(0);
+  const [selection, setSelection] = useState<TreeSelection | null>(null);
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
   const [catalogView, setCatalogView] = useState<CatalogView>("available");
-  const [panel, setPanel] = useState<Panel>("skills");
-  const [expanded, setExpanded] = useState<PrimaryPanel | null>(null);
-  const [twoPane, setTwoPane] = useState<TwoPanePair | null>(null);
-  const [catalogSplit, setCatalogSplit] = useState(1 / 3);
-  const [documentSplit, setDocumentSplit] = useState(0.4);
+  const [panel, setPanel] = useState<Panel>("catalog");
+  const [layout, setLayout] = useState<Layout>(null);
+  const [catalogSplit, setCatalogSplit] = useState(0.42);
   const [interaction, setInteraction] = useState<Interaction>({ kind: "browse" });
   const [filterMode, setFilterMode] = useState(false);
   const [filterText, setFilterText] = useState("");
@@ -313,17 +313,18 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
 
   // Chrome: header, rail, tabs, rail, [body], rail, footer.
   const viewport = Math.max(3, rowsAvail - 6);
-  const authorIndex = clamp(selectedAuthor, 0, Math.max(0, groups.length - 1));
-  const currentGroup = groups[authorIndex];
-  const skillIndex = clamp(selectedSkill, 0, Math.max(0, (currentGroup?.skills.length ?? 1) - 1));
-  const currentItem = currentGroup?.skills[skillIndex];
+  const rows = useMemo(() => treeRows(groups, collapsed, filterText.length > 0), [groups, collapsed, filterText]);
+  const rowIndex = treeIndex(rows, selection, skillItemName);
+  const currentRow: TreeRow<AuthorGroup> | undefined = rows[rowIndex];
+  const currentGroup = currentRow?.group;
+  const currentItem = currentRow?.kind === "item" ? currentRow.item : undefined;
   const current: CatalogRow | undefined = currentItem?.kind === "skill" ? currentItem.row : undefined;
   const currentProjectSkill: ProjectSkill | undefined = currentItem?.kind === "project-skill" ? currentItem.skill : undefined;
   const currentUnindexedSkill: UnindexedSkill | undefined = currentItem?.kind === "unindexed-skill" ? currentItem.skill : undefined;
   const profileNames = Object.keys(catalog.manifest.profiles);
 
   const currentName = current?.name ?? currentProjectSkill?.name ?? currentUnindexedSkill?.name;
-  const editableSkillPath = editableHostSkillPath(panel !== "authors", current ? { origin: current.origin, path: current.meta.path } : undefined, currentUnindexedSkill);
+  const editableSkillPath = editableHostSkillPath(currentItem !== undefined, current ? { origin: current.origin, path: current.meta.path } : undefined, currentUnindexedSkill);
   const previewFile = previewState.skill === currentName ? previewState.file : 0;
   const previewRestore = previewState.skill === currentName ? previewState.restore : 0;
 
@@ -463,8 +464,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
     const p = printable(key);
     if (p) {
       setFilterText((t) => t + p);
-      setSelectedAuthor(0);
-      setSelectedSkill(0);
+      setSelection(null);
     }
     return true;
   };
@@ -634,13 +634,43 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
       setPreviewState({ skill: currentName ?? null, file: previewFile, restore: previewScroll.current?.scrollTop ?? 0 });
     }
     setPanel(next);
-    setExpanded(null);
+    setLayout(null);
   };
-  const moveAuthor = (delta: number) => {
-    setSelectedAuthor(clamp(authorIndex + delta, 0, Math.max(0, groups.length - 1)));
-    setSelectedSkill(0);
+  const selectRow = (index: number) => {
+    const row = rows[clamp(index, 0, Math.max(0, rows.length - 1))];
+    if (row) setSelection(selectionOf(row, skillItemName));
   };
-  const moveSkill = (delta: number) => setSelectedSkill(clamp(skillIndex + delta, 0, Math.max(0, (currentGroup?.skills.length ?? 1) - 1)));
+  // Functional so a burst of keys in one input chunk moves once per key, not once in total.
+  const moveRow = (delta: number) =>
+    setSelection((previous) => {
+      const row = rows[clamp(treeIndex(rows, previous, skillItemName) + delta, 0, Math.max(0, rows.length - 1))];
+      return row ? selectionOf(row, skillItemName) : previous;
+    });
+  const setFolded = (label: string, folded: boolean) =>
+    setCollapsed((previous) => {
+      if (previous.has(label) === folded) return previous;
+      const next = new Set(previous);
+      if (folded) next.add(label);
+      else next.delete(label);
+      return next;
+    });
+  /** h in the catalog: from an item jump to its heading; from an open heading fold it. */
+  const foldCurrent = () => {
+    if (!currentRow) return;
+    if (currentRow.kind === "item") setSelection({ group: currentRow.group.label });
+    else if (!currentRow.collapsed && !filterText) setFolded(currentRow.group.label, true);
+  };
+  const toggleFold = () => {
+    if (!currentRow || currentRow.kind !== "group") return;
+    if (filterText) return notify("clear the filter to fold groups", true);
+    setFolded(currentRow.group.label, !currentRow.collapsed);
+  };
+  const toggleFoldAll = () => {
+    if (filterText) return notify("clear the filter to fold groups", true);
+    const allFolded = groups.every((group) => collapsed.has(group.label));
+    setCollapsed(allFolded ? new Set() : new Set(groups.map((group) => group.label)));
+    if (!allFolded && currentGroup) setSelection({ group: currentGroup.label });
+  };
   const moveFile = (delta: number) => {
     if (!previewData) return;
     setPreviewState({ skill: currentName ?? null, file: clamp(previewFile + delta, 0, previewData.files.length - 1), restore: 0 });
@@ -651,21 +681,12 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
   };
   const switchCatalogView = (view: CatalogView) => {
     setCatalogView(view);
-    setSelectedAuthor(0);
-    setSelectedSkill(0);
-  };
-  const cyclePaneLayout = (direction: 1 | -1) => {
-    const next = cycleLayout({ twoPane, expanded }, panel, direction);
-    if (next.twoPane === "catalog" && twoPane !== "catalog") {
-      setDocFind({ typing: false, query: "" });
-    }
-    setTwoPane(next.twoPane);
-    setExpanded(next.expanded);
+    setSelection(null);
   };
   const editCurrentSkill = () => {
     if (!editableSkillPath) {
       let reason: string;
-      if (panel === "authors") reason = "focus the skill or document pane first";
+      if (!currentItem) reason = "select a skill first";
       else if (current?.origin === "vendor" || currentUnindexedSkill?.origin === "vendor") reason = "vendor baselines must be changed through update and vendor";
       else if (currentUnindexedSkill?.origin === "agent") reason = "the staging inbox can be overwritten; index the skill before editing";
       else reason = "project-only skills are outside the skills host";
@@ -683,13 +704,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
     }
   };
 
-  const panelOrder = Match.value({ twoPane, hasPreview: previewData !== null }).pipe(
-    Match.when({ twoPane: "catalog" }, (): Panel[] => ["authors", "skills"]),
-    Match.when({ twoPane: "document", hasPreview: true }, (): Panel[] => ["skills", "content", "files"]),
-    Match.when({ twoPane: "document" }, (): Panel[] => ["skills", "content"]),
-    Match.when({ hasPreview: true }, (): Panel[] => ["authors", "skills", "content", "files"]),
-    Match.orElse((): Panel[] => ["authors", "skills", "content"]),
-  );
+  const panelOrder: Panel[] = previewData !== null ? ["catalog", "content", "files"] : ["catalog", "content"];
 
   const movePanel = (delta: number) => {
     const index = Math.max(0, panelOrder.indexOf(panel));
@@ -697,15 +712,13 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
   };
 
   const moveFocused = (delta: number) => {
-    if (panel === "authors") moveAuthor(delta);
-    else if (panel === "skills") moveSkill(delta);
+    if (panel === "catalog") moveRow(delta);
     else if (panel === "files") moveFile(delta);
     else previewScroll.current?.scrollBy(delta);
   };
 
   const moveToBoundary = (last: boolean) => {
-    if (panel === "authors") setSelectedAuthor(last ? Math.max(0, groups.length - 1) : 0);
-    else if (panel === "skills") setSelectedSkill(last ? Math.max(0, (currentGroup?.skills.length ?? 1) - 1) : 0);
+    if (panel === "catalog") selectRow(last ? rows.length - 1 : 0);
     else if (panel === "files") {
       setPreviewState({ skill: currentName ?? null, file: last ? Math.max(0, (previewData?.files.length ?? 1) - 1) : 0, restore: 0 });
     } else previewScroll.current?.scrollTo(last ? previewScroll.current.scrollHeight : 0);
@@ -806,43 +819,50 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
         return;
       case "panel.next-wrap": {
         const index = Math.max(0, panelOrder.indexOf(panel));
-        focusPanel(panelOrder[(index + 1) % panelOrder.length] ?? "authors");
+        focusPanel(panelOrder[(index + 1) % panelOrder.length] ?? "catalog");
         return;
       }
       case "panel.next":
-        movePanel(1);
+        // l on a folded heading opens it before moving right.
+        if (panel === "catalog" && currentRow?.kind === "group" && currentRow.collapsed) setFolded(currentRow.group.label, false);
+        else movePanel(1);
         return;
       case "panel.previous":
-        movePanel(-1);
+        if (panel === "catalog") foldCurrent();
+        else movePanel(-1);
         return;
       case "panel.first":
-        focusPanel("authors");
+        focusPanel("catalog");
         return;
       case "panel.last":
-        focusPanel(panelOrder.at(-1) ?? "skills");
+        focusPanel(panelOrder.at(-1) ?? "content");
         return;
       case "layout.zoom": {
         const focusedPrimary = primaryPanel(panel);
-        setExpanded((value) => (value === focusedPrimary ? null : focusedPrimary));
+        setLayout((value) => (value === focusedPrimary ? null : focusedPrimary));
         return;
       }
       case "layout.next":
-        cyclePaneLayout(1);
+        setLayout((value) => cycleLayout(value, 1));
         return;
       case "layout.previous":
-        cyclePaneLayout(-1);
+        setLayout((value) => cycleLayout(value, -1));
         return;
       case "layout.shrink":
       case "layout.grow": {
-        if (!twoPane || expanded) return;
+        if (layout) return;
         const grow = command === "layout.grow";
-        if (twoPane === "catalog") setCatalogSplit((split) => resizeFocusedSplit(split, twoPane, panel, grow));
-        else setDocumentSplit((split) => resizeFocusedSplit(split, twoPane, panel, grow));
+        setCatalogSplit((split) => resizeFocusedSplit(split, panel, grow));
         return;
       }
+      case "catalog.fold":
+        toggleFold();
+        return;
+      case "catalog.fold-all":
+        toggleFoldAll();
+        return;
       case "app.escape":
-        if (expanded) setExpanded(null);
-        else if (twoPane) setTwoPane(null);
+        if (layout) setLayout(null);
         else if (docFind.query) setDocFind({ typing: false, query: "" });
         else if (filterText) setFilterText("");
         return;
@@ -971,13 +991,14 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
         setInteraction({ kind: "profiles", index: Math.max(0, profileNames.indexOf(getActiveProfile(catalog.manifest, catalog.state) ?? "")) });
         return;
       case "selection.open":
-        if (panel === "authors") setPanel("skills");
-        else if (panel === "skills" && twoPane === "catalog" && currentItem) setInteraction({ kind: "detail", item: currentItem });
-        else if (panel === "skills" || panel === "files") setPanel("content");
+        if (panel === "catalog" && currentRow?.kind === "group") toggleFold();
+        else if (panel === "catalog" && layout === "catalog" && currentItem) setInteraction({ kind: "detail", item: currentItem });
+        else if (panel === "catalog" || panel === "files") setPanel("content");
         else if (currentItem) setInteraction({ kind: "detail", item: currentItem });
         return;
       case "selection.toggle":
-        if (panel === "authors" && currentGroup?.rows) {
+        if (panel !== "catalog") return;
+        if (currentRow?.kind === "group" && currentGroup?.rows) {
           const enable = !currentGroup.rows.some((row) => row.enabled);
           const result = runSync(
             setSkillsEnabled(
@@ -987,7 +1008,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
           );
           reportAction(`${enable ? "enabled" : "disabled"} ${currentGroup.label}`, result);
           refresh();
-        } else if (panel === "skills" && current) {
+        } else if (current) {
           const result = runSync(setSkillsEnabled([current.name], !current.enabled));
           reportAction(`${current.enabled ? "disabled" : "enabled"} ${current.name}`, result);
           refresh();
@@ -995,6 +1016,10 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
         return;
       case "skill.details":
         if (currentItem) setInteraction({ kind: "detail", item: currentItem });
+        else if (currentGroup) {
+          const on = currentGroup.enabledCount === null ? "" : ` · ${currentGroup.enabledCount} enabled`;
+          notify(`${currentGroup.label}: ${currentGroup.skills.length} skill${currentGroup.skills.length === 1 ? "" : "s"}${on}${currentGroup.hasDrift ? " · drift" : ""}`);
+        }
         return;
       case "skill.index":
         if (currentUnindexedSkill) {
@@ -1051,36 +1076,23 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
     .size;
   const projectName = basename(catalog.project) || catalog.project;
   const matchCount = new Set(groups.flatMap((group) => group.skills.map(skillItemName))).size;
-  const narrow = cols < (twoPane ? 64 : 96);
+  const narrow = cols < 84;
   const tiny = cols < 48;
   const compactHeader = cols < 72;
   const focusedPrimary = primaryPanel(panel);
-  const showAuthors = expanded ? expanded === "authors" : narrow ? focusedPrimary === "authors" : twoPane !== "document";
-  const showSkills = expanded ? expanded === "skills" : narrow ? focusedPrimary === "skills" : true;
-  const showContent = expanded ? expanded === "content" : narrow ? focusedPrimary === "content" : twoPane !== "catalog";
-  const visiblePanes = [showAuthors, showSkills, showContent].filter(Boolean).length;
-  // Content widths; every rail between two panes costs one more column.
-  const railCols = Math.max(0, visiblePanes - 1);
-  const authorW = Math.max(18, Math.min(25, Math.floor(cols * 0.19)));
-  const skillW = Math.max(33, Math.min(42, Math.floor(cols * 0.31)));
-  const catalogAuthorW = Math.max(18, Math.min(cols - 34, Math.floor(cols * catalogSplit)));
-  const documentSkillW = Math.max(33, Math.min(cols - 31, Math.floor(cols * documentSplit)));
+  const showCatalog = layout ? layout === "catalog" : narrow ? focusedPrimary === "catalog" : true;
+  const showContent = layout ? layout === "content" : narrow ? focusedPrimary === "content" : true;
+  const split = showCatalog && showContent;
+  // Content widths; the rail between the two panes costs one column.
+  const catalogWidth = !showCatalog ? 0 : split ? Math.max(40, Math.min(cols - 31, Math.floor(cols * catalogSplit))) : cols;
+  const contentWidth = showContent ? Math.max(20, cols - catalogWidth - (split ? 1 : 0)) : 0;
   const fileTreeW = Math.max(18, Math.min(28, Math.floor(cols * 0.21)));
-  const authorViewport = Math.max(1, viewport - 1);
-  const authorWin = windowOf(0, authorIndex, groups.length, authorViewport);
-  const skillViewport = Math.max(1, viewport - 1);
-  const skillWin = windowOf(0, skillIndex, currentGroup?.skills.length ?? 0, skillViewport);
-  const authorsWidth = !showAuthors ? 0 : visiblePanes === 1 ? cols : twoPane === "catalog" ? catalogAuthorW : authorW;
-  let skillsWidth = 0;
-  if (showSkills) {
-    if (visiblePanes === 1) skillsWidth = cols;
-    else if (twoPane === "catalog") skillsWidth = cols - catalogAuthorW - 1;
-    else if (twoPane === "document") skillsWidth = documentSkillW;
-    else skillsWidth = skillW;
-  }
-  const contentWidth = showContent ? Math.max(20, cols - authorsWidth - skillsWidth - railCols) : 0;
-  const authorLabelW = Math.max(4, authorsWidth - 9);
-  const skillLabelW = Math.max(4, skillsWidth - 26);
+  const listViewport = Math.max(1, viewport - 1);
+  const listWin = windowOf(0, rowIndex, rows.length, listViewport);
+  // " " + 2-col indent + name + on/off 5 + live 8 + placement 9 + upstream 3 + " "
+  const nameW = Math.max(4, catalogWidth - 29);
+  // " " + fold glyph 2 + label + drift 2 + count 6 + " "
+  const groupW = Math.max(4, catalogWidth - 12);
   const fileTreeMode: "split" | "hidden" | "only" = tiny ? (panel === "files" ? "only" : "hidden") : "split";
 
   const upstreamCell = (row: CatalogRow): { label: string; fg: string } =>
@@ -1167,18 +1179,11 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
   );
 
   // Mouse: click selects a row (and focuses its panel); wheel moves the selection.
-  const clickAuthorRow = (index: number) => (event: { stopPropagation: () => void }) => {
+  const clickRow = (index: number) => (event: { stopPropagation: () => void }) => {
     event.stopPropagation();
     if (interaction.kind !== "browse") return;
-    if (panel !== "authors") focusPanel("authors");
-    setSelectedAuthor(index);
-    setSelectedSkill(0);
-  };
-  const clickSkillRow = (index: number) => (event: { stopPropagation: () => void }) => {
-    event.stopPropagation();
-    if (interaction.kind !== "browse") return;
-    if (panel !== "skills") focusPanel("skills");
-    setSelectedSkill(index);
+    if (panel !== "catalog") focusPanel("catalog");
+    selectRow(index);
   };
   const clickPanel = (target: Panel) => () => {
     if (interaction.kind !== "browse") return;
@@ -1191,41 +1196,37 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
     else if (event.scroll?.direction === "down") move(1);
   };
 
-  const authorRows = groups.slice(authorWin, authorWin + authorViewport).map((group, index) => {
-    const itemIndex = authorWin + index;
-    const selected = itemIndex === authorIndex;
-    const count = group.skills.length;
-    const status = group.enabledCount === null ? `${count}` : `${group.enabledCount}/${count}`;
-    return (
-      <TextLine
-        key={group.label}
-        fg={selected && panel === "authors" ? colors.selectedText : colors.text}
-        bg={selected ? colors.selectedBg : undefined}
-        onMouseDown={clickAuthorRow(itemIndex)}
-      >
-        <span> </span>
-        <span attributes={selected && panel === "authors" ? TextAttributes.BOLD : 0}>{fitCell(group.label, authorLabelW)}</span>
-        <span fg={colors.yellow}>{group.hasDrift ? " ⚠" : "  "}</span>
-        <span fg={selected && panel === "authors" ? colors.count : colors.muted}>{fitCell(status, 5, "right")}</span>
-        <span> </span>
-      </TextLine>
-    );
-  });
-
-  const skillRows = (currentGroup?.skills ?? []).slice(skillWin, skillWin + skillViewport).map((item, index) => {
-    const itemIndex = skillWin + index;
-    const selected = itemIndex === skillIndex;
-    const focusedRow = selected && panel === "skills";
-    const fg = focusedRow ? colors.selectedText : colors.text;
+  const focusedList = panel === "catalog";
+  const listRows = rows.slice(listWin, listWin + listViewport).map((row, offset) => {
+    const index = listWin + offset;
+    const selected = index === rowIndex;
+    const focusedRow = selected && focusedList;
     const bg = selected ? colors.selectedBg : undefined;
+    const onMouseDown = clickRow(index);
+    if (row.kind === "group") {
+      const group = row.group;
+      const count = group.skills.length;
+      const status = group.enabledCount === null ? `${count}` : `${group.enabledCount}/${count}`;
+      return (
+        <TextLine key={`g:${group.label}`} fg={focusedRow ? colors.selectedText : colors.count} bg={bg} onMouseDown={onMouseDown}>
+          <span> </span>
+          <span fg={focusedRow ? colors.accent : colors.separator}>{row.collapsed ? "▸ " : "▾ "}</span>
+          <span attributes={TextAttributes.BOLD}>{fitCell(group.label, groupW)}</span>
+          <span fg={colors.yellow}>{group.hasDrift ? " ⚠" : "  "}</span>
+          <span fg={focusedRow ? colors.selectedText : colors.muted}>{fitCell(status, 6, "right")}</span>
+          <span> </span>
+        </TextLine>
+      );
+    }
+    const item = row.item;
+    const fg = focusedRow ? colors.selectedText : colors.text;
     const bold = focusedRow ? TextAttributes.BOLD : 0;
-    const onMouseDown = clickSkillRow(itemIndex);
     if (item.kind === "project-skill") {
       return (
         <TextLine key={`p:${item.skill.name}`} fg={fg} bg={bg} onMouseDown={onMouseDown}>
-          <span> </span>
-          <span attributes={bold}>{fitCell(item.skill.name, skillLabelW)}</span>
-          <span fg={colors.yellow}>{fitCell("project", 24, "right")}</span>
+          <span>{"   "}</span>
+          <span attributes={bold}>{fitCell(item.skill.name, nameW)}</span>
+          <span fg={colors.yellow}>{fitCell("project", 25, "right")}</span>
           <span> </span>
         </TextLine>
       );
@@ -1233,23 +1234,23 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
     if (item.kind === "unindexed-skill") {
       return (
         <TextLine key={`u:${item.skill.path}`} fg={fg} bg={bg} onMouseDown={onMouseDown}>
-          <span> </span>
-          <span attributes={bold}>{fitCell(item.skill.name, skillLabelW)}</span>
-          <span fg={colors.yellow}>{fitCell("unindexed", 24, "right")}</span>
+          <span>{"   "}</span>
+          <span attributes={bold}>{fitCell(item.skill.name, nameW)}</span>
+          <span fg={colors.yellow}>{fitCell("unindexed", 25, "right")}</span>
           <span> </span>
         </TextLine>
       );
     }
-    const row = item.row;
-    const placement = placementCell(projectPlacement(row));
+    const skill = item.row;
+    const placement = placementCell(projectPlacement(skill));
     return (
-      <TextLine key={row.name} fg={fg} bg={bg} onMouseDown={onMouseDown}>
-        <span> </span>
-        <span attributes={bold}>{fitCell(row.name, skillLabelW)}</span>
-        <span fg={row.enabled ? colors.green : colors.muted}>{fitCell(row.enabled ? "on" : "off", 5, "right")}</span>
-        <span fg={liveColor(row.live)}>{fitCell(liveLabel[row.live], 7, "right")}</span>
+      <TextLine key={`s:${row.group.label}:${skill.name}`} fg={fg} bg={bg} onMouseDown={onMouseDown}>
+        <span>{"   "}</span>
+        <span attributes={bold}>{fitCell(skill.name, nameW)}</span>
+        <span fg={skill.enabled ? colors.green : colors.muted}>{fitCell(skill.enabled ? "on" : "off", 5, "right")}</span>
+        <span fg={liveColor(skill.live)}>{fitCell(liveLabel[skill.live], 8, "right")}</span>
         <span fg={placement.fg}>{fitCell(placement.label, 9, "right")}</span>
-        <span fg={upstreamCell(row).fg}>{fitCell(upstreamCell(row).label, 3, "right")}</span>
+        <span fg={upstreamCell(skill).fg}>{fitCell(upstreamCell(skill).label, 3, "right")}</span>
         <span> </span>
       </TextLine>
     );
@@ -1283,14 +1284,18 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
     <HintRow
       leading=" "
       items={[
-        { key: "h/l", label: "pane" },
+        { key: "h/l", label: panel === "catalog" ? "fold/pane" : "pane" },
         { key: "tab", label: "next" },
         { key: "j/k", label: panel === "content" ? "scroll" : "move" },
-        { key: "x", label: expanded ? "restore" : "zoom" },
-        { key: "v/V", label: "layout" },
-        { key: "</>", label: "size", when: twoPane !== null && !expanded },
-        { key: "[/]", label: "file", when: showContent && previewData !== null && panel !== "authors" },
-        { key: "space", label: "toggle", when: (panel === "authors" && currentGroup?.rows !== null) || (panel === "skills" && current !== undefined) },
+        { key: "z/Z", label: "fold", when: panel === "catalog" && !filterText },
+        { key: "x", label: layout ? "restore" : "zoom" },
+        { key: "</>", label: "size", when: !layout && split },
+        { key: "[/]", label: "file", when: showContent && previewData !== null },
+        {
+          key: "space",
+          label: currentRow?.kind === "group" ? "toggle all" : "toggle",
+          when: panel === "catalog" && (currentRow?.kind === "group" ? currentGroup?.rows != null : current !== undefined),
+        },
         { key: "a", label: "index", when: currentUnindexedSkill !== undefined },
         { key: "e", label: "edit", when: editableSkillPath !== null },
         { key: "i", label: "details" },
@@ -1335,31 +1340,18 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
     }
   })();
 
-  // Panes in display order, with their content widths. Rails go between them,
-  // and the rails above/below the body meet each rail with ┬ / ┴.
+  // Panes in display order, with their content widths. A rail goes between them,
+  // and the rails above/below the body meet it with ┬ / ┴.
   const panes: Array<{ key: Panel; width: number; node: ReactNode }> = [];
-  if (showAuthors) {
+  if (showCatalog) {
+    const detail = [`${rows.length ? `${rowIndex + 1}/${rows.length}` : ""}`, filterTitle ?? ""].filter(Boolean).join("  ");
     panes.push({
-      key: "authors",
-      width: authorsWidth,
+      key: "catalog",
+      width: catalogWidth,
       node: (
-        <box width={authorsWidth} height={viewport} flexDirection="column" onMouseDown={clickPanel("authors")} onMouseScroll={wheelList(moveAuthor)}>
-          <PaneTitle title="authors" detail={groups.length ? `${authorIndex + 1}/${groups.length}` : undefined} focused={panel === "authors"} />
-          {authorRows}
-          {groups.length === 0 ? <TextLine fg={colors.muted}>{" - No authors."}</TextLine> : null}
-        </box>
-      ),
-    });
-  }
-  if (showSkills) {
-    const detail = [currentGroup ? `· ${currentGroup.label}` : "", filterTitle ?? ""].filter(Boolean).join("  ");
-    panes.push({
-      key: "skills",
-      width: skillsWidth,
-      node: (
-        <box width={skillsWidth} height={viewport} flexDirection="column" onMouseDown={clickPanel("skills")} onMouseScroll={wheelList(moveSkill)}>
-          <PaneTitle title="skills" detail={detail || undefined} focused={panel === "skills"} />
-          {skillRows}
+        <box width={catalogWidth} height={viewport} flexDirection="column" onMouseDown={clickPanel("catalog")} onMouseScroll={wheelList(moveRow)}>
+          <PaneTitle title="catalog" detail={detail || undefined} focused={panel === "catalog"} />
+          {listRows}
           {matchCount === 0 ? <TextLine fg={colors.muted}>{filterText ? " - No skills match." : " - No skills."}</TextLine> : null}
         </box>
       ),
