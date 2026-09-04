@@ -16,6 +16,9 @@ const gitIdentity = {
   GIT_COMMITTER_NAME: "Slinky Test",
   GIT_COMMITTER_EMAIL: "slinky@example.com",
 };
+// Every spawned CLI inherits this, so pull's rebase can commit on a runner
+// with no global git config, exactly as it does on a developer machine.
+Object.assign(process.env, gitIdentity);
 
 function fixture(disabledSkills: ReadonlyArray<string> = []) {
   const root = mkdtempSync(join(tmpdir(), "slinky-cli-actions-"));

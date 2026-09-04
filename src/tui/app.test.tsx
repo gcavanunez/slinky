@@ -37,7 +37,9 @@ writeFileSync(join(host, ".local", "state.json"), `${JSON.stringify({ version: 1
 
 // The host tracks a bare remote that is one commit ahead, so the launch-time
 // store check has something to report and S has something to pull.
-const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com" };
+// The App's own sync commits through git too, so the identity goes on the process.
+Object.assign(process.env, { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com" });
+const gitEnv = { ...process.env };
 const git = (cwd: string, ...args: string[]) => {
   const result = Bun.spawnSync(["git", ...args], { cwd, env: gitEnv });
   if (result.exitCode !== 0) throw new Error(result.stderr.toString());
@@ -48,7 +50,7 @@ writeFileSync(join(host, ".gitignore"), ".local/\n");
 git(host, "init", "-q", "-b", "main");
 git(host, "add", ".");
 git(host, "commit", "-qm", "init");
-git(root, "init", "-q", "--bare", remote);
+git(root, "init", "-q", "--bare", "-b", "main", remote);
 git(host, "remote", "add", "origin", remote);
 git(host, "push", "-qu", "origin", "main");
 git(root, "clone", "-q", remote, publisher);
@@ -460,7 +462,7 @@ test("launch reports unpulled store commits and S syncs them down", async () => 
     // The store check and the sync resolve outside act; poll inside act so
     // their state updates are flushed, however long git takes under load.
     const settleUntil = async (predicate: (frame: string) => boolean) => {
-      const deadline = Date.now() + 10_000;
+      const deadline = Date.now() + 4_000; // under bun's 5s test timeout, so a failure shows the frame
       while (!predicate(setup.captureCharFrame())) {
         if (Date.now() > deadline) throw new Error(`timed out; last frame:\n${setup.captureCharFrame()}`);
         await act(() => Bun.sleep(50));
@@ -471,7 +473,8 @@ test("launch reports unpulled store commits and S syncs them down", async () => 
     expect(behind).toContain("S sync");
 
     await input(() => setup.mockInput.pressKey("S"));
-    const done = await settleUntil((value) => value.includes("Sync") && value.includes("done"));
+    const done = await settleUntil((value) => value.includes("Sync") && (value.includes("done") || value.includes("failed")));
+    expect(done).not.toContain("failed");
     expect(done).toContain("esc close");
 
     // The log is longer than the modal: g jumps to the top, G back to the tail.
