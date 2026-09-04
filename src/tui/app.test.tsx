@@ -468,6 +468,12 @@ test("launch reports unpulled store commits and S syncs them down", async () => 
     await settle();
     const done = await setup.waitForFrame((value) => value.includes("Sync") && value.includes("done"));
     expect(done).toContain("esc close");
+
+    // The log is longer than the modal: g jumps to the top, G back to the tail.
+    await input(() => setup.mockInput.pressKey("g"));
+    expect(await setup.waitForFrame((value) => value.includes("done · 1-"))).toContain("SAVE");
+    await input(() => setup.mockInput.pressKey("G"));
+    expect(await setup.waitForFrame((value) => !value.includes("done · 1-"))).toContain("RESTORE");
     await closeOverlay(setup);
 
     await settle();

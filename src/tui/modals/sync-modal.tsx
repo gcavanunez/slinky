@@ -9,9 +9,20 @@ export interface SyncFlow {
   readonly events: ReadonlyArray<ConvergenceEvent>;
   readonly running: boolean;
   readonly error?: string;
+  /** First visible line; null follows the tail as output arrives. */
+  readonly scroll: number | null;
 }
 
 const WIDTH = 86;
+
+/** Body rows the log gets at this terminal height; App uses it to clamp scrolling. */
+export function syncLogRows(rows: number): number {
+  return Math.max(3, rows - 9);
+}
+
+export function syncLogLength(flow: SyncFlow): number {
+  return flow.events.reduce((sum, event) => sum + eventLines(event).length, 0) + (flow.error ? 1 : 0);
+}
 
 function eventLines(event: ConvergenceEvent): Array<{ text: string; fg: string; bold?: boolean }> {
   switch (event.type) {
@@ -42,18 +53,27 @@ export function SyncModal({ cols, rows, flow }: { cols: number; rows: number; fl
   const { contentWidth } = modalInner(WIDTH, cols);
   const lines = flow.events.flatMap(eventLines);
   if (flow.error) lines.push({ text: flow.error, fg: colors.error });
-  const maxRows = Math.max(3, rows - 9);
-  const visible = lines.slice(Math.max(0, lines.length - maxRows));
+  const maxRows = syncLogRows(rows);
+  const top = Math.max(0, lines.length - maxRows);
+  const start = flow.scroll === null ? top : Math.min(flow.scroll, top);
+  const visible = lines.slice(start, start + maxRows);
+  const status = flow.running ? "working" : flow.error ? "failed" : "done";
+  const position = lines.length > maxRows ? ` · ${start + 1}-${start + visible.length}/${lines.length}` : "";
   return (
     <Modal
       title="Sync"
-      headerRight={flow.running ? "working" : flow.error ? "failed" : "done"}
+      headerRight={`${status}${position}`}
       subtitle={<TextLine fg={colors.muted}>{"Save, pull, reconcile, and restore live vendor drift"}</TextLine>}
       width={WIDTH}
       cols={cols}
       rows={rows}
       bodyRows={Math.max(1, visible.length)}
-      footer={flow.running ? [{ key: "…", label: "please wait", disabled: true }] : [{ key: "esc", label: "close" }]}
+      footer={[
+        { key: "j/k", label: "scroll", when: lines.length > maxRows },
+        { key: "g/G", label: "top/end", when: lines.length > maxRows },
+        { key: "…", label: "please wait", disabled: true, when: flow.running },
+        { key: "esc", label: "close", when: !flow.running },
+      ]}
     >
       {visible.length === 0 ? <TextLine fg={colors.muted}>{"starting…"}</TextLine> : null}
       {visible.map((line, index) => (

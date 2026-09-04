@@ -57,7 +57,7 @@ import { IndexSkillModal } from "./modals/index-skill-modal.tsx";
 import { LinkModal } from "./modals/link-modal.tsx";
 import { ProfilesModal } from "./modals/profiles-modal.tsx";
 import { ProjectSkillModal } from "./modals/project-skill-modal.tsx";
-import { SyncModal } from "./modals/sync-modal.tsx";
+import { SyncModal, syncLogLength, syncLogRows } from "./modals/sync-modal.tsx";
 import type { SyncFlow } from "./modals/sync-modal.tsx";
 import { ThemeModal } from "./modals/theme-modal.tsx";
 import { UnindexedSkillModal } from "./modals/unindexed-skill-modal.tsx";
@@ -143,7 +143,7 @@ function assertNever(value: never): never {
 }
 
 function keymapStateFor(interaction: Interaction, textInputActive: boolean): AppKeymapState {
-  const inactive = { listActive: false, overlayActive: false, diffActive: false, profilesActive: false, helpActive: false, textInputActive };
+  const inactive = { listActive: false, overlayActive: false, diffActive: false, profilesActive: false, helpActive: false, logActive: false, textInputActive };
   switch (interaction.kind) {
     case "browse":
       return { ...inactive, listActive: !textInputActive };
@@ -157,7 +157,7 @@ function keymapStateFor(interaction: Interaction, textInputActive: boolean): App
     case "diff":
       return { ...inactive, overlayActive: true, diffActive: true };
     case "sync":
-      return interaction.flow.running ? inactive : { ...inactive, overlayActive: true };
+      return { ...inactive, overlayActive: !interaction.flow.running, logActive: true };
     case "link":
     case "index":
       return inactive;
@@ -771,7 +771,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
 
   const runStoreSync = () => {
     const events: ConvergenceEvent[] = [];
-    setInteraction({ kind: "sync", flow: { events: [], running: true } });
+    setInteraction({ kind: "sync", flow: { events: [], running: true, scroll: null } });
     // Let the modal paint before git and the reconcile block the loop.
     syncTimer.current = setTimeout(() => {
       syncTimer.current = null;
@@ -784,7 +784,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
         }),
       );
       if (!mounted.current) return;
-      setInteraction({ kind: "sync", flow: { events: [...events], running: false, error: outcome.ok ? undefined : outcome.message } });
+      setInteraction({ kind: "sync", flow: { events: [...events], running: false, error: outcome.ok ? undefined : outcome.message, scroll: null } });
       refresh();
       checkStore();
     }, 0);
@@ -1052,6 +1052,22 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
       case "store.sync":
         runStoreSync();
         return;
+      case "log.down":
+      case "log.up":
+      case "log.page-down":
+      case "log.page-up":
+      case "log.top":
+      case "log.bottom": {
+        if (interaction.kind !== "sync") return;
+        const page = syncLogRows(rowsAvail);
+        const top = Math.max(0, syncLogLength(interaction.flow) - page);
+        const delta = { "log.down": 1, "log.up": -1, "log.page-down": page, "log.page-up": -page, "log.top": -Infinity, "log.bottom": Infinity }[command];
+        const from = interaction.flow.scroll ?? top;
+        const next = clamp(from + delta, 0, top);
+        // Landing on the tail resumes following it.
+        setInteraction({ ...interaction, flow: { ...interaction.flow, scroll: next >= top ? null : next } });
+        return;
+      }
       case "theme.open": {
         const saved = catalog.theme ?? themeId;
         setInteraction({ kind: "theme", index: Math.max(0, themeIds.indexOf(themeId)), saved });
@@ -1390,7 +1406,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
         { key: "a", label: "index", when: currentUnindexedSkill !== undefined },
         { key: "e", label: "edit", when: editableSkillPath !== null },
         { key: "i", label: "details" },
-        { key: "S", label: "sync", when: storeBehind },
+        { key: "S", label: storeBehind ? `sync ⇣${store.behind}` : "sync" },
         { key: "1/2", label: "view" },
         { key: "/", label: panel === "content" ? "search" : "filter" },
         { key: "n/N", label: "match", when: docFind.query.length > 0 },

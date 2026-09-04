@@ -59,6 +59,12 @@ export type AppCommand =
   | "profiles.open"
   | "theme.open"
   | "store.sync"
+  | "log.down"
+  | "log.up"
+  | "log.page-down"
+  | "log.page-up"
+  | "log.top"
+  | "log.bottom"
   | "selection.open"
   | "selection.toggle"
   | "skill.details"
@@ -72,6 +78,8 @@ export interface AppKeymapState {
   readonly diffActive: boolean;
   readonly profilesActive: boolean;
   readonly helpActive: boolean;
+  /** A scrollable output log (the sync modal) owns j/k and friends. */
+  readonly logActive: boolean;
   readonly textInputActive: boolean;
 }
 
@@ -143,6 +151,15 @@ const diffCommands: ReadonlyArray<CommandDefinition> = [
   { name: "diff.delta", title: "Open diff in Delta", keys: ["d"] },
 ];
 
+const logCommands: ReadonlyArray<CommandDefinition> = [
+  { name: "log.down", title: "Scroll log down", keys: ["j", "down"] },
+  { name: "log.up", title: "Scroll log up", keys: ["k", "up"] },
+  { name: "log.page-down", title: "Scroll log a page down", keys: ["ctrl+d", "pagedown"] },
+  { name: "log.page-up", title: "Scroll log a page up", keys: ["ctrl+u", "pageup"] },
+  { name: "log.top", title: "Scroll log to the top", keys: ["g", "home"] },
+  { name: "log.bottom", title: "Scroll log to the end", keys: ["shift+g", "end"] },
+];
+
 const profileCommands: ReadonlyArray<CommandDefinition> = [
   { name: "profiles.next", title: "Select next profile", keys: ["j", "down"] },
   { name: "profiles.previous", title: "Select previous profile", keys: ["k", "up"] },
@@ -189,6 +206,7 @@ export function useAppKeybindings(state: AppKeymapState, run: (command: AppComma
   useBindings(() => ({ ...layer(overlayCommands, dispatch), enabled: state.overlayActive }), [state.overlayActive]);
   useBindings(() => ({ ...layer(diffCommands, dispatch), enabled: state.diffActive }), [state.diffActive]);
   useBindings(() => ({ ...layer(profileCommands, dispatch), enabled: state.profilesActive }), [state.profilesActive]);
+  useBindings(() => ({ ...layer(logCommands, dispatch), enabled: state.logActive }), [state.logActive]);
   useBindings(
     () => ({
       ...layer([{ name: "help.close", title: "Close help", keys: ["?"] }], dispatch),

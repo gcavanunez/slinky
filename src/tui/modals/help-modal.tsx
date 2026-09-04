@@ -45,7 +45,7 @@ export function HelpModal({ cols, rows, editor }: { cols: number; rows: number; 
         ["a", "index selected unindexed .agents skill"],
         ["space", "toggle a skill, or every skill in the group from its heading"],
         ["u", "check vendor skills for upstream updates"],
-        ["S", "sync the store: save, pull, reconcile, restore"],
+        ["S", "sync the store: save, pull, reconcile, restore (j/k scroll its log)"],
         ["L", "link skill into a project (copy or symlink)"],
         ["d", "diff live global copy vs repo baseline"],
         ["p", "profile picker (exact-set apply)"],
