@@ -344,9 +344,6 @@ This project draws inspiration from and utilities from:
 
 - [ghui](https://github.com/kitlangton/ghui)
 - [mail-control](https://github.com/kitlangton/mail-control)
-- [skills.sh](https://skills.sh)
-- [OpenTUI](https://github.com/anomalyco/opentui)
-- [Effect](https://effect.website)
 
 ## Development
 
