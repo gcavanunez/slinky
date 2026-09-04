@@ -51,6 +51,45 @@ export const requireUpstream = Effect.fn("Git.requireUpstream")(function* (repo:
   return { upstream, remote, mergeRef };
 });
 
+export type UpstreamComparison =
+  | { readonly kind: "no-upstream" }
+  | { readonly kind: "unreachable"; readonly upstream: string; readonly detail: string }
+  | { readonly kind: "compared"; readonly upstream: string; readonly ahead: number; readonly behind: number };
+
+/**
+ * Fetch the tracking branch and count commits either side of HEAD. A repo
+ * without a branch or upstream is not an error here; callers decide whether
+ * that matters. A failed fetch (offline, auth) reports as unreachable.
+ */
+export const compareWithUpstream = Effect.fn("Git.compareWithUpstream")(function* (repo: string) {
+  const branch = yield* tryGit(repo, ["branch", "--show-current"]);
+  const none: UpstreamComparison = { kind: "no-upstream" };
+  if (branch.status !== 0 || !branch.stdout.trim()) return none;
+  const upstreamRef = yield* tryGit(repo, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]);
+  if (upstreamRef.status !== 0) return none;
+  const upstream = upstreamRef.stdout.trim();
+  const name = branch.stdout.trim();
+  const remote = (yield* runGit(repo, ["config", "--get", `branch.${name}.remote`])).stdout.trim();
+  const mergeRef = (yield* runGit(repo, ["config", "--get", `branch.${name}.merge`])).stdout.trim();
+  const fetched = yield* tryGit(repo, ["fetch", "--quiet", remote, mergeRef]);
+  if (fetched.status !== 0) {
+    const unreachable: UpstreamComparison = {
+      kind: "unreachable",
+      upstream,
+      detail: (fetched.stderr || fetched.stdout).trim() || `git fetch exited with ${fetched.status ?? "unknown"}`,
+    };
+    return unreachable;
+  }
+  const counts = (yield* runGit(repo, ["rev-list", "--left-right", "--count", "HEAD...FETCH_HEAD"])).stdout.trim().split(/\s+/);
+  const ahead = Number.parseInt(counts[0] ?? "", 10);
+  const behind = Number.parseInt(counts[1] ?? "", 10);
+  if (!Number.isFinite(ahead) || !Number.isFinite(behind)) {
+    return yield* Effect.fail(new OperationFailed({ message: `could not compare HEAD with ${upstream}` }));
+  }
+  const compared: UpstreamComparison = { kind: "compared", upstream, ahead, behind };
+  return compared;
+});
+
 /** Scoped detached worktree at a commit; removed (worktree and directory) on release. */
 export const temporaryWorktree = Effect.fn("Git.temporaryWorktree")(function* (repo: string, prefix: string, commit: string) {
   return yield* Effect.acquireRelease(

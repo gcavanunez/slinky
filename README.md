@@ -244,11 +244,12 @@ Drag across text to copy it automatically. `Ctrl-C` copies an active text select
 
 `slinky update` keeps the committed vendor baseline separate from the live copy updated by `npx skills`:
 
-1. Require a clean `vendor/`, `skills/`, manifest, and `.skill-lock.json` baseline.
-2. Seed selected entries in the machine's skills.sh lock from the committed host lock.
-3. Run the upstream update against the live global store.
-4. Open every changed skill in one aggregate pager session, then show each change in turn.
-5. Accept the new content and provenance baseline, restore the old baseline, or leave the change for later.
+1. Fetch the store's tracking branch and refuse if commits are waiting to be pulled, so a vendor update never lands on a base a teammate has already moved past (`--force` overrides; an unreachable remote only warns). `update --check` reports the same comparison.
+2. Require a clean `vendor/`, `skills/`, manifest, and `.skill-lock.json` baseline.
+3. Seed selected entries in the machine's skills.sh lock from the committed host lock.
+4. Run the upstream update against the live global store.
+5. Open every changed skill in one aggregate pager session, then show each change in turn.
+6. Accept the new content and provenance baseline, restore the old baseline, or leave the change for later.
 
 This makes update source selection consistent across machines sharing the same host commit. On an older host, `slinky save` creates `.skill-lock.json` from manifest provenance and compatible machine metadata before committing it.
 
@@ -286,7 +287,7 @@ In the TUI, group headings show a yellow `⚠` when any of their visible skills 
 - Treat `bootstrap --clone ... --dry-run` as setup plus a reconciliation preview: cloning and config writes still occur.
 - Dry-run reports foreign skills but does not preview `--adopt-all`; run `slinky adopt` to review candidates explicitly.
 - Avoid `--force` until the conflicting path has been inspected.
-- Commit or stash host baseline changes before running `slinky update`.
+- Commit or stash host baseline changes, and pull pending store commits, before running `slinky update`.
 - Do not hand-edit `.local/state.json`; use enable, disable, profile, link, and unlink commands.
 - Review host repository changes after adoption or accepted updates.
 - Bootstrap backups are written under `~/.local/state/my-agent-skills-backups`; inspect an archive before manually restoring it into `$HOME`.

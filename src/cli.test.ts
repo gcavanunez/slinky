@@ -1329,6 +1329,41 @@ printf '%s\\n' '# beta upstream' > "$HOME/.agents/skills/beta/SKILL.md"
     expect(result.stdout.toString()).toContain("no changes: all live copies still match the vendored baselines");
   });
 
+  test("update reports and refuses a catalog store that is behind its upstream", () => {
+    const publisher = fixture();
+    addUpdatableVendor(publisher, "alpha");
+    initializeGitFixture(publisher.host, publisher.home);
+    const remote = attachRemote(publisher);
+    const subscriber = join(publisher.root, "subscriber");
+    const subscriberHome = join(publisher.root, "subscriber-home");
+    expect(Bun.spawnSync(["git", "clone", "-q", remote, subscriber]).exitCode).toBe(0);
+    mkdirSync(join(subscriber, ".local"), { recursive: true });
+    mkdirSync(subscriberHome, { recursive: true });
+
+    // In step with the store: the check says so and update proceeds to its next guard.
+    const current = runCli(subscriber, subscriberHome, ["update", "--check"]);
+    expect(current.exitCode).toBe(0);
+    expect(current.stdout.toString()).toContain("catalog store is up to date with origin/main");
+
+    // A teammate saves and publishes; this machine has not pulled yet.
+    writeFileSync(join(publisher.host, "skills", "foo", "SKILL.md"), "# foo v2\n");
+    const rehash = runCli(publisher.host, publisher.home, ["rehash", "foo"]);
+    if (rehash.exitCode !== 0) throw new Error(rehash.stderr.toString());
+    const saved = runCli(publisher.host, publisher.home, ["save"], gitIdentity);
+    if (saved.exitCode !== 0) throw new Error(`${saved.stderr.toString()}\n${saved.stdout.toString()}`);
+    expect(runGit(publisher.host, ["push", "-q"]).exitCode).toBe(0);
+
+    const behind = runCli(subscriber, subscriberHome, ["update", "--check"]);
+    expect(behind.exitCode).toBe(0);
+    expect(behind.stdout.toString()).toContain("catalog store is 1 commit(s) behind origin/main; run `slinky pull`");
+
+    const refused = runCli(subscriber, subscriberHome, ["update"]);
+    expect(refused.exitCode).toBe(1);
+    expect(refused.stderr.toString()).toContain("catalog store is 1 commit(s) behind origin/main; run `slinky pull` first (--force to override)");
+    // Nothing was fetched into the working branch: the guard only compares.
+    expect(runGit(subscriber, ["rev-list", "--count", "HEAD..origin/main"]).stdout.toString().trim()).toBe("1");
+  });
+
   test("adopt discards a staging copy that duplicates an indexed baseline", () => {
     const f = fixture();
     // `foo` is already indexed as skills/foo with the same content.

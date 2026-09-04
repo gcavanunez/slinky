@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import { Effect } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import { classifyPlacement } from "../domain/catalog-inspection.ts";
+import { compareWithUpstream } from "../lib/git.ts";
 import { getSkill } from "../domain/model.ts";
 import type { Manifest } from "../domain/model.ts";
 import { acceptVendorDrifts, restoreVendorDrift } from "../lib/catalog-actions.ts";
@@ -166,7 +167,16 @@ export const updateCommand = Command.make(
         const { repo } = yield* HostRepo;
         const { manifest: initial, state } = yield* loadHostState;
         let manifest = initial;
+
+        // The store itself may have moved: a teammate's save that this machine
+        // has not pulled yet. Say so before touching vendor skills on a stale base.
+        const store = yield* compareWithUpstream(repo);
+        const storeBehind = store.kind === "compared" && store.behind > 0;
+        if (store.kind === "unreachable") console.log(c.yellow(`could not reach ${store.upstream} to check for catalog changes: ${store.detail}`));
+
         if (input.check) {
+          if (storeBehind) console.log(c.yellow(`catalog store is ${store.behind} commit(s) behind ${store.upstream}; run \`slinky pull\` to bring them down`));
+          else if (store.kind === "compared") console.log(c.dim(`catalog store is up to date with ${store.upstream}`));
           console.log(c.dim("comparing persisted upstream hashes against GitHub…"));
           const statuses = yield* checkUpstream(manifest);
           const label = {
@@ -201,6 +211,9 @@ export const updateCommand = Command.make(
         }
 
         // 1. preflight: the committed baseline is the snapshot we diff against
+        if (storeBehind && !input.force) {
+          return yield* bail(`catalog store is ${store.behind} commit(s) behind ${store.upstream}; run \`slinky pull\` first (--force to override)`);
+        }
         const hostLock = yield* ensureHostSkillLock(manifest);
         if (hostLock.changed && !input.force) {
           return yield* bail("created or refreshed .skill-lock.json; review it and run `slinky save` before updating (--force to override)");
