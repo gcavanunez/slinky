@@ -52,16 +52,7 @@ slinky sync                              # save, pull, reconcile, restore
 
 One catalog tree on the left, the selected skill's documentation on the right.
 
-```text
- CATALOG 10/22         on    live  project up │ DOCUMENT · SKILL.md
- ▸ local                                 2/18 │ Arena
- ▸ anthropics                             0/2 │
- ▸ backnotprop                            3/3 │ Fan out N parallel attempts at the
- ▾ cursor                                 1/4 │ same task. Read every candidate end
-   arena              off       -        -    │ to end. Pick the strongest as the
-   blast-radius       off       -        -    │ base. Graft the best ideas from the
-   unslop              on      ok        -    │ others into it.
-```
+![The Slinky TUI: a folded catalog tree beside a skill's documentation](docs/images/tui.png)
 
 | key | does |
 |---|---|
