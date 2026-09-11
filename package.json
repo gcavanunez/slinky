@@ -1,6 +1,6 @@
 {
   "name": "@gcavanunez/slinky",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Standalone CLI and TUI for managing a separate agent skills repository.",
   "type": "module",
   "license": "MIT",
