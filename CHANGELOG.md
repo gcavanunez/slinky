@@ -1,5 +1,11 @@
 # @gcavanunez/slinky
 
+## 0.2.1
+
+### Patch Changes
+
+- f019a13: Publish every platform binary from the release workflow, so the npm packages carry provenance and match the GitHub release assets byte for byte.
+
 ## 0.2.0
 
 ### Minor Changes
