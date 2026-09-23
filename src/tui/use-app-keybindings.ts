@@ -16,6 +16,7 @@ export type AppCommand =
   | "profiles.apply"
   | "view.available"
   | "view.all"
+  | "view.adopt"
   | "panel.next-wrap"
   | "panel.next"
   | "panel.previous"
@@ -70,7 +71,8 @@ export type AppCommand =
   | "skill.details"
   | "skill.index"
   | "skill.diff"
-  | "skill.link";
+  | "skill.link"
+  | "skill.fork";
 
 export interface AppKeymapState {
   readonly listActive: boolean;
@@ -93,6 +95,7 @@ const listCommands: ReadonlyArray<CommandDefinition> = [
   { name: "app.quit", title: "Quit", keys: ["q"] },
   { name: "view.available", title: "Show skills available here", keys: ["1"] },
   { name: "view.all", title: "Show all skills", keys: ["2"] },
+  { name: "view.adopt", title: "Show skills waiting to be adopted", keys: ["3"] },
   { name: "panel.next-wrap", title: "Focus next panel, wrapping", keys: ["tab"] },
   { name: "panel.next", title: "Focus next panel", keys: ["right", "l"] },
   { name: "panel.previous", title: "Focus previous panel", keys: ["left", "h"] },
@@ -137,9 +140,10 @@ const listCommands: ReadonlyArray<CommandDefinition> = [
   { name: "selection.open", title: "Open selection", keys: ["return", "enter"] },
   { name: "selection.toggle", title: "Toggle selection", keys: ["space"] },
   { name: "skill.details", title: "Show skill details", keys: ["i"] },
-  { name: "skill.index", title: "Index selected skill", keys: ["a"] },
+  { name: "skill.index", title: "Index or adopt selected skill", keys: ["a"] },
   { name: "skill.diff", title: "Diff selected skill", keys: ["d"] },
   { name: "skill.link", title: "Link selected skill", keys: ["shift+l"] },
+  { name: "skill.fork", title: "Fork selected vendor skill", keys: ["shift+f"] },
 ];
 
 const overlayCommands: ReadonlyArray<CommandDefinition> = [{ name: "overlay.close", title: "Close overlay", keys: ["escape", "q"] }];

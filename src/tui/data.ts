@@ -7,8 +7,8 @@ import { contentHash, walkFiles } from "../lib/hash.ts";
 import { classifyPlacement, inspectCatalogEntry, isDiscoverablePlacement } from "../domain/catalog-inspection.ts";
 import type { CatalogLiveStatus, LiveEntry, Placement } from "../domain/catalog-inspection.ts";
 import { diffDirs } from "../lib/diff.ts";
-import { findUnindexedSkills } from "../lib/adopt.ts";
-import type { UnindexedSkill } from "../lib/adopt.ts";
+import { findForeign, findUnindexedSkills } from "../lib/adopt.ts";
+import type { ForeignSkill, UnindexedSkill } from "../lib/adopt.ts";
 import type { DirDiff } from "../lib/diff.ts";
 import type { EditorCommand } from "../lib/editor.ts";
 import { isGlobalStoreProject } from "../lib/linker.ts";
@@ -45,6 +45,7 @@ export interface Catalog {
   project: string;
   projectSkills: ProjectSkill[];
   unindexedSkills: UnindexedSkill[];
+  foreignSkills: ForeignSkill[];
   rows: CatalogRow[];
   /** Host context snapshot so render helpers stay synchronous. */
   repo: string;
@@ -126,6 +127,7 @@ export const loadCatalog = Effect.fn("Tui.loadCatalog")(function* () {
   const project = projectForCwd(state);
   const projectSkills = projectSkillsFor(project, paths.agentsSkills);
   const unindexedSkills = findUnindexedSkills(manifest, repo);
+  const foreign = yield* findForeign(manifest);
   const projectSkillsByName = new Map(projectSkills.map((skill) => [skill.name, skill]));
   const rows: CatalogRow[] = Object.entries(manifest.skills).map(([name, meta]) => {
     const enabled = isSkillEnabled(manifest, state, name);
@@ -158,6 +160,7 @@ export const loadCatalog = Effect.fn("Tui.loadCatalog")(function* () {
     project,
     projectSkills,
     unindexedSkills,
+    foreignSkills: [...foreign.candidates],
     rows,
     repo,
     agentsSkills: paths.agentsSkills,
@@ -263,6 +266,22 @@ export function readUnindexedSkillFile(skill: UnindexedSkill, rel: string): stri
 
 export function unindexedSkillDescription(skill: UnindexedSkill): string {
   return descriptionAt(skill.dir);
+}
+
+export function foreignSkillFiles(skill: ForeignSkill): string[] {
+  return filesAt(skill.dir);
+}
+
+export function readForeignSkillFile(skill: ForeignSkill, rel: string): string {
+  return readFileContent(skill.dir, rel);
+}
+
+export function foreignSkillDescription(skill: ForeignSkill): string {
+  return descriptionAt(skill.dir);
+}
+
+export function foreignSkillLocation(skill: ForeignSkill): string {
+  return skill.location === "agents" ? "~/.agents" : skill.location === "claude" ? "~/.claude" : skill.location === "opencode" ? "~/.opencode" : ".agents/skills";
 }
 
 export function skillDescription(repo: string, meta: Skill): string {

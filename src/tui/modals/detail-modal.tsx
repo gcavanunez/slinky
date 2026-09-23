@@ -14,9 +14,11 @@ export function DetailModal({ cols, rows, row, catalog }: { cols: number; rows: 
   const { contentWidth } = modalInner(WIDTH, cols);
   const desc = skillDescription(catalog.repo, row.meta);
   const links = linksForSkill(catalog.state, row.name);
-  const upstream = row.meta.origin === "vendor" ? row.meta.upstream : null;
+  const forkedFrom = row.meta.origin === "local" ? row.meta.forkedFrom : undefined;
+  const upstream = row.meta.origin === "vendor" ? row.meta.upstream : (forkedFrom?.upstream ?? null);
   const source = upstream?.kind === "github" ? upstream.repository : upstream?.kind === "well-known" ? upstream.source : null;
   const sourceUrl = upstream?.kind === "unknown" ? null : upstream?.url;
+  const forkLabel = forkedFrom ? `${forkedFrom.skill}${source ? ` (${source})` : ""} · ${formatUtc(forkedFrom.forkedAt).slice(0, 10)}` : null;
 
   const here = row.projectLink
     ? {
@@ -37,7 +39,8 @@ export function DetailModal({ cols, rows, row, catalog }: { cols: number; rows: 
   }
   lines.push(<Field key="origin" label="origin" value={row.origin} />);
   lines.push(<Field key="path" label="path" value={row.meta.path} />);
-  if (source) lines.push(<Field key="source" label="source" value={source} />);
+  if (forkLabel) lines.push(<Field key="forked" label="forked from" value={forkLabel} />);
+  else if (source) lines.push(<Field key="source" label="source" value={source} />);
   if (sourceUrl) lines.push(<Field key="url" label="url" value={sourceUrl} fg={colors.link} />);
   lines.push(<Field key="enabled" label="enabled" value={row.enabled ? "yes" : "no"} fg={row.enabled ? colors.green : colors.muted} />);
   lines.push(<Field key="live" label="live" value={liveLabel[row.live]} fg={liveColor(row.live)} />);

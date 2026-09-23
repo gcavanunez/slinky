@@ -42,6 +42,24 @@ Slinky validates its owned JSON documents with Effect Schema. Unknown properties
 
 Local paths must stay below `skills/` and end with the skill name. Vendor paths must use `vendor/<owner>/<name>`. Profile members must reference skills in the same manifest.
 
+A local skill created by `slinky fork` also carries an optional `forkedFrom`:
+
+```json
+{
+  "origin": "local",
+  "path": "skills/my-their-skill",
+  "contentHash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "forkedFrom": {
+    "skill": "their-skill",
+    "upstream": { "kind": "github", "repository": "acme/skills", "url": "https://github.com/acme/skills", "tracking": { "kind": "tree", "path": "skills/their-skill/SKILL.md", "hash": "0000000000000000000000000000000000000000" } },
+    "contentHash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "forkedAt": "2026-09-12T00:00:00.000Z"
+  }
+}
+```
+
+`skill` is the vendor's catalog name at fork time, `upstream` is a copy of its provenance, and `contentHash` is the vendor baseline the fork started from. It is informational: forks are ordinary local skills and have no `.skill-lock.json` entry. A manifest containing `forkedFrom` does not load on Slinky releases that predate it.
+
 Vendor `upstream` values are discriminated by `kind`:
 
 - `github` stores a repository, a nullable `url`, and either tree tracking or an explicit untracked state.

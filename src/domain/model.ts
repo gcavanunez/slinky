@@ -79,10 +79,23 @@ const VendorUpstream = Schema.Union([
   }),
 ]);
 
+/** Where a local skill was copied from when it was forked off a vendor baseline. */
+export const ForkOrigin = Schema.Struct({
+  /** Catalog name of the vendor skill at fork time; it may since have been renamed or removed. */
+  skill: SkillName,
+  upstream: VendorUpstream,
+  /** Vendor baseline hash the fork started from. */
+  contentHash: ContentHash,
+  forkedAt: CanonicalUtc,
+});
+export type ForkOrigin = typeof ForkOrigin.Type;
+
 const LocalSkill = Schema.Struct({
   origin: Schema.Literal("local"),
   path: LocalSkillPath,
   contentHash: ContentHash,
+  /** Present only on skills created by `slinky fork`. */
+  forkedFrom: Schema.optional(ForkOrigin),
 });
 
 const VendorSkill = Schema.Struct({

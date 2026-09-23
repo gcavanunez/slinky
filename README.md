@@ -54,19 +54,21 @@ One catalog tree on the left, the selected skill's documentation on the right.
 
 ![The Slinky TUI: a folded catalog tree beside a skill's documentation](docs/images/tui.png)
 
-| key | does |
-|---|---|
-| `j/k` `h/l` | move; fold or unfold a group |
-| `space` | toggle a skill, or every skill in a group from its heading |
-| `z` / `Z` | fold one group / fold all |
-| `/` | filter the catalog, or search the document |
-| `enter` `i` | open the document / show details |
-| `d` `u` | diff a drifting vendor skill / check upstream |
-| `e` `a` `L` `p` | edit, index an unindexed skill, link into a project, apply a profile |
-| `S` | run `slinky sync`; the tab row shows `⇣ N to pull` when the store has commits waiting |
-| `t` | pick a theme (27 available, previewed live) |
-| `x` `v` `<` `>` | zoom, cycle layouts, resize |
-| `?` | everything else |
+| key             | does                                                                                  |
+| --------------- | ------------------------------------------------------------------------------------- |
+| `j/k` `h/l`     | move; fold or unfold a group                                                          |
+| `space`         | toggle a skill, or every skill in a group from its heading                            |
+| `z` / `Z`       | fold one group / fold all                                                             |
+| `/`             | filter the catalog, or search the document                                            |
+| `enter` `i`     | open the document / show details                                                      |
+| `d` `u`         | diff a drifting vendor skill / check upstream                                         |
+| `e` `a` `L` `p` | edit, index/adopt a skill, link into a project, apply a profile                       |
+| `1` `2` `3`     | available here, all skills, skills waiting to be adopted                              |
+| `F`             | fork a vendor skill into `skills/` as your own copy                                   |
+| `S`             | run `slinky sync`; the tab row shows `⇣ N to pull` when the store has commits waiting |
+| `t`             | pick a theme (27 available, previewed live)                                           |
+| `x` `v` `<` `>` | zoom, cycle layouts, resize                                                           |
+| `?`             | everything else                                                                       |
 
 ## How it fits together
 

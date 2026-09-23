@@ -11,7 +11,7 @@ import { pullCommand, pushCommand, saveCommand, syncCommand } from "./cli/conver
 import { linkCommand, linksCommand, unlinkCommand } from "./cli/link-commands.ts";
 import { c } from "./cli/render.ts";
 import { bootstrapCommand, configCommand, initCommand, tuiCommand, versionCommand } from "./cli/setup-commands.ts";
-import { diffCommand, rehashCommand, restoreCommand, updateCommand, vendorCommand } from "./cli/vendor-commands.ts";
+import { diffCommand, forkCommand, rehashCommand, restoreCommand, updateCommand, vendorCommand } from "./cli/vendor-commands.ts";
 import { RepoNotFoundError, Paths } from "./lib/paths.ts";
 
 const root = Command.make("slinky").pipe(
@@ -36,6 +36,7 @@ const root = Command.make("slinky").pipe(
     skillsCommand,
     vendorCommand,
     restoreCommand,
+    forkCommand,
     rehashCommand,
     adoptCommand,
     saveCommand,

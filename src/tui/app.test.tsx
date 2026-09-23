@@ -174,6 +174,37 @@ test("the all-skills view lists every indexed skill and previews its document", 
   }
 });
 
+test("the to-adopt view surfaces foreign global skills and their adoption action", async () => {
+  const foreign = join(home, ".claude", "skills", "foreign-skill");
+  mkdirSync(foreign, { recursive: true });
+  writeFileSync(join(foreign, "SKILL.md"), "---\nname: foreign-skill\ndescription: A foreign fixture skill.\n---\n\n# Foreign\n");
+  const setup = await mount();
+  try {
+    const chrome = await setup.waitForFrame((value) => value.includes("TO ADOPT"));
+    expect(chrome).toContain("TO ADOPT");
+
+    await input(() => setup.mockInput.pressKey("3"));
+    const listed = await setup.waitForFrame((value) => value.includes("foreign-skill") && value.includes("~/.claude"));
+    expect(listed).toContain("foreign-skill");
+
+    await input(() => setup.mockInput.pressKey("i"));
+    const detail = await setup.waitForFrame((value) => value.includes("outside the catalog"));
+    expect(detail).toContain("unknown source");
+    await closeOverlay(setup);
+
+    await input(() => setup.mockInput.pressKey("a"));
+    const adopt = await setup.waitForFrame((value) => value.includes("Adopt foreign-skill"));
+    expect(adopt).toContain("vendor/_unknown/foreign-skill");
+
+    await input(() => setup.mockInput.pressKey("j"));
+    const local = await setup.waitForFrame((value) => value.includes("skills/foreign-skill") && !value.includes("vendor/_unknown/foreign-skill"));
+    expect(local).toContain("treat this as a skill you maintain");
+  } finally {
+    destroy(setup);
+    rmSync(foreign, { recursive: true, force: true });
+  }
+});
+
 test("? opens help and esc closes it", async () => {
   const setup = await mount();
   try {

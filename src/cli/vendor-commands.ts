@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { Effect } from "effect";
+import { Effect, Option } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import { classifyPlacement } from "../domain/catalog-inspection.ts";
 import { compareWithUpstream } from "../lib/git.ts";
@@ -9,6 +9,7 @@ import type { Manifest } from "../domain/model.ts";
 import { acceptVendorDrifts, restoreVendorDrift } from "../lib/catalog-actions.ts";
 import { diffDirs, isClean } from "../lib/diff.ts";
 import type { DiffPager } from "../lib/diff.ts";
+import { forkSkill } from "../lib/fork.ts";
 import { HostRepo, Paths } from "../lib/paths.ts";
 import { observeEntry } from "../lib/reconcile.ts";
 import { refreshLocalHashes } from "../lib/rehash.ts";
@@ -16,7 +17,21 @@ import { ensureHostSkillLock, seedGlobalSkillLock } from "../lib/skill-lock.ts";
 import { assertVendorUpdatePlacements, findDriftingVendors, vendorRestore } from "../lib/vendor-ops.ts";
 import { baselineDirty, checkUpstream, detectChanges, runSkillsUpdate } from "../lib/update.ts";
 import { c, pad } from "./render.ts";
-import { bail, forceFlag, loadHostState, openPager, optionalSkillsArg, pagerFlags, renderPatch, selectPager, skillsArg, runSyncCmd, withRepo, switchFlag } from "./shared.ts";
+import {
+  bail,
+  dryRunFlag,
+  forceFlag,
+  loadHostState,
+  openPager,
+  optionalSkillsArg,
+  pagerFlags,
+  renderPatch,
+  selectPager,
+  skillsArg,
+  runSyncCmd,
+  withRepo,
+  switchFlag,
+} from "./shared.ts";
 
 interface DiffOptions {
   readonly patch: boolean;
@@ -125,6 +140,30 @@ export const restoreCommand = Command.make("restore", { names: skillsArg }, ({ n
     }),
   ),
 ).pipe(Command.withDescription("Reset selected live copies, or all drift with `restore all`, from the repo baseline"));
+
+export const forkCommand = Command.make(
+  "fork",
+  {
+    skill: Argument.string("skill"),
+    as: Flag.string("as").pipe(Flag.optional, Flag.withDescription("Name for the fork (default: my-<skill>)")),
+    dryRun: dryRunFlag,
+    force: forceFlag,
+  },
+  ({ skill, as, dryRun, force }) =>
+    withRepo(
+      Effect.gen(function* () {
+        const result = yield* forkSkill(skill, Option.isSome(as) ? { name: as.value, dryRun, force } : { dryRun, force });
+        for (const warning of result.warnings) console.log(c.yellow(`warn: ${warning}`));
+        if (result.dryRun) {
+          for (const message of result.messages) console.log(`would ${message}`);
+          return;
+        }
+        console.log(`forked ${c.bold(skill)} -> ${result.path}`);
+        for (const message of result.messages) console.log(`  ${message}`);
+        console.log(c.dim(`edit it under ${result.path}, then \`slinky save\`; ${skill} stays vendored (\`slinky disable ${skill}\` to hide it)`));
+      }),
+    ),
+).pipe(Command.withDescription("Copy a vendor skill into skills/ as your own local skill (default name my-<skill>)"));
 
 export const rehashCommand = Command.make("rehash", { names: optionalSkillsArg }, ({ names }) =>
   withRepo(

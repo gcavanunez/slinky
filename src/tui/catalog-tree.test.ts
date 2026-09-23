@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { firstItemIndex, selectionOf, treeIndex, treeRows } from "./catalog-tree.ts";
+import { firstItemIndex, itemPosition, selectionOf, treeIndex, treeRows } from "./catalog-tree.ts";
 
 const groups = [
   { id: "local", label: "local", skills: ["alpha", "beta"] },
@@ -33,6 +33,19 @@ describe("catalog tree", () => {
     const folded = treeRows(groups, new Set(["acme"]), false);
     expect(treeIndex(folded, { group: "acme", item: "gamma" }, name)).toBe(3);
     expect(treeIndex(folded, { group: "gone", item: "x" }, name)).toBe(1);
+  });
+
+  test("itemPosition counts skills, not headings, and keeps folded skills in the total", () => {
+    const open = treeRows(groups, new Set(), false);
+    expect(itemPosition(open, 0)).toEqual({ index: null, total: 3 });
+    expect(itemPosition(open, 1)).toEqual({ index: 1, total: 3 });
+    expect(itemPosition(open, 4)).toEqual({ index: 3, total: 3 });
+
+    const folded = treeRows(groups, new Set(["local"]), false);
+    expect(itemPosition(folded, 0)).toEqual({ index: null, total: 3 });
+    expect(itemPosition(folded, 2)).toEqual({ index: 3, total: 3 });
+
+    expect(itemPosition([], 0)).toEqual({ index: null, total: 0 });
   });
 
   test("selectionOf round-trips a row", () => {

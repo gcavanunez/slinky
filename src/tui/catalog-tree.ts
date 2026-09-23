@@ -56,6 +56,30 @@ export function treeIndex<Group extends TreeGroup>(rows: ReadonlyArray<TreeRow<G
   return heading === -1 ? firstItemIndex(rows) : heading;
 }
 
+/**
+ * Cursor position among skills for the pane header. Headings are not counted,
+ * and a folded group's skills still count toward the total so it does not
+ * jump around while folding; on a heading, `index` is null.
+ */
+export interface ItemPosition {
+  /** 1-based position of the selected skill; null on a heading. */
+  readonly index: number | null;
+  readonly total: number;
+}
+
+export function itemPosition<Group extends TreeGroup>(rows: ReadonlyArray<TreeRow<Group>>, rowIndex: number): ItemPosition {
+  let passed = 0;
+  let total = 0;
+  let index: number | null = null;
+  for (const [i, row] of rows.entries()) {
+    const count = row.kind === "group" ? (row.collapsed ? row.group.skills.length : 0) : 1;
+    total += count;
+    if (i < rowIndex) passed += count;
+    else if (i === rowIndex && row.kind === "item") index = passed + 1;
+  }
+  return { index, total };
+}
+
 export function selectionOf<Group extends TreeGroup>(row: TreeRow<Group>, itemName: (item: ItemOf<Group>) => string): TreeSelection {
   return row.kind === "group" ? { group: row.group.id } : { group: row.group.id, item: itemName(row.item) };
 }

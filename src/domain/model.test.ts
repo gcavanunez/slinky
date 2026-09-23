@@ -99,6 +99,39 @@ describe("domain schemas", () => {
     expect(() => Schema.decodeUnknownSync(Manifest)(badProfile, strict)).toThrow();
   });
 
+  test("local skills may record the vendor baseline they were forked from", () => {
+    const input = manifestInput();
+    const forked = {
+      ...input,
+      skills: {
+        ...input.skills,
+        "my-bar": {
+          origin: "local",
+          path: "skills/my-bar",
+          contentHash: HASH,
+          forkedFrom: {
+            skill: "bar",
+            upstream: input.skills.bar.upstream,
+            contentHash: HASH,
+            forkedAt: "2026-09-12T12:00:00.000Z",
+          },
+        },
+      },
+    };
+
+    const manifest = Schema.decodeUnknownSync(Manifest)(forked, strict);
+    const skill = getSkill(manifest, "my-bar");
+    expect(skill?.origin === "local" ? skill.forkedFrom?.skill : null).toBe("bar");
+
+    const encoded = Schema.encodeSync(Manifest)(manifest, strict);
+    const local = encoded.skills["my-bar"];
+    expect(local?.origin === "local" ? local.forkedFrom?.forkedAt : null).toBe("2026-09-12T12:00:00.000Z");
+    expect(encoded.skills.foo?.origin === "local" && "forkedFrom" in encoded.skills.foo).toBe(false);
+
+    const vendorWithFork = { ...input, skills: { ...input.skills, bar: { ...input.skills.bar, forkedFrom: forked.skills["my-bar"].forkedFrom } } };
+    expect(() => Schema.decodeUnknownSync(Manifest)(vendorWithFork, strict)).toThrow();
+  });
+
   test("allows names outside the old alphanumeric naming policy", () => {
     const input = {
       version: 1,

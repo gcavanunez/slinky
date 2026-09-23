@@ -5,7 +5,7 @@ description: >
   skill catalogs, global skill stores, profiles, upstream vendor updates,
   adoption, and project-local skill links. Use this skill whenever someone
   asks an agent to inspect, install, enable, disable, synchronize, update,
-  vendor, restore, adopt, or link coding-agent skills through Slinky. Prefer
+  vendor, restore, fork, adopt, or link coding-agent skills through Slinky. Prefer
   Slinky commands over editing its machine state or global skill directories
   by hand.
 compatibility: Requires the slinky CLI, Git, tar, diff, Node.js/npx, and network access for upstream operations.
@@ -161,6 +161,20 @@ slinky restore all      # restore every drifting live vendor from the catalog
 
 Pager mode opens one clean patch stream for all selected drifting skills. Use `--hunk` for interactive review, `--delta` for terminal rendering, or the equivalent `--pager hunk|delta` form.
 
+## Forking A Vendor Skill
+
+Never edit a vendor baseline under `vendor/` by hand: it must keep tracking upstream and a hand edit fails `slinky verify`. When the user wants their own version of a vendored skill, fork it into `skills/`:
+
+```bash
+slinky fork <vendor-skill>                  # creates skills/my-<vendor-skill>
+slinky fork <vendor-skill> --as <name>      # choose the name
+slinky fork <vendor-skill> --dry-run
+```
+
+`fork` copies the committed baseline, rewrites `name:` in the copied `SKILL.md` frontmatter to the new name, indexes the copy as a local skill with `forkedFrom` provenance, and reconciles so it is live. The vendor entry stays in the catalog and stays enabled. If the user wants only the fork, run `slinky disable <vendor-skill>` afterwards; if a profile is active, add the fork to the profile or `slinky enable` it. Then edit the fork under `skills/<name>/` like any local skill and `slinky save`.
+
+`fork` refuses when the live vendor copy differs from the baseline; resolve that with `slinky diff`, then `vendor` or `restore`, before forking. `--force` forks the committed baseline anyway and is a user decision. In the TUI, `F` on a vendor skill opens the same flow.
+
 In the TUI, dragging across text copies it automatically. `Ctrl-C` copies an active text selection; without a selection it retains the normal quit behavior. The catalog is one tree of author headings with their skills beneath: `space` on a heading toggles the whole group, `z` folds it, `Z` folds or unfolds all. `v` and `V` cycle between the split, catalog only, and document only; `<` and `>` resize the split. `f` shows `SKILL.md` frontmatter, `t` picks a theme, and `S` runs `slinky sync` when the tab row reports commits waiting on the store. On a local catalog skill or unindexed local skill, `e` suspends the TUI and opens the skill from the skills host directory. The editor resolves from the configured `editor`, then `$VISUAL`, `$EDITOR`, and `nvim`; vendor, staging-inbox, and project-only copies are excluded.
 
 In the TUI, group headings show a yellow `⚠` when any of their visible skills has confirmed drift. Select a drifting vendor skill and press `d`. The drift review accepts `a` to vendor the live global copy, `r` to restore the repository baseline, `h` to open Hunk, and `d` to open Delta.
@@ -264,6 +278,7 @@ Bootstrap backs up global skill directories before mutation. If it reports forei
 - Treat `--force`, `--adopt-all`, `adopt all`, `restore all`, `sync`, and `update --yes` as explicit user decisions. Plain `sync` restores all vendor drift.
 - Do not edit `.local/state.json` or global skill directories by hand.
 - Do not delete vendor drift before showing `slinky diff` or explaining the restore/vendor choice.
+- Do not hand-edit `vendor/`; use `slinky fork` to make a local copy the user can own.
 - Keep the skills host under Git and review its diff after adoption or accepted updates.
 - Use `slinky save` after review when the catalog changes should become the new committed baseline.
 - Use `slinky push` after saving, and `slinky pull` on other machines; do not replace these safety checks with force-pushes or merge pulls.

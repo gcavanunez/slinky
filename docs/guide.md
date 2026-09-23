@@ -113,6 +113,7 @@ Status columns are `on` (enabled), `live` (global store state), `project` (place
 - `d` on a drifting vendor skill opens the drift review: `a` accepts the live global copy as the repository baseline, `r` restores the global copy from the baseline, `h` reviews in Hunk, `d` in Delta.
 - `a` on an unindexed skill indexes it: enter the source (`kitlangton/skills`) or paste its add command. Slinky verifies that the installed content matches the unindexed copy before indexing it in place or moving it to the inferred vendor path.
 - `L` links the skill into a project (copy or symlink). `p` applies a profile. `u` checks vendor skills upstream.
+- `F` on a vendor skill forks it into `skills/` as your own local copy (see [Forking a vendor skill](#forking-a-vendor-skill)); the prompt is prefilled with `my-<name>`.
 - `S` runs `slinky sync` in a modal showing its output. On launch the TUI fetches the store's tracking branch in the background; when commits are waiting, the tab row shows `⇣ N to pull · S sync`.
 - `t` picks a colour theme: moving through the list previews it live, `enter` records it in `~/.config/slinky/config.json`, `esc` restores the saved one.
 - Dragging across text copies it. `Ctrl-C` copies an active selection and otherwise quits. Clipboard writes use terminal OSC52 plus native platform utilities when available.
@@ -209,6 +210,20 @@ slinky restore all              # catalog wins for every drifting live vendor
 
 `--patch` prints a unified patch. `--hunk` opens an interactive review in Hunk, while `--delta` streams the patch through Delta. The generic `--pager hunk|delta` form is equivalent. Pager mode sends one clean patch stream for all selected drifting skills and requires the selected executable on `PATH`. A recorded pager (see [Configuration](#configuration)) applies to both `diff` and `update`; a flag overrides it for one run, and `--no-pager` forces inline output.
 
+### Forking a vendor skill
+
+Vendor baselines are meant to track upstream, so hand-editing one fails verification. When you want your own version of a vendored skill, fork it:
+
+```bash
+slinky fork frontend-design                      # -> skills/my-frontend-design
+slinky fork frontend-design --as design-strict   # choose the name
+slinky fork frontend-design --dry-run
+```
+
+`fork` copies the committed baseline (never the live copy) into `skills/<name>`, rewrites `name:` in the `SKILL.md` frontmatter so agents do not see two skills with the same name, indexes it as a local skill, and reconciles so the symlink appears in the global stores. The vendor entry is untouched and stays enabled; `slinky disable <vendor-skill>` hides it if you only want the fork. With a profile active, the fork is indexed but not enabled until you add it to the profile.
+
+If the live vendor copy has drifted from the baseline, `fork` refuses so you can `vendor` or `restore` first; `--force` forks the committed baseline anyway. The manifest records `forkedFrom` (the source skill, its upstream, the baseline hash, and when) so the origin is visible in the TUI details and available to later tooling. In the TUI, `F` on a vendor skill opens the same flow with the default name prefilled.
+
 ## Project links
 
 Copy a skill into a project, which is the default:
@@ -290,6 +305,7 @@ slinky diff [skill...] [--patch|--hunk|--delta|--pager <hunk|delta>|--no-pager]
 slinky vendor <skill...>
 slinky restore <skill...>
 slinky restore all                    # catalog wins for every drifting live vendor
+slinky fork <vendor-skill> [--as <name>] [--dry-run] [--force]   # copy into skills/ as a local skill
 slinky rehash [local-skill...]        # no names: every stale local skill
 slinky adopt                          # list staged + host skills not in the repo
 slinky adopt <skill...>|all [--local] [--owner=<owner>] # `--all` is also supported

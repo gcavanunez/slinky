@@ -1049,6 +1049,50 @@ printf '%s\\n' '${lock}' > "$PWD/skills-lock.json"
     expect(result.stdout.toString()).toContain("second: live copy restored from repo baseline");
   });
 
+  test("fork copies a vendor skill into skills/ and leaves the vendor entry alone", () => {
+    const f = fixture();
+    addDriftingVendor(f, "review");
+    // A clean live copy: fork refuses drift by default.
+    writeFileSync(join(f.home, ".agents", "skills", "review", "SKILL.md"), "# baseline review\n");
+
+    const dry = runCli(f.host, f.home, ["fork", "review", "--dry-run"]);
+    if (dry.exitCode !== 0) throw new Error(`${dry.stderr.toString()}\n${dry.stdout.toString()}`);
+    expect(dry.stdout.toString()).toContain("would copy vendor/acme/review -> skills/my-review");
+    expect(existsSync(join(f.host, "skills", "my-review"))).toBe(false);
+
+    const result = runCli(f.host, f.home, ["fork", "review"]);
+    if (result.exitCode !== 0) throw new Error(`${result.stderr.toString()}\n${result.stdout.toString()}`);
+    expect(result.stdout.toString()).toContain("-> skills/my-review");
+    expect(result.stdout.toString()).toContain("linked ~/.agents/skills/my-review");
+
+    const manifest = decodeEncodedManifest(JSON.parse(readFileSync(join(f.host, "skills.manifest.json"), "utf8")));
+    const fork = manifest.skills["my-review"];
+    expect(fork?.origin).toBe("local");
+    expect(fork?.origin === "local" ? fork.forkedFrom?.skill : null).toBe("review");
+    expect(manifest.skills.review?.origin).toBe("vendor");
+    expect(readFileSync(join(f.host, "skills", "my-review", "SKILL.md"), "utf8")).toBe("# baseline review\n");
+    expect(lstatSync(join(f.home, ".agents", "skills", "my-review")).isSymbolicLink()).toBe(true);
+
+    const named = runCli(f.host, f.home, ["fork", "review", "--as", "review-strict"]);
+    if (named.exitCode !== 0) throw new Error(`${named.stderr.toString()}\n${named.stdout.toString()}`);
+    expect(existsSync(join(f.host, "skills", "review-strict", "SKILL.md"))).toBe(true);
+  });
+
+  test("fork refuses a drifting vendor without --force", () => {
+    const f = fixture();
+    addDriftingVendor(f, "review");
+
+    const refused = runCli(f.host, f.home, ["fork", "review"]);
+    expect(refused.exitCode).toBe(1);
+    expect(refused.stderr.toString()).toContain("live copy differs from the vendor baseline");
+    expect(existsSync(join(f.host, "skills", "my-review"))).toBe(false);
+
+    const forced = runCli(f.host, f.home, ["fork", "review", "--force"]);
+    if (forced.exitCode !== 0) throw new Error(`${forced.stderr.toString()}\n${forced.stdout.toString()}`);
+    expect(forced.stdout.toString()).toContain("warn: review: live copy differs from the vendor baseline; forked the committed baseline");
+    expect(readFileSync(join(f.host, "skills", "my-review", "SKILL.md"), "utf8")).toBe("# baseline review\n");
+  });
+
   test("restore leaves the live copy intact when the catalog baseline is missing", () => {
     const f = fixture();
     addDriftingVendor(f);

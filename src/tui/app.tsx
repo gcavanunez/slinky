@@ -14,13 +14,15 @@ import type { DiffPager } from "../lib/diff.ts";
 import { defaultThemeId, getActiveProfile, themeIds } from "../domain/model.ts";
 import type { ThemeId } from "../domain/model.ts";
 import { addSkillFromSource, parseSkillsAddSource } from "../lib/skills-add.ts";
+import { adoptForeignSkill } from "../lib/foreign-adoption.ts";
+import { defaultForkName, forkSkill } from "../lib/fork.ts";
 import { syncCatalog } from "../lib/convergence.ts";
 import type { ConvergenceEvent } from "../lib/convergence.ts";
 import { compareWithUpstream, tryGitAsync } from "../lib/git.ts";
 import type { UpstreamComparison } from "../lib/git.ts";
 import { checkUpstream } from "../lib/update.ts";
 import type { UpstreamStatus } from "../lib/update.ts";
-import type { UnindexedSkill } from "../lib/adopt.ts";
+import type { ForeignSkill, UnindexedSkill } from "../lib/adopt.ts";
 import { runPromiseResult, runSync, runSyncResult } from "./runtime.ts";
 import type { RunResult } from "./runtime.ts";
 import { Divider, Filler, HintRow, PaneTitle, PlainLine, SeparatorColumn, TextLine } from "./components.tsx";
@@ -46,12 +48,15 @@ import type { SelectionClipboard } from "./clipboard.ts";
 import { editableHostSkillPath, editSkillInEditor, withSuspendedRenderer } from "./external.ts";
 import { cycleLayout, primaryPanel, resizeFocusedSplit } from "./layout.ts";
 import type { Layout, Panel } from "./layout.ts";
-import { selectionOf, treeIndex, treeRows } from "./catalog-tree.ts";
+import { itemPosition, selectionOf, treeIndex, treeRows } from "./catalog-tree.ts";
 import type { TreeRow, TreeSelection } from "./catalog-tree.ts";
 import { useAppKeybindings } from "./use-app-keybindings.ts";
 import type { AppCommand, AppKeymapState } from "./use-app-keybindings.ts";
 import { DetailModal } from "./modals/detail-modal.tsx";
 import { DiffModal } from "./modals/diff-modal.tsx";
+import { AdoptSkillModal } from "./modals/adopt-skill-modal.tsx";
+import { ForeignSkillModal } from "./modals/foreign-skill-modal.tsx";
+import { ForkSkillModal } from "./modals/fork-skill-modal.tsx";
 import { HelpModal, helpLength, helpRows } from "./modals/help-modal.tsx";
 import { IndexSkillModal } from "./modals/index-skill-modal.tsx";
 import { LinkModal } from "./modals/link-modal.tsx";
@@ -64,11 +69,14 @@ import { UnindexedSkillModal } from "./modals/unindexed-skill-modal.tsx";
 import {
   diffSkill,
   expandHome,
+  foreignSkillFiles,
+  foreignSkillLocation,
   isSkillAvailableHere,
   loadCatalog,
   projectSkillFiles,
   projectPlacement,
   readProjectSkillFile,
+  readForeignSkillFile,
   readSkillFile,
   readUnindexedSkillFile,
   saveTheme,
@@ -78,8 +86,12 @@ import {
 } from "./data.ts";
 import type { Catalog, CatalogRow, DiffResult, LiveStatus, ProjectPlacement, ProjectSkill } from "./data.ts";
 
-type CatalogView = "available" | "all";
-type SkillItem = { kind: "skill"; row: CatalogRow } | { kind: "project-skill"; skill: ProjectSkill } | { kind: "unindexed-skill"; skill: UnindexedSkill };
+type CatalogView = "available" | "all" | "adopt";
+type SkillItem =
+  | { kind: "skill"; row: CatalogRow }
+  | { kind: "project-skill"; skill: ProjectSkill }
+  | { kind: "unindexed-skill"; skill: UnindexedSkill }
+  | { kind: "foreign-skill"; skill: ForeignSkill };
 
 function skillItemName(item: SkillItem): string {
   return item.kind === "skill" ? item.row.name : item.skill.name;
@@ -116,6 +128,18 @@ export interface IndexFlow {
   error?: string;
 }
 
+export interface ForkFlow {
+  input: string;
+  running: boolean;
+  error?: string;
+}
+
+export interface AdoptFlow {
+  origin: "vendor" | "local";
+  running: boolean;
+  error?: string;
+}
+
 type Interaction =
   | { kind: "browse" }
   | { kind: "help"; scroll: number }
@@ -125,6 +149,8 @@ type Interaction =
   | { kind: "diff"; row: CatalogRow; result: DiffResult }
   | { kind: "link"; row: CatalogRow; flow: LinkFlow }
   | { kind: "index"; skill: UnindexedSkill; flow: IndexFlow }
+  | { kind: "adopt"; skill: ForeignSkill; flow: AdoptFlow }
+  | { kind: "fork"; row: CatalogRow; flow: ForkFlow }
   | { kind: "sync"; flow: SyncFlow };
 
 /** What we know about the store's tracking branch; "checking" until the background fetch answers. */
@@ -161,6 +187,8 @@ function keymapStateFor(interaction: Interaction, textInputActive: boolean): App
       return { ...inactive, overlayActive: !interaction.flow.running, logActive: true };
     case "link":
     case "index":
+    case "adopt":
+    case "fork":
       return inactive;
     default:
       return assertNever(interaction);
@@ -238,6 +266,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
   const mounted = useRef(true);
   const notificationTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const indexTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const forkInput = useRef("");
   const syncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const storeGeneration = useRef(0);
   const storeAbort = useRef<AbortController | null>(null);
@@ -296,6 +325,20 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
 
   const groups = useMemo<AuthorGroup[]>(() => {
     const out: AuthorGroup[] = [];
+    const foreign = catalog.foreignSkills.filter((skill) => !filterText || skill.name.includes(filterText.toLowerCase()));
+    if (catalogView === "adopt") {
+      if (foreign.length > 0) {
+        out.push({
+          id: "to-adopt",
+          label: "needs adoption",
+          enabledCount: null,
+          hasDrift: false,
+          rows: null,
+          skills: foreign.map((skill) => ({ kind: "foreign-skill", skill })),
+        });
+      }
+      return out;
+    }
     const unindexed = catalog.unindexedSkills.filter((skill) => !filterText || skill.name.includes(filterText.toLowerCase()));
     const unindexedNames = new Set(catalog.unindexedSkills.map((skill) => skill.name));
     const projectOnly = catalog.projectSkills
@@ -350,7 +393,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
       });
     }
     return out;
-  }, [catalog.manifest.skills, catalog.projectSkills, catalog.unindexedSkills, catalogView, filtered, filterText]);
+  }, [catalog.foreignSkills, catalog.manifest.skills, catalog.projectSkills, catalog.unindexedSkills, catalogView, filtered, filterText]);
 
   // Chrome: header, rail, tabs, rail, [body], rail, footer.
   const viewport = Math.max(3, rowsAvail - 6);
@@ -362,9 +405,10 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
   const current: CatalogRow | undefined = currentItem?.kind === "skill" ? currentItem.row : undefined;
   const currentProjectSkill: ProjectSkill | undefined = currentItem?.kind === "project-skill" ? currentItem.skill : undefined;
   const currentUnindexedSkill: UnindexedSkill | undefined = currentItem?.kind === "unindexed-skill" ? currentItem.skill : undefined;
+  const currentForeignSkill: ForeignSkill | undefined = currentItem?.kind === "foreign-skill" ? currentItem.skill : undefined;
   const profileNames = Object.keys(catalog.manifest.profiles);
 
-  const currentName = current?.name ?? currentProjectSkill?.name ?? currentUnindexedSkill?.name;
+  const currentName = current?.name ?? currentProjectSkill?.name ?? currentUnindexedSkill?.name ?? currentForeignSkill?.name;
   const editableSkillPath = editableHostSkillPath(currentItem !== undefined, current ? { origin: current.origin, path: current.meta.path } : undefined, currentUnindexedSkill);
   const previewFile = previewState.skill === currentName ? previewState.file : 0;
   const previewRestore = previewState.skill === currentName ? previewState.restore : 0;
@@ -374,6 +418,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
       Match.when({ kind: "skill" }, ({ row }) => skillFiles(catalog.repo, row.meta)),
       Match.when({ kind: "project-skill" }, ({ skill }) => projectSkillFiles(catalog.project, skill)),
       Match.when({ kind: "unindexed-skill" }, ({ skill }) => unindexedSkillFiles(skill)),
+      Match.when({ kind: "foreign-skill" }, ({ skill }) => foreignSkillFiles(skill)),
       Match.orElse(() => []),
     );
     if (files.length === 0) return null;
@@ -383,6 +428,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
       Match.when({ kind: "skill" }, ({ row }) => readSkillFile(catalog.repo, row.meta, file)),
       Match.when({ kind: "project-skill" }, ({ skill }) => readProjectSkillFile(catalog.project, skill, file)),
       Match.when({ kind: "unindexed-skill" }, ({ skill }) => readUnindexedSkillFile(skill, file)),
+      Match.when({ kind: "foreign-skill" }, ({ skill }) => readForeignSkillFile(skill, file)),
       Match.orElse(() => ""),
     );
     return { files, idx, file, content };
@@ -586,6 +632,93 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
     return true;
   };
 
+  const patchAdoptFlow = (fn: (prev: AdoptFlow) => AdoptFlow) => setInteraction((previous) => (previous.kind === "adopt" ? { ...previous, flow: fn(previous.flow) } : previous));
+
+  const handleAdopt = (key: KeyEvent): boolean => {
+    if (interaction.kind !== "adopt") return true;
+    const { flow, skill } = interaction;
+    if (flow.running) return true;
+    if (key.name === "escape") {
+      setInteraction({ kind: "browse" });
+      return true;
+    }
+    if (["j", "k", "up", "down", "v", "l"].includes(key.name)) {
+      patchAdoptFlow((current) => ({ ...current, origin: current.origin === "vendor" ? "local" : "vendor", error: undefined }));
+      return true;
+    }
+    if (key.name === "return" || key.name === "enter") {
+      patchAdoptFlow((current) => ({ ...current, running: true, error: undefined }));
+      indexTimer.current = setTimeout(() => {
+        indexTimer.current = null;
+        if (!mounted.current) return;
+        const outcome = runSyncResult(adoptForeignSkill(skill, { local: flow.origin === "local" }));
+        if (outcome.ok) {
+          const result = outcome.value;
+          setInteraction({ kind: "browse" });
+          setSelection(null);
+          refresh();
+          if (result.warnings.length > 0) notify(`adopted ${skill.name} -> ${result.path}: ${result.warnings[0]}`, true);
+          else notify(`adopted ${skill.name} -> ${result.path}`);
+        } else {
+          patchAdoptFlow((current) => ({ ...current, running: false, error: outcome.message }));
+        }
+      }, 0);
+      return true;
+    }
+    return true;
+  };
+
+  const patchForkFlow = (fn: (prev: ForkFlow) => ForkFlow) => setInteraction((previous) => (previous.kind === "fork" ? { ...previous, flow: fn(previous.flow) } : previous));
+
+  // Keys can arrive faster than React re-renders, so the typed name lives in a
+  // ref updated eagerly here; enter reads it rather than the rendered flow.
+  const typeForkInput = (next: (input: string) => string) => {
+    forkInput.current = next(forkInput.current);
+    const input = forkInput.current;
+    patchForkFlow((flow) => ({ ...flow, input, error: undefined }));
+  };
+
+  const handleFork = (key: KeyEvent): boolean => {
+    if (interaction.kind !== "fork") return true;
+    const { flow, row } = interaction;
+    if (flow.running) return true;
+    if (key.name === "escape") {
+      setInteraction({ kind: "browse" });
+      return true;
+    }
+    if (key.name === "backspace") {
+      typeForkInput((input) => input.slice(0, -1));
+      return true;
+    }
+    if (key.name === "return" || key.name === "enter") {
+      const name = forkInput.current.trim();
+      if (!name) {
+        patchForkFlow((flow) => ({ ...flow, error: "enter a name for the fork" }));
+        return true;
+      }
+      patchForkFlow((flow) => ({ ...flow, running: true, error: undefined }));
+      indexTimer.current = setTimeout(() => {
+        indexTimer.current = null;
+        if (!mounted.current) return;
+        const outcome = runSyncResult(forkSkill(row.name, { name }));
+        if (outcome.ok) {
+          const result = outcome.value;
+          setInteraction({ kind: "browse" });
+          refresh();
+          setSelection({ group: "owner:local", item: result.name });
+          if (result.warnings.length > 0) notify(`forked ${row.name} -> ${result.path}: ${result.warnings[0]}`, true);
+          else notify(`forked ${row.name} -> ${result.path}`);
+        } else {
+          patchForkFlow((flow) => ({ ...flow, running: false, error: outcome.message }));
+        }
+      }, 0);
+      return true;
+    }
+    const value = printable(key);
+    if (value) typeForkInput((input) => input + value);
+    return true;
+  };
+
   const handleLink = (key: KeyEvent): boolean => {
     if (interaction.kind !== "link") return true;
     const { flow, row } = interaction;
@@ -732,6 +865,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
       if (!currentItem) reason = "select a skill first";
       else if (current?.origin === "vendor" || currentUnindexedSkill?.origin === "vendor") reason = "vendor baselines must be changed through update and vendor";
       else if (currentUnindexedSkill?.origin === "agent") reason = "the staging inbox can be overwritten; index the skill before editing";
+      else if (currentForeignSkill) reason = "global foreign skills must be adopted before editing";
       else reason = "project-only skills are outside the skills host";
       notify(`cannot edit here: ${reason}`, true);
       return;
@@ -885,6 +1019,9 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
         return;
       case "view.all":
         switchCatalogView("all");
+        return;
+      case "view.adopt":
+        switchCatalogView("adopt");
         return;
       case "panel.next-wrap": {
         const index = Math.max(0, panelOrder.indexOf(panel));
@@ -1123,12 +1260,21 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
       case "skill.index":
         if (currentUnindexedSkill) {
           setInteraction({ kind: "index", skill: currentUnindexedSkill, flow: { input: "", running: false } });
+        } else if (currentForeignSkill) {
+          setInteraction({ kind: "adopt", skill: currentForeignSkill, flow: { origin: "vendor", running: false } });
         }
         return;
       case "skill.diff":
         if (current) {
           setInteraction({ kind: "diff", row: current, result: diffSkill(catalog, current) });
         }
+        return;
+      case "skill.fork":
+        if (!current) return;
+        if (current.origin !== "local") {
+          forkInput.current = defaultForkName(current.name);
+          setInteraction({ kind: "fork", row: current, flow: { input: forkInput.current, running: false } });
+        } else notify(`${current.name} is already a local skill; fork applies to vendor skills`, true);
         return;
       case "skill.link":
         if (!current) return;
@@ -1148,7 +1294,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
     }
   };
 
-  const textInputActive = filterMode || docFind.typing || interaction.kind === "link" || interaction.kind === "index";
+  const textInputActive = filterMode || docFind.typing || interaction.kind === "link" || interaction.kind === "index" || interaction.kind === "fork";
   useAppKeybindings(keymapStateFor(interaction, textInputActive), runAppCommand);
 
   useKeyboard((key) => {
@@ -1156,14 +1302,18 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
     if (handleFind(key)) return;
     if (interaction.kind === "link") handleLink(key);
     else if (interaction.kind === "index") handleIndex(key);
+    else if (interaction.kind === "adopt") handleAdopt(key);
+    else if (interaction.kind === "fork") handleFork(key);
   });
 
   usePaste((event) => {
-    if (interaction.kind !== "index" || interaction.flow.running) return;
+    if ((interaction.kind !== "index" && interaction.kind !== "fork") || interaction.flow.running) return;
     event.preventDefault();
     event.stopPropagation();
     const value = singleLinePaste(event.bytes);
-    if (value) patchIndexFlow((flow) => ({ ...flow, input: flow.input + value, error: undefined }));
+    if (!value) return;
+    if (interaction.kind === "index") patchIndexFlow((flow) => ({ ...flow, input: flow.input + value, error: undefined }));
+    else typeForkInput((input) => input + value);
   });
 
   // ---- render ------------------------------------------------------------
@@ -1173,6 +1323,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
   const availableCount = new Set([...catalog.rows.filter(isSkillAvailableHere).map((row) => row.name), ...catalog.projectSkills.map((skill) => skill.name)]).size;
   const allCount = new Set([...catalog.rows.map((row) => row.name), ...catalog.unindexedSkills.map((skill) => skill.name), ...catalog.projectSkills.map((skill) => skill.name)])
     .size;
+  const adoptCount = catalog.foreignSkills.length;
   const projectName = basename(catalog.project) || catalog.project;
   const matchCount = new Set(groups.flatMap((group) => group.skills.map(skillItemName))).size;
   const narrow = cols < 84;
@@ -1222,6 +1373,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
         <text wrapMode="none" truncate>
           <span fg={colors.muted}>{`global ${enabledCount}/${catalog.rows.length} · local ${hereCount}`}</span>
           {catalog.unindexedSkills.length > 0 ? <span fg={colors.yellow}>{` · unindexed ${catalog.unindexedSkills.length}`}</span> : null}
+          {adoptCount > 0 ? <span fg={colors.yellow}>{` · adopt ${adoptCount}`}</span> : null}
           <span> </span>
         </text>
       ) : null}
@@ -1231,6 +1383,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
   const tabDefs = [
     { view: "available" as const, label: compactHeader ? "AVAILABLE" : "AVAILABLE HERE", count: availableCount },
     { view: "all" as const, label: compactHeader ? "ALL" : "ALL SKILLS", count: allCount },
+    { view: "adopt" as const, label: "TO ADOPT", count: adoptCount },
   ];
   // Column of each `│` between/after tabs, so the rails above and below can meet it.
   const tabRailColumns: number[] = [];
@@ -1263,7 +1416,9 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
                 <span fg={active ? colors.accent : colors.muted} attributes={active ? TextAttributes.BOLD : 0}>
                   {tab.label}
                 </span>
-                <span fg={active ? mixHex(colors.separator, colors.accent, 0.45) : colors.separator}>{` ${tab.count} `}</span>
+                <span
+                  fg={tab.view === "adopt" && tab.count > 0 ? colors.yellow : active ? mixHex(colors.separator, colors.accent, 0.45) : colors.separator}
+                >{` ${tab.count} `}</span>
               </text>
             </box>
           );
@@ -1356,6 +1511,17 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
         </TextLine>
       );
     }
+    if (item.kind === "foreign-skill") {
+      const source = item.skill.lock ? "tracked" : "unknown";
+      return (
+        <TextLine key={`f:${item.skill.location}:${item.skill.name}`} fg={fg} bg={bg} onMouseDown={onMouseDown}>
+          <span>{"   "}</span>
+          <span attributes={bold}>{fitCell(item.skill.name, nameW)}</span>
+          <span fg={colors.yellow}>{fitCell(`${foreignSkillLocation(item.skill)} · ${source}`, 25, "right")}</span>
+          <span> </span>
+        </TextLine>
+      );
+    }
     const skill = item.row;
     const placement = placementCell(projectPlacement(skill));
     return (
@@ -1412,11 +1578,12 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
           label: currentRow?.kind === "group" ? "toggle all" : "toggle",
           when: panel === "catalog" && (currentRow?.kind === "group" ? currentGroup?.rows != null : current !== undefined),
         },
-        { key: "a", label: "index", when: currentUnindexedSkill !== undefined },
+        { key: "a", label: currentForeignSkill ? "adopt" : "index", when: currentUnindexedSkill !== undefined || currentForeignSkill !== undefined },
         { key: "e", label: "edit", when: editableSkillPath !== null },
+        { key: "F", label: "fork", when: panel === "catalog" && current?.origin === "vendor" },
         { key: "i", label: "details" },
         { key: "S", label: storeBehind ? `sync ⇣${store.behind}` : "sync" },
-        { key: "1/2", label: "view" },
+        { key: "1/2/3", label: "view" },
         { key: "/", label: panel === "content" ? "search" : "filter" },
         { key: "n/N", label: "match", when: docFind.query.length > 0 },
         { key: "?", label: "help" },
@@ -1439,6 +1606,8 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
             return <ProjectSkillModal cols={cols} rows={rowsAvail} skill={interaction.item.skill} catalog={catalog} />;
           case "unindexed-skill":
             return <UnindexedSkillModal cols={cols} rows={rowsAvail} skill={interaction.item.skill} />;
+          case "foreign-skill":
+            return <ForeignSkillModal cols={cols} rows={rowsAvail} skill={interaction.item.skill} />;
           default:
             return assertNever(interaction.item);
         }
@@ -1452,6 +1621,10 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
         return <LinkModal cols={cols} rows={rowsAvail} row={interaction.row} flow={interaction.flow} recents={catalog.state.recentProjects} />;
       case "index":
         return <IndexSkillModal cols={cols} rows={rowsAvail} skill={interaction.skill} flow={interaction.flow} />;
+      case "adopt":
+        return <AdoptSkillModal cols={cols} rows={rowsAvail} skill={interaction.skill} flow={interaction.flow} />;
+      case "fork":
+        return <ForkSkillModal cols={cols} rows={rowsAvail} row={interaction.row} flow={interaction.flow} />;
       case "sync":
         return <SyncModal cols={cols} rows={rowsAvail} flow={interaction.flow} />;
       default:
@@ -1463,7 +1636,8 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
   // and the rails above/below the body meet it with ┬ / ┴.
   const panes: Array<{ key: Panel; width: number; node: ReactNode }> = [];
   if (showCatalog) {
-    const detail = [`${rows.length ? `${rowIndex + 1}/${rows.length}` : ""}`, filterTitle ?? ""].filter(Boolean).join("  ");
+    const position = itemPosition(rows, rowIndex);
+    const detail = [position.total ? (position.index === null ? `${position.total}` : `${position.index}/${position.total}`) : "", filterTitle ?? ""].filter(Boolean).join("  ");
     panes.push({
       key: "catalog",
       width: catalogWidth,
