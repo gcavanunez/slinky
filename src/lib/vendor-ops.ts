@@ -5,6 +5,9 @@ import { errorDetail, formatUtc, getSkill, isMissingFile, nowUtc, OperationFaile
 import type { Manifest, SkillLockDecodeError } from "../domain/model.ts";
 import { classifyPlacement } from "../domain/catalog-inspection.ts";
 import { contentHash } from "./hash.ts";
+import { decorateInstalled, forgetInvocation, installedContentHash, withUndecoratedCopy } from "./invocation.ts";
+import { ManifestStore } from "./manifest.ts";
+import { invocationPreference } from "../domain/model.ts";
 import { HostRepo, Paths } from "./paths.ts";
 import { observe } from "./reconcile.ts";
 import { readSkillLockFile, upstreamFromLock } from "./skill-lock.ts";
@@ -44,7 +47,7 @@ export const findDriftingVendors = Effect.fn("Vendor.findDrifting")(function* (m
   return Object.entries(manifest.skills)
     .filter(([name, meta]) => {
       const live = observation.agents[name];
-      return meta.origin === "vendor" && live?.kind === "dir" && contentHash(join(paths.agentsSkills, name)) !== meta.contentHash;
+      return meta.origin === "vendor" && live?.kind === "dir" && installedContentHash(join(paths.agentsSkills, name)) !== meta.contentHash;
     })
     .map(([name]) => name);
 });
@@ -77,7 +80,7 @@ export const vendorAccept = Effect.fn("Vendor.accept")(function* (manifest: Mani
   if (liveKind === "missing") return yield* Effect.fail(new OperationFailed({ message: `no live copy at ${live}` }));
   if (liveKind === "unowned") return yield* Effect.fail(new OperationFailed({ message: `${name}: live copy is not an owned directory` }));
 
-  const liveHash = contentHash(live);
+  const liveHash = installedContentHash(live);
   if (liveHash === meta.contentHash) {
     const unchanged: VendorAcceptResult = { manifest, changed: false };
     return unchanged;
@@ -85,7 +88,7 @@ export const vendorAccept = Effect.fn("Vendor.accept")(function* (manifest: Mani
 
   const dest = join(repo, meta.path);
   rmSync(dest, { recursive: true, force: true });
-  cpSync(live, dest, { recursive: true });
+  withUndecoratedCopy(live, (source) => cpSync(source, dest, { recursive: true }));
 
   const lock = options.refreshProvenance ? (options.provenance ?? readSkillLockFile(paths.skillLock)) : undefined;
   const next = decodeSkill({
@@ -122,6 +125,10 @@ export const vendorRestore = Effect.fn("Vendor.restore")(function* (manifest: Ma
     cpSync(source, replacement, { recursive: true });
     rmSync(live, { recursive: true, force: true });
     renameSync(replacement, live);
+    forgetInvocation(live);
+    const store = yield* ManifestStore;
+    const state = yield* store.loadState(manifest);
+    decorateInstalled(live, source, invocationPreference(state, name));
   } finally {
     rmSync(staging, { recursive: true, force: true });
   }

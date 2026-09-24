@@ -48,6 +48,7 @@ function helpGroups(editor: string): Array<{ title: string; lines: Array<[string
         ["i", "show skill details; on a heading, summarise the group"],
         ["e", `edit a local or unindexed host skill in ${editor}`],
         ["a", "index an unindexed host skill or adopt a foreign global skill"],
+        ["A", "OpenCode invocation: cycle manual / automatic / inherit"],
         ["space", "toggle a skill, or every skill in the group from its heading"],
         ["u", "check vendor skills for upstream updates"],
         ["S", "sync the store: save, pull, reconcile, restore (j/k scroll its log)"],

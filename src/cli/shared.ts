@@ -3,7 +3,7 @@ import { Argument, Flag } from "effect/unstable/cli";
 import { errorDetail, OperationFailed } from "../domain/model.ts";
 import type { Manifest, State } from "../domain/model.ts";
 import { ExternalToolError } from "../domain/model.ts";
-import { pagePatch, unifiedDiff } from "../lib/diff.ts";
+import { pagePatch, unifiedInstalledDiff } from "../lib/diff.ts";
 import type { DiffPager } from "../lib/diff.ts";
 import { layerRepo } from "../lib/layers.ts";
 import { ManifestStore } from "../lib/manifest.ts";
@@ -50,7 +50,7 @@ export const runSyncCmd = Effect.fn("Cli.runSync")(function* (manifest: Manifest
 
 export const renderPatch = Effect.fn("Cli.renderPatch")(function* (baseline: string, live: string) {
   return yield* Effect.try({
-    try: () => unifiedDiff(baseline, live),
+    try: () => unifiedInstalledDiff(baseline, live),
     catch: (error) => new ExternalToolError({ tool: "diff", message: errorDetail(error) }),
   });
 });

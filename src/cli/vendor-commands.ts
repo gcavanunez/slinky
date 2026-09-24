@@ -7,7 +7,7 @@ import { compareWithUpstream } from "../lib/git.ts";
 import { getSkill } from "../domain/model.ts";
 import type { Manifest } from "../domain/model.ts";
 import { acceptVendorDrifts, restoreVendorDrift } from "../lib/catalog-actions.ts";
-import { diffDirs, isClean } from "../lib/diff.ts";
+import { diffInstalled, isClean } from "../lib/diff.ts";
 import type { DiffPager } from "../lib/diff.ts";
 import { forkSkill } from "../lib/fork.ts";
 import { HostRepo, Paths } from "../lib/paths.ts";
@@ -68,7 +68,7 @@ const cmdDiff = Effect.fn("Cli.diff")(function* (manifest: Manifest, names: Read
       console.log(`${name}: ${c.dim("not installed globally (disabled?)")}`);
       continue;
     }
-    const d = diffDirs(repoPath, live);
+    const d = diffInstalled(repoPath, live);
     if (isClean(d)) {
       if (names.length > 0) console.log(`${name}: ${c.green("in sync")}`);
       continue;
@@ -302,7 +302,7 @@ export const updateCommand = Command.make(
             continue;
           }
           const { repoPath, live } = target;
-          const d = diffDirs(repoPath, live);
+          const d = diffInstalled(repoPath, live);
           console.log(c.bold(`\n── ${name} ──`));
           for (const f of d.added) console.log(c.green(`  + ${f}`));
           for (const f of d.removed) console.log(c.red(`  - ${f}`));

@@ -6,6 +6,7 @@ import { Schema } from "effect";
 import packageJson from "../package.json" with { type: "json" };
 import { Manifest } from "./domain/model.ts";
 import { contentHash } from "./lib/hash.ts";
+import { installationPaths } from "./lib/invocation.ts";
 
 const roots: string[] = [];
 setDefaultTimeout(30_000);
@@ -161,6 +162,129 @@ function stateAt(path: string): {
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+describe("OpenCode invocation", () => {
+  const command = (f: ReturnType<typeof fixture>, args: string[]) => {
+    const result = runCli(f.host, f.home, args);
+    expect(result.exitCode, result.stderr.toString() + result.stdout.toString()).toBe(0);
+    return result.stdout.toString();
+  };
+  const vendor = (f: ReturnType<typeof fixture>) => {
+    addDriftingVendor(f);
+    const baseline = join(f.host, "vendor/acme/drifting");
+    const text = "---\nname: drifting\ndisable-model-invocation: true\n---\nBaseline body\n";
+    writeFileSync(join(baseline, "SKILL.md"), text);
+    writeFileSync(join(f.home, ".agents/skills/drifting/SKILL.md"), text);
+    const path = join(f.host, "skills.manifest.json");
+    const manifest = JSON.parse(readFileSync(path, "utf8"));
+    manifest.skills.drifting.contentHash = contentHash(baseline);
+    writeFileSync(path, JSON.stringify(manifest));
+    return { baseline, text, live: join(f.home, ".agents/skills/drifting") };
+  };
+
+  test("dry-run is read-only; manual local skills use a generated copy and inherit restores the source link", () => {
+    const f = fixture();
+    const source = join(f.host, "skills/foo");
+    const before = contentHash(source);
+    const stateBefore = readFileSync(f.statePath);
+    expect(command(f, ["autoinvoke", "foo", "off", "--dry-run"])).toContain("configure-invocation foo");
+    expect(readFileSync(f.statePath)).toEqual(stateBefore);
+    expect(existsSync(join(f.home, ".agents"))).toBe(false);
+    command(f, ["autoinvoke", "foo", "off"]);
+    const live = join(f.home, ".agents/skills/foo");
+    expect(realpathSync(live)).toBe(realpathSync(installationPaths(live).generated));
+    expect(readFileSync(join(live, "SKILL.md"), "utf8")).toContain("opencode/autoinvoke: false");
+    expect(contentHash(source)).toBe(before);
+    expect(command(f, ["status"])).toMatch(/foo[^\n]*manual \(host\)/);
+    command(f, ["autoinvoke", "foo", "on"]);
+    expect(readFileSync(join(live, "SKILL.md"), "utf8")).toContain("opencode/autoinvoke: true");
+    command(f, ["autoinvoke", "foo", "inherit"]);
+    expect(realpathSync(live)).toBe(realpathSync(source));
+    expect(command(f, ["status"])).toMatch(/foo[^\n]*auto \(default\)/);
+    expect(existsSync(installationPaths(live).receipt)).toBe(false);
+  });
+
+  test("source edits refresh a generated local installation and repeated reconciliation is quiet", () => {
+    const f = fixture();
+    command(f, ["autoinvoke", "foo", "off"]);
+    writeFileSync(join(f.host, "skills/foo/reference.md"), "New reference\n");
+    writeFileSync(join(f.host, "skills/foo/SKILL.md"), "# Updated source\n");
+    expect(command(f, ["status"])).toMatch(/foo[^\n]*drift/);
+    command(f, ["enable", "foo"]);
+    const live = join(f.home, ".agents/skills/foo");
+    expect(readFileSync(join(live, "reference.md"), "utf8")).toBe("New reference\n");
+    expect(readFileSync(join(live, "SKILL.md"), "utf8")).toContain("# Updated source");
+    expect(command(f, ["enable", "foo", "--dry-run"])).not.toContain("configure-invocation");
+  });
+
+  test("a missing generated directory is rebuilt through its owned broken symlink", () => {
+    const f = fixture();
+    command(f, ["autoinvoke", "foo", "off"]);
+    const live = join(f.home, ".agents/skills/foo");
+    rmSync(installationPaths(live).generated, { recursive: true });
+    command(f, ["enable", "foo"]);
+    expect(realpathSync(live)).toBe(realpathSync(installationPaths(live).generated));
+    expect(readFileSync(join(live, "SKILL.md"), "utf8")).toContain("opencode/autoinvoke: false");
+  });
+
+  test("host preferences survive disable/re-enable and profile selection", () => {
+    const f = fixture();
+    command(f, ["autoinvoke", "foo", "off"]);
+    command(f, ["disable", "foo"]);
+    const live = join(f.home, ".agents/skills/foo");
+    expect(existsSync(live)).toBe(false);
+    command(f, ["autoinvoke", "foo", "on"]);
+    expect(existsSync(live)).toBe(false);
+    command(f, ["profile", "apply", "focus"]);
+    expect(readFileSync(join(live, "SKILL.md"), "utf8")).toContain("opencode/autoinvoke: true");
+    expect(JSON.parse(readFileSync(f.statePath, "utf8")).opencode.autoinvoke.foo).toBe(true);
+  });
+
+  test("vendor additions are clean in status/diff and never accepted into source", () => {
+    const f = fixture();
+    const v = vendor(f);
+    command(f, ["enable", "drifting"]);
+    expect(readFileSync(join(v.live, "SKILL.md"), "utf8")).toContain("opencode/autoinvoke: false");
+    expect(command(f, ["diff", "drifting", "--patch"])).toContain("in sync");
+    expect(command(f, ["vendor", "drifting"])).toContain("already in sync");
+    const edited = readFileSync(join(v.live, "SKILL.md"), "utf8").replace("Baseline body", "Edited body");
+    writeFileSync(join(v.live, "SKILL.md"), edited);
+    expect(command(f, ["diff", "drifting", "--patch"])).toContain("Edited body");
+    expect(command(f, ["diff", "drifting", "--patch"])).not.toContain("slinky:autoinvoke");
+    command(f, ["vendor", "drifting"]);
+    expect(readFileSync(join(v.baseline, "SKILL.md"), "utf8")).toBe(v.text.replace("Baseline body", "Edited body"));
+    command(f, ["restore", "drifting"]);
+    expect(readFileSync(join(v.live, "SKILL.md"), "utf8")).toContain("opencode/autoinvoke: false");
+    expect(command(f, ["diff", "drifting"])).toContain("in sync");
+    command(f, ["disable", "drifting"]);
+    expect(existsSync(v.live)).toBe(false);
+  });
+
+  test("generated edits and unowned global symlinks are preserved", () => {
+    const f = fixture();
+    command(f, ["autoinvoke", "foo", "off"]);
+    const file = join(f.home, ".agents/skills/foo/SKILL.md");
+    writeFileSync(file, readFileSync(file, "utf8") + "User edit\n");
+    expect(command(f, ["status"])).toMatch(/foo[^\n]*drift/);
+    const output = command(f, ["autoinvoke", "foo", "on"]);
+    expect(output).toContain("generated local copy was edited");
+    expect(readFileSync(file, "utf8")).toContain("User edit");
+    rmSync(join(f.home, ".agents/skills/foo"));
+    symlinkSync(join(f.host, "skills/bar"), join(f.home, ".agents/skills/foo"));
+    const before = readFileSync(join(f.host, "skills/bar/SKILL.md"));
+    expect(command(f, ["autoinvoke", "foo", "off"])).toContain("symlink points outside the catalog");
+    expect(readFileSync(join(f.host, "skills/bar/SKILL.md"))).toEqual(before);
+  });
+
+  test("unknown names and malformed metadata fail before changing desired state", () => {
+    const f = fixture();
+    const before = readFileSync(f.statePath);
+    expect(runCli(f.host, f.home, ["autoinvoke", "missing", "off"]).exitCode).toBe(1);
+    writeFileSync(join(f.host, "skills/foo/SKILL.md"), "---\nmetadata: [broken\n---\n");
+    expect(runCli(f.host, f.home, ["autoinvoke", "foo", "off"]).exitCode).toBe(1);
+    expect(readFileSync(f.statePath)).toEqual(before);
+  });
 });
 
 describe("CLI options", () => {
@@ -1310,6 +1434,44 @@ printf '%s\\n' '# beta upstream' > "$HOME/.agents/skills/beta/SKILL.md"
     expect(input).toContain("-# beta");
     expect(input).toContain("+# beta upstream");
     expect(result.stdout.toString()).toContain("reviewing 2 changed skill(s) in delta");
+  });
+
+  test("OpenCode invocation survives an update and preserves newly supplied upstream metadata", () => {
+    const f = fixture();
+    addUpdatableVendor(f, "alpha");
+    initializeGitFixture(f.host, f.home);
+    expect(runCli(f.host, f.home, ["autoinvoke", "alpha", "off"]).exitCode).toBe(0);
+    const bin = join(f.root, "update-bin");
+    mkdirSync(bin);
+    const upstream = "---\nname: alpha\nmetadata:\n  opencode/autoinvoke: true\n  owner: upstream\n---\nUpdated body\n";
+    writeFileSync(join(f.home, "upstream.md"), upstream);
+    writeFileSync(join(bin, "npx"), '#!/bin/sh\ncp "$HOME/.agents/skills/alpha/SKILL.md" "$HOME/before-update.md"\ncp "$HOME/upstream.md" "$HOME/.agents/skills/alpha/SKILL.md"\n');
+    chmodSync(join(bin, "npx"), 0o755);
+    const result = runCli(f.host, f.home, ["update", "alpha", "--yes"], { PATH: `${bin}:${process.env.PATH ?? ""}` });
+    expect(result.exitCode, result.stderr.toString() + result.stdout.toString()).toBe(0);
+    expect(readFileSync(join(f.home, "before-update.md"), "utf8")).toBe("# alpha\n");
+    expect(readFileSync(join(f.host, "vendor/kitlangton/alpha/SKILL.md"), "utf8")).toBe(upstream);
+    const liveFile = join(f.home, ".agents/skills/alpha/SKILL.md");
+    expect(readFileSync(liveFile, "utf8")).toContain("opencode/autoinvoke: false");
+    expect(runCli(f.host, f.home, ["status"]).stdout.toString()).toMatch(/alpha[^\n]*ok[^\n]*manual \(host\)/);
+    expect(runCli(f.host, f.home, ["autoinvoke", "alpha", "inherit"]).exitCode).toBe(0);
+    expect(readFileSync(liveFile, "utf8")).toBe(upstream);
+  });
+
+  test("a failed update reapplies OpenCode invocation before reporting the failure", () => {
+    const f = fixture();
+    addUpdatableVendor(f, "alpha");
+    initializeGitFixture(f.host, f.home);
+    expect(runCli(f.host, f.home, ["autoinvoke", "alpha", "off"]).exitCode).toBe(0);
+    const bin = join(f.root, "update-bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "npx"), "#!/bin/sh\nexit 7\n");
+    chmodSync(join(bin, "npx"), 0o755);
+    const result = runCli(f.host, f.home, ["update", "alpha"], { PATH: `${bin}:${process.env.PATH ?? ""}` });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain("skills.sh exited with 7");
+    expect(readFileSync(join(f.home, ".agents/skills/alpha/SKILL.md"), "utf8")).toContain("opencode/autoinvoke: false");
+    expect(readFileSync(join(f.host, "vendor/kitlangton/alpha/SKILL.md"), "utf8")).toBe("# alpha\n");
   });
 
   test("update seeds skills.sh from the committed host lock", () => {

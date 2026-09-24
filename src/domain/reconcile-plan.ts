@@ -13,7 +13,8 @@ export interface Observation {
 }
 
 export type Action =
-  | { type: "ensure-agents-symlink"; skill: string; target: string }
+  | { type: "configure-invocation"; skill: string; source: string; origin: "local" | "vendor"; preference?: boolean }
+  | { type: "ensure-agents-symlink"; skill: string; target: string; expectedTarget?: string }
   | { type: "restore-agents-dir"; skill: string; from: string }
   | { type: "remove-agents"; skill: string; verifyHash?: string; expectedTarget?: string }
   | { type: "ensure-claude-symlink"; skill: string }
@@ -151,6 +152,7 @@ export function planSync(manifest: Manifest, state: State, obs: Observation, opt
   }
 
   const order = {
+    "configure-invocation": 5,
     "remove-claude": 0,
     "remove-agents": 1,
     "ensure-agents-symlink": 2,

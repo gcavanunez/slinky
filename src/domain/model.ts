@@ -232,6 +232,7 @@ export const State = Schema.Struct({
   selection: StateSelection,
   projectLinks: Schema.Array(ProjectLink),
   recentProjects: Schema.Array(ProjectPath),
+  opencode: Schema.optional(Schema.Struct({ autoinvoke: Schema.Record(SkillName, Schema.Boolean) })),
 }).check(
   Schema.makeFilter((state) => {
     const issues: Array<Schema.FilterIssue> = [];
@@ -360,6 +361,20 @@ export function withSkillEnabled(manifest: Manifest, state: State, name: string,
   });
 }
 
+export type InvocationMode = "on" | "off" | "inherit";
+
+export function invocationPreference(state: State, name: string): boolean | undefined {
+  const entries = state.opencode?.autoinvoke;
+  return entries && Object.hasOwn(entries, name) ? entries[name] : undefined;
+}
+
+export function withAutoinvoke(state: State, name: string, mode: InvocationMode): State {
+  const autoinvoke = { ...state.opencode?.autoinvoke };
+  if (mode === "inherit") delete autoinvoke[name];
+  else autoinvoke[name] = mode === "on";
+  return decodeState({ ...state, opencode: { autoinvoke } });
+}
+
 export function withProfile(manifest: Manifest, state: State, name: string): State {
   const members = getProfile(manifest, name);
   if (!members) throw new Error(`unknown profile: ${name}`);
@@ -370,6 +385,9 @@ export function withProfile(manifest: Manifest, state: State, name: string): Sta
 }
 
 export function alignStateWithManifest(manifest: Manifest, state: State): State {
+  if (state.opencode) {
+    state = { ...state, opencode: { autoinvoke: Object.fromEntries(Object.entries(state.opencode.autoinvoke).filter(([name]) => Object.hasOwn(manifest.skills, name))) } };
+  }
   if (state.selection.kind === "profile") {
     if (Object.hasOwn(manifest.profiles, state.selection.name)) return state;
     // A v2 profile has no cached custom complement. If it is retired, fall back
@@ -390,7 +408,7 @@ export function alignStateForTransition(previous: Manifest, resulting: Manifest,
     return alignStateWithManifest(resulting, state);
   }
   const disabledSkills = getDisabledSkills(previous, state).filter((name) => Object.hasOwn(resulting.skills, name));
-  return decodeState({ ...state, selection: { kind: "custom", disabledSkills } });
+  return alignStateWithManifest(resulting, decodeState({ ...state, selection: { kind: "custom", disabledSkills } }));
 }
 
 export function migrateStateV1(manifest: Manifest, state: StateV1): State {

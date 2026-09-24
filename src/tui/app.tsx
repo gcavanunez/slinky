@@ -7,9 +7,9 @@ import { Match } from "effect";
 import { useKeyboard, usePaste, useRenderer, useSelectionHandler, useTerminalDimensions } from "@opentui/react";
 import { TextAttributes } from "@opentui/core";
 import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core";
-import { acceptVendorDrift, applyProfile, linkProjectSkill, restoreVendorDrift, setSkillsEnabled } from "../lib/catalog-actions.ts";
+import { acceptVendorDrift, applyProfile, linkProjectSkill, restoreVendorDrift, setSkillsEnabled, setAutoinvoke } from "../lib/catalog-actions.ts";
 import type { ActionResult } from "../lib/catalog-actions.ts";
-import { isClean, pagePatch, unifiedDiff } from "../lib/diff.ts";
+import { isClean, pagePatch, unifiedInstalledDiff } from "../lib/diff.ts";
 import type { DiffPager } from "../lib/diff.ts";
 import { defaultThemeId, getActiveProfile, themeIds } from "../domain/model.ts";
 import type { ThemeId } from "../domain/model.ts";
@@ -968,7 +968,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
         const pager: DiffPager = command === "diff.hunk" ? "hunk" : "delta";
         let suspended = false;
         try {
-          const patch = unifiedDiff(join(catalog.repo, interaction.row.meta.path), join(catalog.agentsSkills, interaction.row.name));
+          const patch = unifiedInstalledDiff(join(catalog.repo, interaction.row.meta.path), join(catalog.agentsSkills, interaction.row.name));
           renderer.suspend();
           suspended = true;
           pagePatch(patch, pager);
@@ -1151,6 +1151,14 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
       case "skill.edit":
         editCurrentSkill();
         return;
+      case "skill.autoinvoke": {
+        if (!current) return;
+        const preference = current.invocation?.preference;
+        const mode = preference === undefined ? "off" : preference === false ? "on" : "inherit";
+        reportAction(`${current.name}: OpenCode invocation ${mode}`, runSync(setAutoinvoke(current.name, mode)));
+        refresh();
+        return;
+      }
       case "help.open":
         setInteraction({ kind: "help", scroll: 0 });
         return;
@@ -1578,6 +1586,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
           label: currentRow?.kind === "group" ? "toggle all" : "toggle",
           when: panel === "catalog" && (currentRow?.kind === "group" ? currentGroup?.rows != null : current !== undefined),
         },
+        { key: "A", label: `OC:${current?.invocation?.automatic === false ? "manual" : "auto"}`, when: !!current },
         { key: "a", label: currentForeignSkill ? "adopt" : "index", when: currentUnindexedSkill !== undefined || currentForeignSkill !== undefined },
         { key: "e", label: "edit", when: editableSkillPath !== null },
         { key: "F", label: "fork", when: panel === "catalog" && current?.origin === "vendor" },

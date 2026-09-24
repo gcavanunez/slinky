@@ -1,11 +1,23 @@
-import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { Effect, Match } from "effect";
 import type { LiveEntry } from "../domain/catalog-inspection.ts";
 import { claudeRelTarget, planSync } from "../domain/reconcile-plan.ts";
 import type { Action, Observation, Plan } from "../domain/reconcile-plan.ts";
 import type { Manifest, State } from "../domain/model.ts";
+import { invocationPreference, isSkillEnabled } from "../domain/model.ts";
 import { contentHash } from "./hash.ts";
+import {
+  decorateInstalled,
+  forgetInvocation,
+  generateLocal,
+  installationPaths,
+  installedContentHash,
+  localInstallationTarget,
+  readInstalledFile,
+  readReceipt,
+  renderInvocation,
+} from "./invocation.ts";
 import { HostRepo, Paths } from "./paths.ts";
 
 export function observeEntry(path: string): LiveEntry {
@@ -73,6 +85,33 @@ function applySync(agentsSkills: string, claudeSkills: string, plan: Plan, opts:
   };
 
   const applyAction = Match.type<Action>().pipe(
+    Match.discriminator("type")("configure-invocation", (a) => {
+      if (skipped.some((message) => message.startsWith(`${a.skill}:`))) return;
+      const live = join(agentsSkills, a.skill);
+      if (a.origin === "vendor") {
+        if (observeEntry(live).kind !== "dir") {
+          skipped.push(`${a.skill}: invocation path is not an owned vendor directory`);
+          return;
+        }
+        decorateInstalled(live, a.source, a.preference);
+      } else {
+        const entry = observeEntry(live);
+        const receipt = readReceipt(live);
+        const generated = installationPaths(live).generated;
+        if (entry.kind !== "symlink" || (entry.resolved !== a.source && !(entry.resolved === generated && receipt?.source === a.source))) {
+          skipped.push(`${a.skill}: local invocation symlink changed after preflight`);
+          return;
+        }
+        if (entry.resolved === generated && receipt?.generatedHash && contentHash(generated) !== receipt.generatedHash) {
+          skipped.push(`${a.skill}: generated local copy was edited; move edits to the catalog source first`);
+          return;
+        }
+        const target = generateLocal(a.source, live, a.preference);
+        rmIfExists(live);
+        symlinkSync(target, live);
+      }
+      done.push(`configured OpenCode invocation for ${a.skill}`);
+    }),
     Match.discriminator("type")("remove-claude", (a) => {
       const claudePath = join(claudeSkills, a.skill);
       if (skipped.some((message) => message.startsWith(`${a.skill}:`))) {
@@ -95,7 +134,7 @@ function applySync(agentsSkills: string, claudeSkills: string, plan: Plan, opts:
       if (a.verifyHash && !opts.force) {
         if (!existsSync(agentsPath)) return;
         const stat = lstatSync(agentsPath);
-        if (!stat.isDirectory() || stat.isSymbolicLink() || contentHash(agentsPath) !== a.verifyHash) {
+        if (!stat.isDirectory() || stat.isSymbolicLink() || installedContentHash(agentsPath) !== a.verifyHash) {
           skipped.push(`${a.skill}: live dir drifted from repo copy; run \`diff ${a.skill}\` then \`vendor ${a.skill}\` or use --force`);
           return;
         }
@@ -105,7 +144,7 @@ function applySync(agentsSkills: string, claudeSkills: string, plan: Plan, opts:
     }),
     Match.discriminator("type")("ensure-agents-symlink", (a) => {
       const agentsPath = join(agentsSkills, a.skill);
-      if (!canReplace(agentsPath, a.target)) {
+      if (!canReplace(agentsPath, a.expectedTarget ?? a.target)) {
         skipped.push(`${a.skill}: agents path changed after preflight; not replacing`);
         hideOwnedClaudeLink(a.skill);
         return;
@@ -127,6 +166,7 @@ function applySync(agentsSkills: string, claudeSkills: string, plan: Plan, opts:
       }
       rmIfExists(agentsPath);
       cpSync(a.from, agentsPath, { recursive: true });
+      forgetInvocation(agentsPath);
       done.push(`restored ~/.agents/skills/${a.skill} from repo`);
     }),
     Match.discriminator("type")("ensure-claude-symlink", (a) => {
@@ -167,8 +207,82 @@ export const observeAndPlan = Effect.fn("Reconcile.observeAndPlan")(function* (m
   const paths = yield* Paths;
   const host = yield* HostRepo;
   const obs = yield* observe();
-  return planSync(manifest, state, obs, { repo: host.repo, claudeSkills: paths.claudeSkills, ...opts });
+  return planInstallation(manifest, state, obs, host.repo, paths.agentsSkills, paths.claudeSkills, opts);
 });
+
+/** Present Slinky-generated local symlinks to the existing placement planner as owned. */
+export function planInstallation(
+  manifest: Manifest,
+  state: State,
+  observed: Observation,
+  repo: string,
+  agentsSkills: string,
+  claudeSkills: string,
+  opts: { force?: boolean } = {},
+): Plan {
+  const obs: Observation = { ...observed, agents: { ...observed.agents } };
+  for (const [name, meta] of Object.entries(manifest.skills)) {
+    if (meta.origin !== "local") continue;
+    const live = join(agentsSkills, name);
+    const entry = obs.agents[name];
+    if (
+      (entry?.kind === "symlink" || entry?.kind === "broken-symlink") &&
+      entry.resolved === installationPaths(live).generated &&
+      readReceipt(live)?.source === resolve(repo, meta.path)
+    ) {
+      obs.agents[name] = { ...entry, resolved: resolve(repo, meta.path) };
+    }
+  }
+  const plan = planSync(manifest, state, obs, { repo, claudeSkills, ...opts });
+  plan.actions = plan.actions.map((a) => {
+    const actual = observed.agents[a.skill];
+    if (
+      a.type === "ensure-agents-symlink" &&
+      actual?.kind === "broken-symlink" &&
+      obs.agents[a.skill]?.kind === "broken-symlink" &&
+      readReceipt(join(agentsSkills, a.skill))?.source === a.target
+    )
+      return { ...a, expectedTarget: actual.resolved };
+    return a.type === "remove-agents" && a.expectedTarget && (actual?.kind === "symlink" || actual?.kind === "broken-symlink") ? { ...a, expectedTarget: actual.resolved } : a;
+  });
+  for (const [name, meta] of Object.entries(manifest.skills)) {
+    if (!isSkillEnabled(manifest, state, name)) continue;
+    const source = resolve(repo, meta.path);
+    const live = join(agentsSkills, name);
+    const entry = obs.agents[name];
+    const owned =
+      !entry ||
+      entry.kind === "missing" ||
+      (entry.kind === "broken-symlink" && entry.resolved === source) ||
+      (entry.kind === "symlink" && entry.resolved === source) ||
+      (meta.origin === "vendor" && entry.kind === "dir");
+    if (!owned && !opts.force) continue;
+    if (!existsSync(join(source, "SKILL.md"))) continue;
+    const preference = invocationPreference(state, name);
+    const sourceText = readFileSync(join(source, "SKILL.md"), "utf8");
+    if (meta.origin === "local") {
+      const target = localInstallationTarget(source, live, preference);
+      const actual = observed.agents[name];
+      const rendered = renderInvocation(sourceText, preference);
+      if (
+        actual?.kind === "symlink" &&
+        actual.resolved === target &&
+        (target === source ||
+          (existsSync(target) && contentHash(target) === contentHash(source, (file) => (file === "SKILL.md" ? Buffer.from(rendered.text) : readFileSync(join(source, file))))))
+      )
+        continue;
+      if (target === source && (!actual || actual.kind === "missing")) continue;
+    } else {
+      const raw = entry?.kind === "dir" && existsSync(join(live, "SKILL.md")) ? readFileSync(join(live, "SKILL.md"), "utf8") : sourceText;
+      const base = entry?.kind === "dir" && existsSync(join(live, "SKILL.md")) ? readInstalledFile(live, "SKILL.md").toString("utf8") : sourceText;
+      if (renderInvocation(base, preference).text === raw) continue;
+    }
+    const action: Action = { type: "configure-invocation", skill: name, source, origin: meta.origin };
+    if (preference !== undefined) action.preference = preference;
+    plan.actions.push(action);
+  }
+  return plan;
+}
 
 export interface ReconcileOptions {
   readonly dryRun?: boolean;

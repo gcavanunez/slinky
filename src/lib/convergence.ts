@@ -19,14 +19,14 @@ import { dirname, join, posix, resolve } from "node:path";
 import { Cause, Effect, Exit, Schema } from "effect";
 import { alignStateForTransition, alignStateWithManifest, errorDetail, ExternalToolError, isMissingFile, Manifest, OperationFailed, withSkillEnabled } from "../domain/model.ts";
 import type { State } from "../domain/model.ts";
-import { planSync } from "../domain/reconcile-plan.ts";
 import type { Plan } from "../domain/reconcile-plan.ts";
 import { findUnindexedSkills } from "./adopt.ts";
 import { assertGitRoot, conflictedPaths, requireCleanWorktree, requireUpstream, runGit, temporaryWorktree, tryGit } from "./git.ts";
 import { contentHash, findSymlinks, walkFiles } from "./hash.ts";
 import { ManifestStore } from "./manifest.ts";
 import { HostRepo, Paths } from "./paths.ts";
-import { apply, observe, reconcileCatalog } from "./reconcile.ts";
+import { apply, observe, reconcileCatalog, planInstallation } from "./reconcile.ts";
+import { installedContentHash, installationPaths, readReceipt } from "./invocation.ts";
 import { refreshLocalHashes } from "./rehash.ts";
 import {
   ensureHostSkillLock,
@@ -204,7 +204,7 @@ const seedVerifiedGlobalProvenance = Effect.fn("Convergence.seedVerifiedGlobalPr
           const live = join(paths.agentsSkills, name);
           if (!existsSync(live)) return false;
           const stat = lstatSync(live);
-          return stat.isDirectory() && !stat.isSymbolicLink() && contentHash(live) === skill.contentHash;
+          return stat.isDirectory() && !stat.isSymbolicLink() && installedContentHash(live) === skill.contentHash;
         })
         .map(([name]) => name),
     catch: (error) => new OperationFailed({ message: `could not verify live vendor provenance: ${errorDetail(error)}` }),
@@ -222,7 +222,7 @@ const prepareRetirement = Effect.fn("Convergence.prepareRetirement")(function* (
   const { repo } = yield* HostRepo;
   const observation = yield* observe();
   const removalState = removed.reduce((current, name) => withSkillEnabled(manifest, current, name, false), state);
-  const fullPlan = planSync(manifest, removalState, observation, { repo, claudeSkills: paths.claudeSkills, force: options.force ?? false });
+  const fullPlan = planInstallation(manifest, removalState, observation, repo, paths.agentsSkills, paths.claudeSkills, { force: options.force ?? false });
   const names = new Set(removed);
   const retirementRank = (action: Plan["actions"][number]): number => (action.type === "remove-agents" ? 0 : action.type === "remove-claude" ? 1 : 2);
   const plan = {
@@ -251,11 +251,13 @@ const prepareRetirement = Effect.fn("Convergence.prepareRetirement")(function* (
     if (!meta) continue;
     const live = observation.agents[name];
     const restoreRetiredVendor = options.restoreDrift && meta.origin === "vendor";
-    if (live?.kind === "dir" && contentHash(join(paths.agentsSkills, name)) !== meta.contentHash && !options.force && !restoreRetiredVendor) {
+    if (live?.kind === "dir" && installedContentHash(join(paths.agentsSkills, name)) !== meta.contentHash && !options.force && !restoreRetiredVendor) {
       return yield* bail(`${name}: live dir drifted from repo copy; run \`diff ${name}\` then \`vendor ${name}\` or use --force`);
     }
     const repoPath = resolve(repo, meta.path);
-    if ((live?.kind === "symlink" || live?.kind === "broken-symlink") && live.resolved !== repoPath && !options.force) {
+    const global = join(paths.agentsSkills, name);
+    const generated = meta.origin === "local" && live?.kind === "symlink" && live.resolved === installationPaths(global).generated && readReceipt(global)?.source === repoPath;
+    if ((live?.kind === "symlink" || live?.kind === "broken-symlink") && live.resolved !== repoPath && !generated && !options.force) {
       return yield* bail(`${name}: ~/.agents/skills symlink is not owned by this catalog; inspect it or use --force`);
     }
     const claude = observation.claude[name];

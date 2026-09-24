@@ -107,6 +107,21 @@ Machine-local `.local/state.json` records either custom exceptions to the defaul
 
 Profile selection uses `{"kind":"profile","name":"default"}` and derives enabled skills from the current manifest profile membership. If that profile is retired, state normalizes to an all-enabled custom selection. Version-1 state is migrated on load; existing profile identity wins, while a retired profile keeps its still-valid disabled skills as a custom selection. Project links and custom disabled skills must reference manifest skills.
 
+Version-2 state also accepts optional host-local OpenCode invocation preferences:
+
+```json
+"opencode": {
+  "autoinvoke": {
+    "make-pr": false,
+    "research": true
+  }
+}
+```
+
+Each key is a catalog skill ID. `false` means manual invocation; `true` explicitly allows automatic discovery. A missing key means inherit. Preferences survive selection changes; entries for retired catalog skills are pruned on state alignment. The manifest and upstream hashes always describe source content, without host-local additions.
+
+Global installation receipts live in `~/.agents/.slinky/receipts/<skill>.json`. They record the original and rendered frontmatter and the source path. Generated local copies live in `~/.agents/.slinky/rendered/<skill>`, outside discovery roots, with the usual `~/.agents/skills/<skill>` symlink pointing there. Receipts also record generated-copy hashes to detect direct edits. Vendor copies remain real directories. Diff, vendor acceptance, and updates use receipts to remove only Slinky's marked metadata; source hashes exclude those additions.
+
 A copy project link records:
 
 ```json

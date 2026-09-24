@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DiffPager } from "../domain/model.ts";
 import { walkFiles } from "./hash.ts";
+import { withUndecoratedCopy } from "./invocation.ts";
 
 export interface DirDiff {
   added: string[]; // present in `b` only
@@ -39,6 +40,9 @@ export function diffDirs(a: string, b: string): DirDiff {
 }
 
 export const isClean = (d: DirDiff) => d.added.length === 0 && d.removed.length === 0 && d.modified.length === 0;
+
+export const diffInstalled = (baseline: string, live: string): DirDiff => withUndecoratedCopy(live, (source) => diffDirs(baseline, source));
+export const unifiedInstalledDiff = (baseline: string, live: string): string => withUndecoratedCopy(live, (source) => unifiedDiff(baseline, source));
 
 /** Render a unified diff via the system `diff -ruN`. */
 export function unifiedDiff(a: string, b: string): string {

@@ -6,7 +6,7 @@ import { Cause, Effect, Exit, Layer } from "effect";
 import { CliError, Command } from "effect/unstable/cli";
 import packageJson from "../package.json" with { type: "json" };
 import { adoptCommand, skillsCommand } from "./cli/adopt-commands.ts";
-import { disableCommand, enableCommand, profileCommand, statusCommand, verifyCommand } from "./cli/catalog-commands.ts";
+import { autoinvokeCommand, disableCommand, enableCommand, profileCommand, statusCommand, verifyCommand } from "./cli/catalog-commands.ts";
 import { pullCommand, pushCommand, saveCommand, syncCommand } from "./cli/convergence-commands.ts";
 import { linkCommand, linksCommand, unlinkCommand } from "./cli/link-commands.ts";
 import { c } from "./cli/render.ts";
@@ -26,6 +26,7 @@ const root = Command.make("slinky").pipe(
     pushCommand,
     enableCommand,
     disableCommand,
+    autoinvokeCommand,
     profileCommand,
     configCommand,
     linkCommand,

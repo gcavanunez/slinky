@@ -1,18 +1,19 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { Effect } from "effect";
 import { readdirIfExists } from "../lib/fs.ts";
-import { contentHash, walkFiles } from "../lib/hash.ts";
-import { classifyPlacement, inspectCatalogEntry, isDiscoverablePlacement } from "../domain/catalog-inspection.ts";
+import { walkFiles } from "../lib/hash.ts";
+import { inspectInstallation, invocationInfo } from "../lib/invocation.ts";
+import { classifyPlacement, isDiscoverablePlacement } from "../domain/catalog-inspection.ts";
 import type { CatalogLiveStatus, LiveEntry, Placement } from "../domain/catalog-inspection.ts";
-import { diffDirs } from "../lib/diff.ts";
+import { diffInstalled } from "../lib/diff.ts";
 import { findForeign, findUnindexedSkills } from "../lib/adopt.ts";
 import type { ForeignSkill, UnindexedSkill } from "../lib/adopt.ts";
 import type { DirDiff } from "../lib/diff.ts";
 import type { EditorCommand } from "../lib/editor.ts";
 import { isGlobalStoreProject } from "../lib/linker.ts";
-import { isSkillEnabled } from "../domain/model.ts";
+import { isSkillEnabled, invocationPreference } from "../domain/model.ts";
 import type { Manifest, ProjectLink, Skill, State, ThemeId } from "../domain/model.ts";
 import { ManifestStore } from "../lib/manifest.ts";
 import { claudeRelTarget } from "../domain/reconcile-plan.ts";
@@ -37,6 +38,7 @@ export interface CatalogRow {
   projectSkill: ProjectSkill | null;
   meta: Skill;
   upstream?: UpstreamState;
+  invocation?: ReturnType<typeof invocationInfo> & { preference: boolean | undefined };
 }
 
 export interface Catalog {
@@ -132,12 +134,19 @@ export const loadCatalog = Effect.fn("Tui.loadCatalog")(function* () {
   const rows: CatalogRow[] = Object.entries(manifest.skills).map(([name, meta]) => {
     const enabled = isSkillEnabled(manifest, state, name);
     const liveEntry: LiveEntry = Object.hasOwn(obs.agents, name) ? obs.agents[name]! : { kind: "missing" };
-    const inspection = inspectCatalogEntry({
+    const source = resolve(repo, meta.path);
+    const preference = invocationPreference(state, name);
+    const file = join(source, "SKILL.md");
+    const invocation = invocationInfo(existsSync(file) ? readFileSync(file, "utf8") : "", preference);
+    const inspection = inspectInstallation({
       origin: meta.origin,
       enabled,
       live: liveEntry,
-      expectedTarget: resolve(repo, meta.path),
-      vendorHash: { kind: "pending" },
+      source,
+      baselineHash: meta.contentHash,
+      path: join(paths.agentsSkills, name),
+      preference,
+      verify: false,
     });
     const projectLink = state.projectLinks.find((link) => link.skill === name && resolve(link.project) === project) ?? null;
     return {
@@ -152,6 +161,7 @@ export const loadCatalog = Effect.fn("Tui.loadCatalog")(function* () {
       projectLink,
       projectSkill: projectSkillsByName.get(name) ?? null,
       meta,
+      invocation: { ...invocation, preference },
     };
   });
   return {
@@ -174,12 +184,15 @@ export function verifyRow(catalog: Pick<Catalog, "agentsSkills" | "repo">, row: 
   if (row.live !== "checking") return row;
   const live = join(catalog.agentsSkills, row.name);
   const liveEntry = observeEntry(live);
-  const inspection = inspectCatalogEntry({
+  const inspection = inspectInstallation({
     origin: row.origin,
     enabled: row.enabled,
     live: liveEntry,
-    expectedTarget: resolve(catalog.repo, row.meta.path),
-    vendorHash: { kind: "verified", matches: liveEntry.kind === "dir" && contentHash(live) === row.meta.contentHash },
+    source: resolve(catalog.repo, row.meta.path),
+    baselineHash: row.meta.contentHash,
+    path: live,
+    preference: row.invocation?.preference,
+    verify: true,
   });
   return { ...row, liveEntry: inspection.live, placement: inspection.placement, live: inspection.status };
 }
@@ -192,7 +205,7 @@ export function diffSkill(catalog: Pick<Catalog, "repo" | "agentsSkills">, row: 
   const placement = classifyPlacement(observeEntry(live), resolve(catalog.repo, row.meta.path));
   if (placement === "wrong-symlink" || placement === "file") return { kind: "unowned" };
   if (placement === "missing" || placement === "broken-symlink") return { kind: "not-installed" };
-  return { kind: "diff", diff: diffDirs(join(catalog.repo, row.meta.path), live) };
+  return { kind: "diff", diff: diffInstalled(join(catalog.repo, row.meta.path), live) };
 }
 
 export function linksForSkill(state: State, name: string): ReadonlyArray<ProjectLink> {

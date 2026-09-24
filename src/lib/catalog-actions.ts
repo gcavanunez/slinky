@@ -4,7 +4,8 @@ import { dirname, join } from "node:path";
 import { Cause, Effect, Exit } from "effect";
 import { errorDetail, OperationFailed } from "../domain/model.ts";
 import type { Manifest, SkillLockDecodeError, State } from "../domain/model.ts";
-import { getProfile, getSkill, withProfile, withSkillEnabled } from "../domain/model.ts";
+import { getProfile, getSkill, withProfile, withSkillEnabled, withAutoinvoke } from "../domain/model.ts";
+import type { InvocationMode } from "../domain/model.ts";
 import { ManifestStore } from "./manifest.ts";
 import { applyUnlink, linkSkill, prepareUnlink, unlinkSkill } from "./linker.ts";
 import type { LinkOptions } from "./linker.ts";
@@ -53,6 +54,15 @@ export const setSkillsEnabled = Effect.fn("Catalog.setSkillsEnabled")(function* 
   }
   const next = names.reduce((current, name) => withSkillEnabled(manifest, current, name, enabled), state);
   return yield* changeState(manifest, next, options);
+});
+
+export const setAutoinvoke = Effect.fn("Catalog.setAutoinvoke")(function* (name: string, mode: InvocationMode, options: MutationOptions = {}) {
+  const store = yield* ManifestStore;
+  const manifest = yield* store.loadManifest();
+  const state = yield* store.loadState(manifest);
+  if (!getSkill(manifest, name)) return yield* Effect.fail(new OperationFailed({ message: `unknown skill: ${name}` }));
+  const result = yield* changeState(manifest, withAutoinvoke(state, name, mode), options);
+  return { ...result, messages: [...result.messages, `${name}: OpenCode autoinvoke ${mode}`] };
 });
 
 export const applyProfile = Effect.fn("Catalog.applyProfile")(function* (name: string, options: MutationOptions = {}) {

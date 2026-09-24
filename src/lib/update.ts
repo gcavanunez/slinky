@@ -2,14 +2,16 @@ import { spawnSync } from "node:child_process";
 import { join, posix, resolve } from "node:path";
 import { Cache, Context, Duration, Effect, Exit, Layer, Schedule, Schema } from "effect";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
-import { errorDetail, ExternalToolError, isSkillEnabled } from "../domain/model.ts";
+import { errorDetail, ExternalToolError, isSkillEnabled, getSkill } from "../domain/model.ts";
 import type { Manifest, State } from "../domain/model.ts";
 import { inspectCatalogEntry } from "../domain/catalog-inspection.ts";
 import type { LiveEntry } from "../domain/catalog-inspection.ts";
 import { runGit } from "./git.ts";
-import { contentHash } from "./hash.ts";
+import { installedContentHash, prepareInvocationUpdate, decorateInstalled } from "./invocation.ts";
+import { ManifestStore } from "./manifest.ts";
+import { invocationPreference } from "../domain/model.ts";
 import { HostRepo, Paths } from "./paths.ts";
-import { observe } from "./reconcile.ts";
+import { observe, observeEntry } from "./reconcile.ts";
 import { seedGlobalSkillLock } from "./skill-lock.ts";
 
 export type UpstreamState = "current" | "update" | "gone" | "unchecked";
@@ -150,7 +152,22 @@ export const checkUpstream = Effect.fn("Update.checkUpstream")(function* (manife
 /** Run skills.sh against the global store (writes live copies + lock file). */
 export const runSkillsUpdate = Effect.fn("Update.runSkillsUpdate")(function* (manifest: Manifest, names: ReadonlyArray<string>) {
   yield* seedGlobalSkillLock(manifest, names);
-  const res = yield* Effect.sync(() => spawnSync("npx", ["-y", "skills", "update", ...names, "-g", "-y"], { stdio: "inherit" }));
+  const paths = yield* Paths;
+  const { repo } = yield* HostRepo;
+  const store = yield* ManifestStore;
+  const state = yield* store.loadState(manifest);
+  const res = yield* Effect.sync(() => {
+    try {
+      for (const name of names) prepareInvocationUpdate(join(paths.agentsSkills, name));
+      return spawnSync("npx", ["-y", "skills", "update", ...names, "-g", "-y"], { stdio: "inherit" });
+    } finally {
+      for (const name of names) {
+        const meta = getSkill(manifest, name);
+        const live = join(paths.agentsSkills, name);
+        if (meta && observeEntry(live).kind === "dir") decorateInstalled(live, join(repo, meta.path), invocationPreference(state, name));
+      }
+    }
+  });
   const code = res.status ?? 1;
   if (code !== 0) {
     return yield* Effect.fail(new ExternalToolError({ tool: "npx skills", message: `skills.sh exited with ${code}` }));
@@ -202,7 +219,7 @@ export const detectChanges = Effect.fn("Update.detectChanges")(function* (manife
     if (names && names.length > 0 && !names.includes(name)) continue;
     const enabled = isSkillEnabled(manifest, state, name);
     const liveEntry: LiveEntry = Object.hasOwn(observation.agents, name) ? observation.agents[name]! : { kind: "missing" };
-    const matches = liveEntry.kind === "dir" && contentHash(join(paths.agentsSkills, name)) === meta.contentHash;
+    const matches = liveEntry.kind === "dir" && installedContentHash(join(paths.agentsSkills, name)) === meta.contentHash;
     const inspection = inspectCatalogEntry({
       origin: meta.origin,
       enabled,

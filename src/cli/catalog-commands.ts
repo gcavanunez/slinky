@@ -1,15 +1,16 @@
 import { join, resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
 import { Effect } from "effect";
 import { Argument, Command } from "effect/unstable/cli";
-import { classifyPlacement, inspectCatalogEntry } from "../domain/catalog-inspection.ts";
-import type { CatalogLiveStatus, LiveEntry, VendorHashState } from "../domain/catalog-inspection.ts";
-import { getActiveProfile, isSkillEnabled } from "../domain/model.ts";
+import { classifyPlacement } from "../domain/catalog-inspection.ts";
+import type { CatalogLiveStatus, LiveEntry } from "../domain/catalog-inspection.ts";
+import { getActiveProfile, isSkillEnabled, invocationPreference } from "../domain/model.ts";
 import type { Manifest, State } from "../domain/model.ts";
 import { claudeRelTarget } from "../domain/reconcile-plan.ts";
 import { findUnindexedSkills } from "../lib/adopt.ts";
-import { applyProfile, setSkillsEnabled } from "../lib/catalog-actions.ts";
+import { applyProfile, setSkillsEnabled, setAutoinvoke } from "../lib/catalog-actions.ts";
 import { verifyCatalog } from "../lib/convergence.ts";
-import { contentHash } from "../lib/hash.ts";
+import { inspectInstallation, invocationInfo } from "../lib/invocation.ts";
 import { HostRepo, Paths } from "../lib/paths.ts";
 import { observe } from "../lib/reconcile.ts";
 import { c, pad, renderAction, renderConvergenceEvent, stripAnsi } from "./render.ts";
@@ -21,17 +22,26 @@ const cmdStatus = Effect.fn("Cli.status")(function* (manifest: Manifest, state: 
   const obs = yield* observe();
   const nameW = Math.max(4, ...Object.keys(manifest.skills).map((n) => n.length)) + 2;
   console.log(c.dim(`host: ${repo}\n`));
-  console.log(c.bold(`${pad("NAME", nameW)}${pad("ORIGIN", 8)}${pad("ENABLED", 9)}${pad("LIVE", 10)}CLAUDE`));
+  console.log(c.bold(`${pad("NAME", nameW)}${pad("ORIGIN", 8)}${pad("ENABLED", 9)}${pad("LIVE", 10)}${pad("CLAUDE", 8)}OPENCODE INVOCATION`));
   for (const [name, meta] of Object.entries(manifest.skills)) {
     const enabled = isSkillEnabled(manifest, state, name);
     const live: LiveEntry = Object.hasOwn(obs.agents, name) ? obs.agents[name]! : { kind: "missing" };
     const claudeEntry: LiveEntry = Object.hasOwn(obs.claude, name) ? obs.claude[name]! : { kind: "missing" };
     const claude = classifyPlacement(claudeEntry, resolve(paths.claudeSkills, claudeRelTarget(name))) === "expected-symlink" ? "yes" : c.dim("-");
-    const vendorHash: VendorHashState =
-      enabled && meta.origin === "vendor" && live.kind === "dir"
-        ? { kind: "verified", matches: contentHash(join(paths.agentsSkills, name)) === meta.contentHash }
-        : { kind: "pending" };
-    const inspection = inspectCatalogEntry({ origin: meta.origin, enabled, live, expectedTarget: resolve(repo, meta.path), vendorHash });
+    const source = resolve(repo, meta.path);
+    const preference = invocationPreference(state, name);
+    const file = join(source, "SKILL.md");
+    const invocation = invocationInfo(existsSync(file) ? readFileSync(file, "utf8") : "", preference);
+    const inspection = inspectInstallation({
+      origin: meta.origin,
+      enabled,
+      live,
+      source,
+      baselineHash: meta.contentHash,
+      path: join(paths.agentsSkills, name),
+      preference,
+      verify: true,
+    });
     const labels = {
       ok: c.green("ok"),
       drift: c.yellow("drift"),
@@ -44,7 +54,7 @@ const cmdStatus = Effect.fn("Cli.status")(function* (manifest: Manifest, state: 
     const liveLabel = labels[inspection.status];
 
     console.log(
-      `${pad(name, nameW)}${pad(meta.origin, 8)}${pad(enabled ? "on" : c.dim("off"), enabled ? 9 : 9 + 9)}${pad(liveLabel, 10 + liveLabel.length - stripAnsi(liveLabel).length)}${claude}`,
+      `${pad(name, nameW)}${pad(meta.origin, 8)}${pad(enabled ? "on" : c.dim("off"), enabled ? 9 : 9 + 9)}${pad(liveLabel, 10 + liveLabel.length - stripAnsi(liveLabel).length)}${pad(claude, 8 + claude.length - stripAnsi(claude).length)}${invocation.automatic ? "auto" : "manual"} (${invocation.source})`,
     );
   }
   const foreign = Object.keys(obs.agents).filter((n) => !(n in manifest.skills));
@@ -80,6 +90,21 @@ const makeToggleCommand = (name: "enable" | "disable", description: string) =>
 
 export const enableCommand = makeToggleCommand("enable", "Enable skill(s) globally and sync");
 export const disableCommand = makeToggleCommand("disable", "Disable skill(s) globally and sync");
+
+export const autoinvokeCommand = Command.make(
+  "autoinvoke",
+  {
+    name: Argument.string("skill"),
+    mode: Argument.choice("mode", ["on", "off", "inherit"] as const),
+    dryRun: dryRunFlag,
+  },
+  ({ name, mode, dryRun }) =>
+    withRepo(
+      Effect.gen(function* () {
+        renderAction(yield* setAutoinvoke(name, mode, { dryRun }));
+      }),
+    ),
+).pipe(Command.withDescription("Set host-local OpenCode automatic discovery: on, off (manual), or inherit"));
 
 const profileList = withRepo(
   Effect.gen(function* () {

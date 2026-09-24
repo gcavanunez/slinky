@@ -54,6 +54,7 @@ export type AppCommand =
   | "search.previous"
   | "catalog.refresh"
   | "skill.edit"
+  | "skill.autoinvoke"
   | "help.open"
   | "help.close"
   | "upstream.check"
@@ -132,6 +133,7 @@ const listCommands: ReadonlyArray<CommandDefinition> = [
   { name: "search.previous", title: "Previous search match", keys: ["shift+n"] },
   { name: "catalog.refresh", title: "Reload catalog", keys: ["r"] },
   { name: "skill.edit", title: "Edit selected skill", keys: ["e"] },
+  { name: "skill.autoinvoke", title: "Cycle OpenCode invocation: manual, automatic, inherit", keys: ["shift+a"] },
   { name: "help.open", title: "Open help", keys: ["?"] },
   { name: "upstream.check", title: "Check upstream", keys: ["u"] },
   { name: "profiles.open", title: "Open profiles", keys: ["p"] },

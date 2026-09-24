@@ -1,6 +1,6 @@
 /** @jsxImportSource @opentui/react */
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AppProps } from "./app.tsx";
@@ -369,6 +369,29 @@ test("clicking a pane does not hand key bindings to a focused renderable", async
     // With autofocus on, the ScrollBox would take focus here and then apply its
     // own arrow/page/home bindings on top of App's, scrolling twice per press.
     expect(setup.renderer.currentFocusedRenderable).toBeNull();
+  } finally {
+    destroy(setup);
+  }
+});
+
+test("A cycles host-local OpenCode invocation for the selected skill", async () => {
+  const setup = await mount();
+  try {
+    await setup.waitForFrame((value) => value.includes("slinky"));
+    await input(() => setup.mockInput.pressKey("2"));
+    await input(() => setup.mockInput.pressKey("/"));
+    await input(() => setup.mockInput.typeText("alpha"));
+    await input(() => setup.mockInput.pressEnter());
+    await input(() => setup.mockInput.pressKey("a", { shift: true }));
+    expect(await setup.waitForFrame((value) => value.includes("invocation off"))).toContain("invocation off");
+    expect(JSON.parse(readFileSync(join(host, ".local/state.json"), "utf8")).opencode.autoinvoke.alpha).toBe(false);
+    await input(() => setup.mockInput.pressKey("a", { shift: true }));
+    expect(await setup.waitForFrame((value) => value.includes("invocation on"))).toContain("invocation on");
+    expect(JSON.parse(readFileSync(join(host, ".local/state.json"), "utf8")).opencode.autoinvoke.alpha).toBe(true);
+    await input(() => setup.mockInput.pressKey("a", { shift: true }));
+    await setup.waitForFrame((value) => value.includes("invocation inherit"));
+    expect(JSON.parse(readFileSync(join(host, ".local/state.json"), "utf8")).opencode.autoinvoke.alpha).toBeUndefined();
+    expect(readFileSync(join(host, "skills/alpha/SKILL.md"), "utf8")).not.toContain("opencode/autoinvoke");
   } finally {
     destroy(setup);
   }

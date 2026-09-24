@@ -44,13 +44,13 @@ export function findSymlinks(root: string, prefix = ""): string[] {
  * Matches the Phase 1 migration hasher: for each file (sorted by full path
  * string), update(relpath) 0x00 update(bytes) 0x00.
  */
-export function contentHash(root: string): string {
+export function contentHash(root: string, read: (relative: string) => Buffer = (relative) => readFileSync(join(root, relative))): string {
   const files = walkFiles(root).sort();
   const h = createHash("sha256");
   for (const rel of files) {
     h.update(rel);
     h.update("\0");
-    h.update(readFileSync(join(root, rel)));
+    h.update(read(rel));
     h.update("\0");
   }
   return h.digest("hex");

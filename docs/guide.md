@@ -94,8 +94,11 @@ The catalog is one tree: a heading per author (or `local`, `unindexed`, `project
 | `h` | fold | jump to its heading |
 | `l` | unfold, else next pane | next pane |
 | `i` | summarise the group | details |
+| `A` | no action | cycle OpenCode invocation: manual, automatic, inherit |
 
 Filtering with `/` shows every matching group open and hides the rest; the fold state returns when the filter clears. `1` shows only skills discoverable globally or through the current project's `.agents` and `.claude` directories; `2` shows the complete catalog.
+
+OpenCode invocation is separate from installed enablement. `A` changes the selected skill's host preference; details show its effective setting and source. See [OpenCode invocation](../README.md#opencode-invocation) for CLI examples, inheritance, and global scope.
 
 Status columns are `on` (enabled), `live` (global store state), `project` (placement in the current project), and `up` (upstream: `^` update available, `×` gone, `=` current). Placement values `link·hid` and `copy·hid` are excluded through `.git/info/exclude`; `link·git` and `copy·git` are visible to Git.
 
@@ -268,7 +271,7 @@ slinky config                    # show the recorded host, pager, editor, and th
 - Dry-run reports foreign skills but does not preview `--adopt-all`; run `slinky adopt` to review candidates explicitly.
 - Avoid `--force` until the conflicting path has been inspected.
 - Commit or stash host baseline changes, and `slinky sync` pending store commits, before running `slinky update`.
-- Do not hand-edit `.local/state.json`; use enable, disable, profile, link, and unlink commands.
+- Do not hand-edit `.local/state.json`; use enable, disable, autoinvoke, profile, link, and unlink commands.
 - Review host repository changes after adoption or accepted updates.
 
 ## Host discovery
@@ -291,6 +294,7 @@ slinky sync [--force]          # apply reconciliation
 slinky pull [--dry-run] [--force]
 slinky push [--dry-run]
 slinky enable <skill...>
+slinky autoinvoke <skill> <on|off|inherit> [--dry-run]
 slinky disable <skill...> [--force]
 slinky profile list
 slinky profile apply <name> [--force]

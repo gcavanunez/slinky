@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { DateTime, Schema } from "effect";
 import {
   alignStateWithManifest,
+  alignStateForTransition,
   getActiveProfile,
   getDisabledSkills,
   isSkillEnabled,
@@ -49,6 +50,14 @@ const stateInput = () => ({
 });
 
 describe("domain schemas", () => {
+  test("OpenCode preferences are optional, boolean, and pruned when a skill and its profile retire", () => {
+    const manifest = Schema.decodeUnknownSync(Manifest)(manifestInput());
+    const state = Schema.decodeUnknownSync(State)({ ...stateInput(), selection: { kind: "profile", name: "work" }, opencode: { autoinvoke: { foo: false, bar: true } } });
+    const resulting = Schema.decodeUnknownSync(Manifest)({ ...manifestInput(), skills: { bar: manifestInput().skills.bar }, profiles: {} });
+    expect(alignStateForTransition(manifest, resulting, state).opencode).toEqual({ autoinvoke: { bar: true } });
+    expect(Schema.decodeUnknownSync(State)(stateInput()).opencode).toBeUndefined();
+    expect(() => Schema.decodeUnknownSync(State)({ ...stateInput(), opencode: { autoinvoke: { foo: "false" } } })).toThrow();
+  });
   test("decodes owned documents into plain schema values and encodes canonical timestamps", () => {
     const manifest = Schema.decodeUnknownSync(Manifest)(manifestInput(), strict);
     const state = Schema.decodeUnknownSync(State)(stateInput(), strict);

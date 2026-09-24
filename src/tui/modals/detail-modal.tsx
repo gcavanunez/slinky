@@ -43,6 +43,7 @@ export function DetailModal({ cols, rows, row, catalog }: { cols: number; rows: 
   else if (source) lines.push(<Field key="source" label="source" value={source} />);
   if (sourceUrl) lines.push(<Field key="url" label="url" value={sourceUrl} fg={colors.link} />);
   lines.push(<Field key="enabled" label="enabled" value={row.enabled ? "yes" : "no"} fg={row.enabled ? colors.green : colors.muted} />);
+  if (row.invocation) lines.push(<Field key="invocation" label="OpenCode" value={`${row.invocation.automatic ? "automatic" : "manual"} · ${row.invocation.source}`} />);
   lines.push(<Field key="live" label="live" value={liveLabel[row.live]} fg={liveColor(row.live)} />);
   lines.push(<Field key="claude" label="claude" value={row.claude ? "linked" : "not linked"} />);
   lines.push(<Field key="here" label="here" value={here.value} fg={here.fg} />);
