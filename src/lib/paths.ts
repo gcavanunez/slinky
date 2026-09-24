@@ -4,7 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Config, Context, Data, Effect, Layer, Option, Schema } from "effect";
 import { ConfigFileError, errorDetail, isMissingFile, SlinkyConfig, version } from "../domain/model.ts";
-import type { DiffPager, ThemeId } from "../domain/model.ts";
+import type { DiffPager, FleetMember, ThemeId } from "../domain/model.ts";
 import { resolveEditor } from "./editor.ts";
 import type { EditorCommand } from "./editor.ts";
 
@@ -48,6 +48,7 @@ interface ConfigFields {
   readonly diffPager?: DiffPager | undefined;
   readonly editor?: string | undefined;
   readonly theme?: ThemeId | undefined;
+  readonly fleet?: ReadonlyArray<FleetMember> | undefined;
 }
 
 /** Build a config value, omitting unset optional fields rather than writing nulls. */
@@ -56,7 +57,8 @@ function configWith(fields: ConfigFields): SlinkyConfig {
   const withPager = fields.diffPager === undefined ? base : { ...base, diffPager: fields.diffPager };
   const withEditor = fields.editor === undefined ? withPager : { ...withPager, editor: fields.editor };
   const withTheme = fields.theme === undefined ? withEditor : { ...withEditor, theme: fields.theme };
-  return Schema.decodeUnknownSync(SlinkyConfig)(withTheme);
+  const withFleet = fields.fleet === undefined || fields.fleet.length === 0 ? withTheme : { ...withTheme, fleet: fields.fleet };
+  return Schema.decodeUnknownSync(SlinkyConfig)(withFleet);
 }
 
 /** Read and decode the config file. Absent is not an error; the caller falls back to discovery. */
@@ -129,6 +131,8 @@ export interface PathsInterface {
   readonly editorCommand: EditorCommand;
   /** Configured TUI theme; undefined means the default palette. */
   readonly theme: ThemeId | undefined;
+  /** Followers this machine leads, in registration order. */
+  readonly fleet: ReadonlyArray<FleetMember>;
   readonly saveHostConfig: (repo: string) => Effect.Effect<void, ConfigFileError>;
   /** Persist the preferred diff pager; null clears it. */
   readonly saveDiffPager: (pager: DiffPager | null) => Effect.Effect<void, ConfigFileError>;
@@ -136,6 +140,8 @@ export interface PathsInterface {
   readonly saveEditor: (editor: string | null) => Effect.Effect<void, ConfigFileError>;
   /** Persist the TUI theme; null clears it. */
   readonly saveTheme: (theme: ThemeId | null) => Effect.Effect<void, ConfigFileError>;
+  /** Persist the fleet; an empty list removes it. */
+  readonly saveFleet: (fleet: ReadonlyArray<FleetMember>) => Effect.Effect<void, ConfigFileError>;
 }
 
 export class Paths extends Context.Service<Paths, PathsInterface>()("slinky/Paths") {
@@ -190,6 +196,10 @@ export class Paths extends Context.Service<Paths, PathsInterface>()("slinky/Path
         yield* changeConfig((current) => ({ ...current, theme: theme ?? undefined }));
       });
 
+      const saveFleet = Effect.fn("Paths.saveFleet")(function* (fleet: ReadonlyArray<FleetMember>) {
+        yield* changeConfig((current) => ({ ...current, fleet }));
+      });
+
       return Paths.of({
         home,
         slinkyConfig,
@@ -209,10 +219,12 @@ export class Paths extends Context.Service<Paths, PathsInterface>()("slinky/Path
           env: Option.getOrUndefined(envEditor),
         }),
         theme: loaded.config?.theme,
+        fleet: loaded.config?.fleet ?? [],
         saveHostConfig,
         saveDiffPager,
         saveEditor,
         saveTheme,
+        saveFleet,
       });
     }),
   );

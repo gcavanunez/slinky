@@ -46,7 +46,7 @@ import { findDriftingVendors, vendorRestore } from "./vendor-ops.ts";
 export type ConvergenceTone = "dim" | "error" | "success" | "warning";
 
 export type ConvergenceEvent =
-  | { readonly type: "section"; readonly title: "save" | "pull" | "reconcile" | "restore" | "finalize"; readonly leadingBlank: boolean }
+  | { readonly type: "section"; readonly title: "save" | "pull" | "reconcile" | "restore" | "finalize" | "publish"; readonly leadingBlank: boolean }
   | { readonly type: "message"; readonly message: string; readonly tone?: ConvergenceTone }
   | { readonly type: "git-output"; readonly stdout: string; readonly stderr: string };
 
@@ -70,7 +70,10 @@ export interface PushCatalogOptions {
   readonly onEvent?: ConvergenceEventSink;
 }
 
-export interface SyncCatalogOptions extends OperationOptions {}
+export interface SyncCatalogOptions extends OperationOptions {
+  /** Skip the save phase: take the upstream catalog as it is and never commit here. */
+  readonly follower?: boolean;
+}
 
 export interface SaveCatalogReport {
   readonly changed: boolean;
@@ -101,6 +104,9 @@ const send = (sink: ConvergenceEventSink | undefined, event: ConvergenceEvent) =
       // Presentation failures cannot participate in catalog transactions.
     }
   });
+
+/** Deliver one event, keeping a throwing renderer out of the operation. */
+export const emitConvergenceEvent = send;
 
 const message = (sink: ConvergenceEventSink | undefined, text: string, tone?: ConvergenceTone) =>
   send(sink, tone === undefined ? { type: "message", message: text } : { type: "message", message: text, tone });
@@ -200,7 +206,8 @@ const seedVerifiedGlobalProvenance = Effect.fn("Convergence.seedVerifiedGlobalPr
     try: () =>
       Object.entries(manifest.skills)
         .filter(([name, skill]) => {
-          if (skill.origin !== "vendor") return false;
+          // Unknown-origin vendors have no update provenance to seed.
+          if (skill.origin !== "vendor" || skill.upstream.kind === "unknown") return false;
           const live = join(paths.agentsSkills, name);
           if (!existsSync(live)) return false;
           const stat = lstatSync(live);
@@ -772,7 +779,30 @@ const restoreAllVendorDrift = Effect.fn("Convergence.restoreAllVendorDrift")(fun
   return targets;
 });
 
+const followCatalog = Effect.fn("Convergence.followCatalog")(function* (options: SyncCatalogOptions) {
+  const git = yield* inspectSyncGit();
+  if (!git.hasUpstream) return yield* bail("follower sync needs a Git skills host with a configured upstream to pull from");
+  yield* section(options.onEvent, "pull", false);
+  const pulled = yield* pullCatalogInternal({ ...options, restoreDrift: true });
+  if (options.dryRun) {
+    yield* section(options.onEvent, "reconcile", true);
+    yield* renderReconciliation(pulled.manifest, pulled.state, options);
+  }
+  yield* section(options.onEvent, "restore", true);
+  const restored = yield* restoreAllVendorDrift(pulled.manifest, options.dryRun ?? false, options.onEvent);
+  if (restored.length > 0) {
+    if (options.dryRun) yield* message(options.onEvent, "would reconcile global stores again after restoring vendor drift");
+    else {
+      const { manifest, state } = yield* loadHostState;
+      yield* section(options.onEvent, "finalize", true);
+      yield* renderReconciliation(manifest, state, options);
+    }
+  }
+  return { restored } satisfies SyncCatalogReport;
+});
+
 export const syncCatalog = Effect.fn("Convergence.syncCatalog")(function* (options: SyncCatalogOptions = {}) {
+  if (options.follower) return yield* followCatalog(options);
   const git = yield* inspectSyncGit();
   if (options.dryRun) {
     yield* section(options.onEvent, "save", false);

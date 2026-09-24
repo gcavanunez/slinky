@@ -152,4 +152,17 @@ Symlink links use `"mode": "symlink"` and omit `snapshotHash`. Targets are limit
 }
 ```
 
+A leader machine also records its followers:
+
+```json
+{
+  "fleet": [
+    { "name": "devbox", "ssh": "me@devbox.tail1234.ts.net" },
+    { "name": "pi", "ssh": "pi.local", "command": "~/.bun/bin/slinky" }
+  ]
+}
+```
+
+`fleet` is optional and keeps registration order. Names are unique and use letters, digits, `.`, `_`, and `-`. `ssh` is an ssh destination without whitespace or a leading dash. `command` is an optional remote shell command that stands in for `slinky` when it is not on the non-interactive ssh `PATH`. Removing the last follower removes the property.
+
 `diffPager` is optional and accepts `hunk` or `delta`. `editor` is an optional nonblank command specification, including arguments. `theme` is an optional TUI palette id (the `t` picker in the TUI lists them, e.g. `nord`, `catppuccin-latte`); absent means `slinky`. Clearing any of these settings removes its property rather than writing `null` or `"none"`. The editor resolves from the configured value, then `$VISUAL`, `$EDITOR`, and finally `nvim`. `SLINKY_REPO` can override the configured host for one invocation.

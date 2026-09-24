@@ -49,6 +49,15 @@ slinky sync                              # save, pull, reconcile, restore
 
 `sync` is the whole loop: it commits reviewed catalog changes, pulls the upstream, rebuilds the global stores, and resets live vendor copies to the catalog. Preview it with `--dry-run`.
 
+To keep other machines current without logging into each one, register them on the machine that can push and let it drive them over ssh:
+
+```bash
+slinky fleet add devbox me@devbox          # once per follower
+slinky fleet sync                          # sync + push here, then each follower pulls and restores
+```
+
+The [guide](docs/guide.md#fleet) covers the details.
+
 ## The TUI
 
 One catalog tree on the left, the selected skill's documentation on the right.

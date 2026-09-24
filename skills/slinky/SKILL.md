@@ -245,6 +245,17 @@ slinky sync
 
 `sync` saves, pulls or rebases, reconciles global stores, and restores all live vendor drift. The command itself authorizes that restore, including deletion of a drifting vendor retired by the incoming catalog. Always inspect the dry-run or `slinky diff` first. `pull` remains the narrower operation and refuses destructive retirement drift. Both preserve local disabled skills, project links, recent projects, and profiles that still exist. They block removal of a skill that has a local project link. `sync --pull` remains accepted as a compatibility alias but is no longer required.
 
+When one machine (the leader) can push and reach the others over ssh, keep the rest current from there:
+
+```bash
+slinky fleet                               # followers recorded in this machine's config
+slinky fleet add <name> <ssh-target> [--command <remote-slinky>]
+slinky fleet sync --dry-run
+slinky fleet sync [follower...]
+```
+
+`fleet sync` runs `sync` on the leader and pushes, then runs `slinky sync --follower` on each follower over ssh in parallel. `sync --follower` pulls, reconciles, and restores vendor drift but never saves; it fails on a dirty worktree instead of committing. Treat `fleet sync` like `sync`: it restores vendor drift on every follower, so preview it first. A failing follower is reported without stopping the others.
+
 ## Project Links
 
 Copy a skill into a project by default:

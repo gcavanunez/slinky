@@ -147,6 +147,23 @@ Pulling preserves machine-local state: disabled skills, recent projects, project
 
 `slinky pull --dry-run` and `slinky sync --dry-run` do not fast-forward, commit, reconcile, or restore files. Sync dry-run fetches remote details when the catalog is already saved; when a save is pending, it reports that the pull preview follows the save.
 
+### Fleet
+
+A fleet has one leader: the machine that can push to the catalog upstream and reach the others over ssh. The followers only need to fetch from that upstream. The fleet is recorded in the leader's `~/.config/slinky/config.json`, so it never lands in the shared catalog.
+
+```bash
+slinky fleet add devbox me@devbox.tail1234.ts.net
+slinky fleet add pi pi.local --command "~/.bun/bin/slinky"   # slinky is not on the non-interactive ssh PATH
+slinky fleet                                                 # list followers
+slinky fleet sync --dry-run                                  # preview the leader and every follower
+slinky fleet sync                                            # or: slinky fleet sync devbox pi
+slinky fleet remove pi
+```
+
+`fleet sync` runs a full `sync` on the leader (save, pull, reconcile, restore), then pushes any commits the upstream does not have. After that it runs `ssh -o BatchMode=yes <target> slinky sync --follower` on every selected follower at once. Each follower's output appears under its name. The command exits non-zero if any follower failed, but one unreachable follower never stops the others. If the leader fails, nothing is pushed and no follower is contacted.
+
+`slinky sync --follower` is the follower step, and you can also run it on its own. It skips the save phase: it requires a clean worktree, pulls the upstream catalog, reconciles, and restores live vendor drift exactly as `sync` does. It never commits, so catalog edits made on a follower are reported rather than published. Enabled and disabled skills, the active profile, and project links remain per machine. Put a follower on a shared profile (`slinky profile apply <name>`) to have its selection follow the catalog.
+
 ## Adding and adopting skills
 
 Add an upstream skill through Slinky so skills.sh provenance, the vendored baseline, and the manifest are updated together:
@@ -291,8 +308,13 @@ slinky version                 # print the installed version
 slinky status                  # inspect catalog, live state, and Claude visibility
 slinky sync --dry-run          # preview reconciliation
 slinky sync [--force]          # apply reconciliation
+slinky sync --follower [--dry-run]    # pull, reconcile, restore; never save
 slinky pull [--dry-run] [--force]
 slinky push [--dry-run]
+slinky fleet                          # list followers this machine leads
+slinky fleet add <name> <ssh-target> [--command <remote-slinky>]
+slinky fleet remove <name>
+slinky fleet sync [follower...] [--dry-run]   # sync + push here, then sync --follower over ssh
 slinky enable <skill...>
 slinky autoinvoke <skill> <on|off|inherit> [--dry-run]
 slinky disable <skill...> [--force]

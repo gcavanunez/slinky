@@ -8,6 +8,7 @@ import packageJson from "../package.json" with { type: "json" };
 import { adoptCommand, skillsCommand } from "./cli/adopt-commands.ts";
 import { autoinvokeCommand, disableCommand, enableCommand, profileCommand, statusCommand, verifyCommand } from "./cli/catalog-commands.ts";
 import { pullCommand, pushCommand, saveCommand, syncCommand } from "./cli/convergence-commands.ts";
+import { fleetCommand } from "./cli/fleet-commands.ts";
 import { linkCommand, linksCommand, unlinkCommand } from "./cli/link-commands.ts";
 import { c } from "./cli/render.ts";
 import { bootstrapCommand, configCommand, initCommand, tuiCommand, versionCommand } from "./cli/setup-commands.ts";
@@ -24,6 +25,7 @@ const root = Command.make("slinky").pipe(
     syncCommand,
     pullCommand,
     pushCommand,
+    fleetCommand,
     enableCommand,
     disableCommand,
     autoinvokeCommand,

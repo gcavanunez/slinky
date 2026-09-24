@@ -2,10 +2,17 @@ import { Option } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
 import { pullCatalog, pushCatalog, saveCatalog, syncCatalog } from "../lib/convergence.ts";
 import { renderConvergenceEvent } from "./render.ts";
-import { dryRunFlag, forceFlag, pullFlag, withRepo } from "./shared.ts";
+import { dryRunFlag, forceFlag, pullFlag, switchFlag, withRepo } from "./shared.ts";
 
-export const syncCommand = Command.make("sync", { dryRun: dryRunFlag, force: forceFlag, pull: pullFlag }, ({ dryRun, force }) =>
-  withRepo(syncCatalog({ dryRun, force, onEvent: renderConvergenceEvent })),
+export const syncCommand = Command.make(
+  "sync",
+  {
+    dryRun: dryRunFlag,
+    force: forceFlag,
+    pull: pullFlag,
+    follower: switchFlag("follower", "Skip saving: pull the upstream catalog, reconcile, and restore (what `fleet sync` runs on each follower)"),
+  },
+  ({ dryRun, force, follower }) => withRepo(syncCatalog({ dryRun, force, follower, onEvent: renderConvergenceEvent })),
 ).pipe(Command.withDescription("Save, pull, reconcile, and restore live vendor drift"));
 
 export const pullCommand = Command.make("pull", { dryRun: dryRunFlag, force: forceFlag }, ({ dryRun, force }) =>

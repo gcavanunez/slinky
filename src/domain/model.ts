@@ -297,6 +297,21 @@ export const ThemeId = Schema.Literals(themeIds);
 export type ThemeId = typeof ThemeId.Type;
 export const defaultThemeId: ThemeId = "slinky";
 
+export const FleetMemberName = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]*$/));
+
+/** An ssh destination; a leading dash would be read by ssh as an option. */
+export const SshTarget = Schema.NonEmptyString.check(
+  Schema.makeFilter((value) => !value.startsWith("-") && !/\s/.test(value), { expected: "an ssh destination without whitespace or a leading dash" }),
+);
+
+export const FleetMember = Schema.Struct({
+  name: FleetMemberName,
+  ssh: SshTarget,
+  /** Remote shell command that runs slinky. Absent means `slinky` on the remote PATH. */
+  command: Schema.optional(Schema.NonEmptyString.check(Schema.makeFilter((value) => value.trim() !== "", { expected: "a non-blank remote command" }))),
+});
+export type FleetMember = typeof FleetMember.Type;
+
 export const SlinkyConfig = Schema.Struct({
   version: Schema.Literal(version),
   host: HostPath,
@@ -306,6 +321,12 @@ export const SlinkyConfig = Schema.Struct({
   editor: Schema.optional(Schema.NonEmptyString.check(Schema.makeFilter((value) => value.trim() !== "", { expected: "a non-blank editor command" }))),
   /** TUI theme. Absent means the default slinky palette. */
   theme: Schema.optional(ThemeId),
+  /** Followers this machine drives with `slinky fleet sync`. Absent means this machine leads no fleet. */
+  fleet: Schema.optional(
+    Schema.Array(FleetMember).check(
+      Schema.makeFilter((members) => new Set(members.map((member) => member.name)).size === members.length, { expected: "fleet members with unique names" }),
+    ),
+  ),
 });
 export type SlinkyConfig = typeof SlinkyConfig.Type;
 

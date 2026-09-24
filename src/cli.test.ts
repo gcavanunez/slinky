@@ -799,6 +799,19 @@ describe("remote catalog sync", () => {
     expect(readFileSync(live, "utf8")).toBe("# baseline drifting\n");
   }, 30_000);
 
+  test("sync keeps working once an unknown-origin vendor matches its baseline", () => {
+    const f = fixture();
+    addDriftingVendor(f);
+    initializeGitFixture(f.host, f.home);
+    attachRemote(f);
+    expect(runCli(f.host, f.home, ["sync"]).exitCode).toBe(0);
+
+    const again = runCli(f.host, f.home, ["sync"]);
+
+    if (again.exitCode !== 0) throw new Error(`${again.stderr.toString()}\n${again.stdout.toString()}`);
+    expect(again.stdout.toString()).toContain("all live vendor skills already match the catalog");
+  }, 30_000);
+
   test("sync removes a disabled vendor after restoring its drift", () => {
     const f = fixture();
     addDriftingVendor(f);
@@ -1049,6 +1062,167 @@ describe("remote catalog sync", () => {
     expect(existsSync(live)).toBe(false);
     expect(runGit(subscriber, ["rev-parse", "HEAD"]).stdout.toString()).toBe(runGit(publisher.host, ["rev-parse", "HEAD"]).stdout.toString());
   }, 30_000);
+});
+
+describe("fleet", () => {
+  const configAt = (home: string) => JSON.parse(readFileSync(join(home, ".config", "slinky", "config.json"), "utf8"));
+  const headOf = (repo: string) => runGit(repo, ["rev-parse", "HEAD"]).stdout.toString().trim();
+  const failed = (result: ReturnType<typeof runCli>) => `${result.stderr.toString()}\n${result.stdout.toString()}`;
+
+  function leaderWithFollower(label: string) {
+    const leader = fixture();
+    addDriftingVendor(leader);
+    initializeGitFixture(leader.host, leader.home);
+    const remote = attachRemote(leader);
+    const follower = join(leader.root, `${label}-follower`);
+    const followerHome = join(leader.root, `${label}-follower-home`);
+    expect(Bun.spawnSync(["git", "clone", "-q", remote, follower]).exitCode).toBe(0);
+    mkdirSync(followerHome, { recursive: true });
+    return { leader, follower, followerHome };
+  }
+
+  function publishNewSkill(leader: ReturnType<typeof fixture>, name: string): void {
+    mkdirSync(join(leader.host, "skills", name), { recursive: true });
+    writeFileSync(join(leader.host, "skills", name, "SKILL.md"), `# ${name}\n`);
+    const manifest = JSON.parse(readFileSync(join(leader.host, "skills.manifest.json"), "utf8"));
+    manifest.skills[name] = { origin: "local", path: `skills/${name}`, contentHash: "0".repeat(64) };
+    writeFileSync(join(leader.host, "skills.manifest.json"), `${JSON.stringify(manifest)}\n`);
+    expect(runCli(leader.host, leader.home, ["rehash", name]).exitCode).toBe(0);
+    expect(runCli(leader.host, leader.home, ["save"]).exitCode).toBe(0);
+    expect(runGit(leader.host, ["push"]).exitCode).toBe(0);
+  }
+
+  /** An `ssh` that runs the remote command locally and logs each destination it was asked to reach. */
+  function fakeSsh(root: string): string {
+    const bin = join(root, "bin-ssh");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(
+      join(bin, "ssh"),
+      `#!/bin/sh
+while [ "$1" = "-o" ]; do shift 2; done
+printf '%s\\n' "$1" >> "${join(root, "ssh-destinations")}"
+shift
+exec sh -c "$1"
+`,
+    );
+    chmodSync(join(bin, "ssh"), 0o755);
+    return bin;
+  }
+
+  const remoteSlinky = (repo: string, home: string) => `HOME='${home}' SLINKY_REPO='${repo}' '${process.execPath}' '${join(import.meta.dir, "cli.ts")}'`;
+
+  test("sync --follower pulls, reconciles, and restores vendor drift without saving", () => {
+    const { leader, follower, followerHome } = leaderWithFollower("pull");
+    const first = runCli(follower, followerHome, ["sync", "--follower"]);
+    if (first.exitCode !== 0) throw new Error(failed(first));
+    const live = join(followerHome, ".agents", "skills", "drifting", "SKILL.md");
+    writeFileSync(live, "# edited on the follower\n");
+    publishNewSkill(leader, "baz");
+
+    const synced = runCli(follower, followerHome, ["sync", "--follower"]);
+
+    if (synced.exitCode !== 0) throw new Error(failed(synced));
+    expect(synced.stdout.toString()).not.toContain("save");
+    expect(headOf(follower)).toBe(headOf(leader.host));
+    expect(lstatSync(join(followerHome, ".agents", "skills", "baz")).isSymbolicLink()).toBe(true);
+    expect(readFileSync(live, "utf8")).toBe("# baseline drifting\n");
+  }, 30_000);
+
+  test("sync --follower refuses local catalog edits rather than committing them", () => {
+    const { follower, followerHome } = leaderWithFollower("dirty");
+    const before = headOf(follower);
+    writeFileSync(join(follower, "skills", "foo", "SKILL.md"), "# foo edited on the follower\n");
+
+    const synced = runCli(follower, followerHome, ["sync", "--follower"]);
+
+    expect(synced.exitCode).toBe(1);
+    expect(synced.stderr.toString()).toContain("worktree must be clean");
+    expect(headOf(follower)).toBe(before);
+  }, 30_000);
+
+  test("sync --follower needs an upstream to pull from", () => {
+    const f = fixture();
+    initializeGitFixture(f.host, f.home);
+
+    const synced = runCli(f.host, f.home, ["sync", "--follower"]);
+
+    expect(synced.exitCode).toBe(1);
+    expect(synced.stderr.toString()).toContain("follower sync needs a Git skills host with a configured upstream");
+  });
+
+  test("registers, updates, lists, and removes followers in the machine config", () => {
+    const f = fixture();
+    expect(runCli(f.host, f.home, ["init", f.host]).exitCode).toBe(0);
+    expect(runCli(f.host, f.home, ["config", "editor", "code -w"]).exitCode).toBe(0);
+
+    expect(runCli(f.host, f.home, ["fleet", "add", "devbox", "me@devbox"]).exitCode).toBe(0);
+    expect(runCli(f.host, f.home, ["fleet", "add", "pi", "pi.local", "--command", "~/.bun/bin/slinky"]).exitCode).toBe(0);
+    const updated = runCli(f.host, f.home, ["fleet", "add", "devbox", "devbox.tail.ts.net"]);
+
+    expect(updated.stdout.toString()).toContain("updated follower");
+    expect(configAt(f.home).fleet).toEqual([
+      { name: "devbox", ssh: "devbox.tail.ts.net" },
+      { name: "pi", ssh: "pi.local", command: "~/.bun/bin/slinky" },
+    ]);
+    expect(configAt(f.home).editor).toBe("code -w");
+    expect(runCli(f.host, f.home, ["init", f.host]).exitCode).toBe(0);
+    expect(configAt(f.home).fleet).toHaveLength(2);
+    expect(runCli(f.host, f.home, ["fleet"]).stdout.toString()).toContain("devbox.tail.ts.net");
+
+    expect(runCli(f.host, f.home, ["fleet", "remove", "devbox"]).exitCode).toBe(0);
+    expect(runCli(f.host, f.home, ["fleet", "remove", "pi"]).exitCode).toBe(0);
+    expect(configAt(f.home)).not.toHaveProperty("fleet");
+    expect(runCli(f.host, f.home, ["fleet", "remove", "pi"]).exitCode).toBe(1);
+  });
+
+  test("rejects an ssh destination that ssh would read as an option", () => {
+    const f = fixture();
+    expect(runCli(f.host, f.home, ["init", f.host]).exitCode).toBe(0);
+
+    const result = runCli(f.host, f.home, ["fleet", "add", "evil", "-oProxyCommand=touch"]);
+
+    expect(result.exitCode).toBe(1);
+    expect(configAt(f.home)).not.toHaveProperty("fleet");
+  });
+
+  test("fleet sync saves and pushes the leader, then every follower pulls, and one failure does not stop the rest", () => {
+    const { leader, follower, followerHome } = leaderWithFollower("fan-out");
+    expect(runCli(leader.host, leader.home, ["init", leader.host]).exitCode).toBe(0);
+    expect(runCli(leader.host, leader.home, ["fleet", "add", "box", "box.local", "--command", remoteSlinky(follower, followerHome)]).exitCode).toBe(0);
+    expect(runCli(leader.host, leader.home, ["fleet", "add", "gone", "gone.local", "--command", "exit 255"]).exitCode).toBe(0);
+    writeFileSync(join(leader.host, "skills", "foo", "SKILL.md"), "# foo v2 from the leader\n");
+    const ssh = { PATH: `${fakeSsh(leader.root)}:${process.env.PATH ?? ""}` };
+
+    const preview = runCli(leader.host, leader.home, ["fleet", "sync", "--dry-run", "box"], ssh);
+
+    if (preview.exitCode !== 0) throw new Error(failed(preview));
+    expect(preview.stdout.toString()).toContain("sync --follower --dry-run");
+    expect(runGit(leader.host, ["status", "--porcelain"]).stdout.toString()).not.toBe("");
+
+    const synced = runCli(leader.host, leader.home, ["fleet", "sync"], ssh);
+
+    expect(synced.exitCode).toBe(1);
+    expect(synced.stderr.toString()).toContain("1 of 2 follower(s) failed: gone");
+    expect(synced.stdout.toString()).toContain("pushed catalog to origin/main");
+    expect(headOf(follower)).toBe(headOf(leader.host));
+    expect(readFileSync(join(followerHome, ".agents", "skills", "foo", "SKILL.md"), "utf8")).toBe("# foo v2 from the leader\n");
+    expect(readFileSync(join(leader.root, "ssh-destinations"), "utf8").trim().split("\n").sort()).toEqual(["box.local", "box.local", "gone.local"]);
+  }, 60_000);
+
+  test("fleet sync refuses an unknown follower before touching the leader", () => {
+    const f = fixture();
+    initializeGitFixture(f.host, f.home);
+    attachRemote(f);
+    expect(runCli(f.host, f.home, ["init", f.host]).exitCode).toBe(0);
+    expect(runCli(f.host, f.home, ["fleet", "add", "box", "box.local"]).exitCode).toBe(0);
+    writeFileSync(join(f.host, "skills", "foo", "SKILL.md"), "# unsaved\n");
+
+    const result = runCli(f.host, f.home, ["fleet", "sync", "nope"]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain("unknown follower(s): nope");
+    expect(runGit(f.host, ["status", "--porcelain"]).stdout.toString()).not.toBe("");
+  });
 });
 
 describe("diff pagers", () => {
