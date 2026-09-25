@@ -140,8 +140,10 @@ export interface PathsInterface {
   readonly saveEditor: (editor: string | null) => Effect.Effect<void, ConfigFileError>;
   /** Persist the TUI theme; null clears it. */
   readonly saveTheme: (theme: ThemeId | null) => Effect.Effect<void, ConfigFileError>;
-  /** Persist the fleet; an empty list removes it. */
-  readonly saveFleet: (fleet: ReadonlyArray<FleetMember>) => Effect.Effect<void, ConfigFileError>;
+  /** Followers as recorded in the config file right now, not the startup snapshot. */
+  readonly readFleet: () => Effect.Effect<ReadonlyArray<FleetMember>, ConfigFileError>;
+  /** Read, change, and write the fleet in one step; an empty result removes it. Returns the new fleet. */
+  readonly updateFleet: (change: (current: ReadonlyArray<FleetMember>) => ReadonlyArray<FleetMember>) => Effect.Effect<ReadonlyArray<FleetMember>, ConfigFileError>;
 }
 
 export class Paths extends Context.Service<Paths, PathsInterface>()("slinky/Paths") {
@@ -196,8 +198,19 @@ export class Paths extends Context.Service<Paths, PathsInterface>()("slinky/Path
         yield* changeConfig((current) => ({ ...current, theme: theme ?? undefined }));
       });
 
-      const saveFleet = Effect.fn("Paths.saveFleet")(function* (fleet: ReadonlyArray<FleetMember>) {
-        yield* changeConfig((current) => ({ ...current, fleet }));
+      const readFleet = Effect.fn("Paths.readFleet")(function* () {
+        const current = readConfigFile(slinkyConfig);
+        if (current.error) return yield* Effect.fail(current.error);
+        return current.config?.fleet ?? [];
+      });
+
+      const updateFleet = Effect.fn("Paths.updateFleet")(function* (change: (current: ReadonlyArray<FleetMember>) => ReadonlyArray<FleetMember>) {
+        let fleet: ReadonlyArray<FleetMember> = [];
+        yield* changeConfig((current) => {
+          fleet = change(current.fleet ?? []);
+          return { ...current, fleet };
+        });
+        return fleet;
       });
 
       return Paths.of({
@@ -224,7 +237,8 @@ export class Paths extends Context.Service<Paths, PathsInterface>()("slinky/Path
         saveDiffPager,
         saveEditor,
         saveTheme,
-        saveFleet,
+        readFleet,
+        updateFleet,
       });
     }),
   );

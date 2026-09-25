@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { existsSync } from "node:fs";
 import { basename, extname, join } from "node:path";
-import { Match } from "effect";
+import { Effect, Match } from "effect";
 import { useKeyboard, usePaste, useRenderer, useSelectionHandler, useTerminalDimensions } from "@opentui/react";
 import { TextAttributes } from "@opentui/core";
 import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core";
@@ -22,11 +22,13 @@ import type { ActionResult } from "../lib/catalog-actions.ts";
 import { isClean, pagePatch, unifiedInstalledDiff } from "../lib/diff.ts";
 import type { DiffPager } from "../lib/diff.ts";
 import { defaultThemeId, getActiveProfile, getProfile, getProfileOverrides, isSkillEnabled, themeIds } from "../domain/model.ts";
-import type { ThemeId } from "../domain/model.ts";
+import type { FleetMember, ThemeId } from "../domain/model.ts";
 import { addSkillFromSource, parseSkillsAddSource } from "../lib/skills-add.ts";
 import { adoptForeignSkill } from "../lib/foreign-adoption.ts";
 import { defaultForkName, forkSkill } from "../lib/fork.ts";
 import { syncCatalog } from "../lib/convergence.ts";
+import { checkFollower, removeFollower, saveFollower, syncFleet } from "../lib/fleet.ts";
+import { Paths } from "../lib/paths.ts";
 import type { ConvergenceEvent } from "../lib/convergence.ts";
 import { compareWithUpstream, tryGitAsync } from "../lib/git.ts";
 import type { UpstreamComparison } from "../lib/git.ts";
@@ -70,6 +72,8 @@ import { ForkSkillModal } from "./modals/fork-skill-modal.tsx";
 import { HelpModal, helpLength, helpRows } from "./modals/help-modal.tsx";
 import { IndexSkillModal } from "./modals/index-skill-modal.tsx";
 import { LinkModal } from "./modals/link-modal.tsx";
+import { FleetModal, FollowerFormModal, FollowerRemoveModal } from "./modals/fleet-modal.tsx";
+import type { FollowerCheck, FollowerFormFields } from "./modals/fleet-modal.tsx";
 import { ProfileDeleteModal, ProfileMembersModal, ProfileNameModal } from "./modals/profile-edit-modals.tsx";
 import { ProfilesModal } from "./modals/profiles-modal.tsx";
 import { ProjectSkillModal } from "./modals/project-skill-modal.tsx";
@@ -170,7 +174,10 @@ type Interaction =
   | { kind: "index"; skill: UnindexedSkill; flow: IndexFlow }
   | { kind: "adopt"; skill: ForeignSkill; flow: AdoptFlow }
   | { kind: "fork"; row: CatalogRow; flow: ForkFlow }
-  | { kind: "sync"; flow: SyncFlow };
+  | { kind: "sync"; flow: SyncFlow }
+  | { kind: "fleet"; members: ReadonlyArray<FleetMember>; index: number; checks: Readonly<Record<string, FollowerCheck>> }
+  | { kind: "follower-form"; previous: string | null; fields: FollowerFormFields; field: number; returnIndex: number; error?: string }
+  | { kind: "follower-remove"; name: string; returnIndex: number; error?: string };
 
 /** What we know about the store's tracking branch; "checking" until the background fetch answers. */
 type StoreStatus = { kind: "checking" } | { kind: "failed"; message: string } | UpstreamComparison;
@@ -224,6 +231,9 @@ function keymapStateFor(interaction: Interaction, textInputActive: boolean): App
     case "profile-name":
     case "profile-delete":
     case "profile-members":
+    case "fleet":
+    case "follower-form":
+    case "follower-remove":
       return inactive;
     default:
       return assertNever(interaction);
@@ -303,6 +313,8 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
   const indexTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const forkInput = useRef("");
   const profileNameInput = useRef("");
+  const followerForm = useRef<FollowerFormFields>({ name: "", ssh: "", command: "" });
+  const followerField = useRef(0);
   const syncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const storeGeneration = useRef(0);
   const storeAbort = useRef<AbortController | null>(null);
@@ -1035,25 +1047,162 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
     } else previewScroll.current?.scrollTo(last ? previewScroll.current.scrollHeight : 0);
   };
 
+  const readFleetNow = () =>
+    runSyncResult(
+      Effect.gen(function* () {
+        const paths = yield* Paths;
+        return yield* paths.readFleet();
+      }),
+    );
+
+  // On a leader (a machine with followers registered) S syncs the whole fleet.
   const runStoreSync = () => {
+    const fleetRead = readFleetNow();
+    const fleet = fleetRead.ok && fleetRead.value.length > 0;
     const events: ConvergenceEvent[] = [];
-    setInteraction({ kind: "sync", flow: { events: [], running: true, scroll: null } });
+    setInteraction({ kind: "sync", flow: { events: [], running: true, scroll: null, fleet } });
+    const finish = (outcome: RunResult<unknown>) => {
+      if (!mounted.current) return;
+      setInteraction({ kind: "sync", flow: { events: [...events], running: false, error: outcome.ok ? undefined : outcome.message, scroll: null, fleet } });
+      refresh();
+      checkStore();
+    };
     // Let the modal paint before git and the reconcile block the loop.
     syncTimer.current = setTimeout(() => {
       syncTimer.current = null;
       if (!mounted.current) return;
-      const outcome = runSyncResult(
-        syncCatalog({
+      if (!fleet) {
+        finish(runSyncResult(syncCatalog({ onEvent: (event) => void events.push(event) })));
+        return;
+      }
+      // Followers answer over ssh one by one; show each as it lands.
+      const publish = () => {
+        if (mounted.current) setInteraction((previous) => (previous.kind === "sync" ? { ...previous, flow: { ...previous.flow, events: [...events] } } : previous));
+      };
+      void runPromiseResult(
+        syncFleet({
           onEvent: (event) => {
             events.push(event);
+            publish();
           },
         }),
-      );
-      if (!mounted.current) return;
-      setInteraction({ kind: "sync", flow: { events: [...events], running: false, error: outcome.ok ? undefined : outcome.message, scroll: null } });
-      refresh();
-      checkStore();
+      ).then(finish);
     }, 0);
+  };
+
+  // ---- fleet: followers this machine leads ---------------------------------
+
+  const openFleet = (index = 0, checks: Readonly<Record<string, FollowerCheck>> = {}) => {
+    const fleetRead = readFleetNow();
+    if (!fleetRead.ok) {
+      notify(fleetRead.message, true);
+      setInteraction({ kind: "browse" });
+      return;
+    }
+    const members = fleetRead.value;
+    setInteraction({ kind: "fleet", members, index: clamp(index, 0, Math.max(0, members.length - 1)), checks });
+  };
+
+  const checkFleet = (members: ReadonlyArray<FleetMember>) => {
+    const setCheck = (name: string, check: FollowerCheck) => {
+      if (mounted.current) setInteraction((previous) => (previous.kind === "fleet" ? { ...previous, checks: { ...previous.checks, [name]: check } } : previous));
+    };
+    for (const member of members) {
+      setCheck(member.name, { kind: "checking" });
+      void runPromiseResult(checkFollower(member)).then((outcome) => {
+        if (!outcome.ok) setCheck(member.name, { kind: "failed", detail: outcome.message });
+        else if (outcome.value.status === 0)
+          setCheck(member.name, {
+            kind: "ok",
+            version:
+              outcome.value.output
+                .trim()
+                .split("\n")
+                .at(-1)
+                ?.replace(/^slinky\s+/, "") ?? "",
+          });
+        else setCheck(member.name, { kind: "failed", detail: outcome.value.output.trim() || `ssh exited with ${outcome.value.status ?? "no status"}` });
+      });
+    }
+  };
+
+  const handleFleet = (key: KeyEvent): boolean => {
+    if (interaction.kind !== "fleet") return true;
+    const { members, index } = interaction;
+    const selected = members[index];
+    if (key.name === "escape" || key.name === "q") setInteraction({ kind: "browse" });
+    else if (key.name === "down" || key.name === "j") setInteraction({ ...interaction, index: clamp(index + 1, 0, Math.max(0, members.length - 1)) });
+    else if (key.name === "up" || key.name === "k") setInteraction({ ...interaction, index: clamp(index - 1, 0, Math.max(0, members.length - 1)) });
+    else if (key.name === "n") {
+      followerForm.current = { name: "", ssh: "", command: "" };
+      followerField.current = 0;
+      setInteraction({ kind: "follower-form", previous: null, fields: followerForm.current, field: 0, returnIndex: index });
+    } else if (key.name === "e" && selected) {
+      followerForm.current = { name: selected.name, ssh: selected.ssh, command: selected.command ?? "" };
+      followerField.current = 0;
+      setInteraction({ kind: "follower-form", previous: selected.name, fields: followerForm.current, field: 0, returnIndex: index });
+    } else if (key.name === "d" && selected) setInteraction({ kind: "follower-remove", name: selected.name, returnIndex: index });
+    else if (key.name === "c" && members.length > 0) checkFleet(members);
+    return true;
+  };
+
+  const followerFieldKeys = ["name", "ssh", "command"] as const;
+
+  // Keys can arrive faster than React re-renders, so the form lives in refs
+  // updated eagerly here, and the rendered interaction mirrors them.
+  const typeFollowerField = (next: (value: string) => string) => {
+    const key = followerFieldKeys[followerField.current] ?? "name";
+    followerForm.current = { ...followerForm.current, [key]: next(followerForm.current[key]) };
+    const fields = followerForm.current;
+    setInteraction((previous) => (previous.kind === "follower-form" ? { ...previous, fields, error: undefined } : previous));
+  };
+
+  const handleFollowerForm = (key: KeyEvent): boolean => {
+    if (interaction.kind !== "follower-form") return true;
+    const { previous, field, returnIndex } = interaction;
+    if (key.name === "escape") {
+      openFleet(returnIndex);
+      return true;
+    }
+    if (key.name === "tab" || key.name === "down" || key.name === "up") {
+      const step = key.name === "up" || (key.name === "tab" && key.shift) ? -1 : 1;
+      followerField.current = (field + step + followerFieldKeys.length) % followerFieldKeys.length;
+      setInteraction({ ...interaction, field: followerField.current });
+      return true;
+    }
+    if (key.name === "backspace") {
+      typeFollowerField((value) => value.slice(0, -1));
+      return true;
+    }
+    if (key.name === "return" || key.name === "enter") {
+      const outcome = runSyncResult(saveFollower(followerForm.current, previous ?? undefined));
+      if (!outcome.ok) {
+        setInteraction({ ...interaction, error: outcome.message });
+        return true;
+      }
+      const { member, fleet, replaced } = outcome.value;
+      notify(`${replaced ? "updated" : "added"} follower ${member.name} -> ${member.ssh}`);
+      openFleet(fleet.findIndex((candidate) => candidate.name === member.name));
+      return true;
+    }
+    const value = printable(key);
+    if (value) typeFollowerField((current) => current + value);
+    return true;
+  };
+
+  const handleFollowerRemove = (key: KeyEvent): boolean => {
+    if (interaction.kind !== "follower-remove") return true;
+    const { name, returnIndex } = interaction;
+    if (key.name === "escape" || key.name === "n") openFleet(returnIndex);
+    else if (key.name === "y") {
+      const outcome = runSyncResult(removeFollower(name));
+      if (!outcome.ok) setInteraction({ ...interaction, error: outcome.message });
+      else {
+        notify(`removed follower ${name}`);
+        openFleet(returnIndex);
+      }
+    }
+    return true;
   };
 
   const runAppCommand = (command: AppCommand, key: KeyEvent): void => {
@@ -1352,6 +1501,9 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
       case "store.sync":
         runStoreSync();
         return;
+      case "fleet.open":
+        openFleet();
+        return;
       case "log.down":
       case "log.up":
       case "log.page-down":
@@ -1451,7 +1603,13 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
   };
 
   const textInputActive =
-    filterMode || docFind.typing || interaction.kind === "link" || interaction.kind === "index" || interaction.kind === "fork" || interaction.kind === "profile-name";
+    filterMode ||
+    docFind.typing ||
+    interaction.kind === "link" ||
+    interaction.kind === "index" ||
+    interaction.kind === "fork" ||
+    interaction.kind === "profile-name" ||
+    interaction.kind === "follower-form";
   useAppKeybindings(keymapStateFor(interaction, textInputActive), runAppCommand);
 
   useKeyboard((key) => {
@@ -1464,9 +1622,19 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
     else if (interaction.kind === "profile-name") handleProfileName(key);
     else if (interaction.kind === "profile-delete") handleProfileDelete(key);
     else if (interaction.kind === "profile-members") handleProfileMembers(key);
+    else if (interaction.kind === "fleet") handleFleet(key);
+    else if (interaction.kind === "follower-form") handleFollowerForm(key);
+    else if (interaction.kind === "follower-remove") handleFollowerRemove(key);
   });
 
   usePaste((event) => {
+    if (interaction.kind === "follower-form") {
+      event.preventDefault();
+      event.stopPropagation();
+      const pasted = singleLinePaste(event.bytes);
+      if (pasted) typeFollowerField((value) => value + pasted);
+      return;
+    }
     if (interaction.kind === "profile-name") {
       event.preventDefault();
       event.stopPropagation();
@@ -1784,6 +1952,21 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
         }
       case "profiles":
         return <ProfilesModal cols={cols} rows={rowsAvail} catalog={catalog} names={profileNames} index={interaction.index} />;
+      case "fleet":
+        return <FleetModal cols={cols} rows={rowsAvail} members={interaction.members} index={interaction.index} checks={interaction.checks} />;
+      case "follower-form":
+        return (
+          <FollowerFormModal
+            cols={cols}
+            rows={rowsAvail}
+            previous={interaction.previous}
+            fields={interaction.fields}
+            field={interaction.field}
+            {...(interaction.error === undefined ? {} : { error: interaction.error })}
+          />
+        );
+      case "follower-remove":
+        return <FollowerRemoveModal cols={cols} rows={rowsAvail} name={interaction.name} {...(interaction.error === undefined ? {} : { error: interaction.error })} />;
       case "profile-name":
         return <ProfileNameModal cols={cols} rows={rowsAvail} mode={interaction.mode} from={interaction.from} flow={interaction.flow} seedCount={enabledHere().length} />;
       case "profile-delete":

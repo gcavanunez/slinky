@@ -76,7 +76,8 @@ One catalog tree on the left, the selected skill's documentation on the right.
 | `e` `a` `L` `p` | edit, index/adopt a skill, link into a project, manage profiles                       |
 | `1` `2` `3`     | available here, all skills, skills waiting to be adopted                              |
 | `F`             | fork a vendor skill into `skills/` as your own copy                                   |
-| `S`             | run `slinky sync`; the tab row shows `⇣ N to pull` when the store has commits waiting |
+| `S`             | run `slinky sync` (on a leader, the whole fleet); the tab row shows `⇣ N to pull`     |
+| `m`             | the fleet: add, edit, remove, and check the followers this machine leads              |
 | `t`             | pick a theme (27 available, previewed live)                                           |
 | `x` `v` `<` `>` | zoom, cycle layouts, resize                                                           |
 | `?`             | everything else                                                                       |

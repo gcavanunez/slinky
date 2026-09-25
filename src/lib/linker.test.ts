@@ -31,7 +31,8 @@ const pathsLayer = (home: string) =>
       saveDiffPager: () => Effect.void,
       saveEditor: () => Effect.void,
       saveTheme: () => Effect.void,
-      saveFleet: () => Effect.void,
+      readFleet: () => Effect.succeed([]),
+      updateFleet: () => Effect.succeed([]),
     }),
   );
 

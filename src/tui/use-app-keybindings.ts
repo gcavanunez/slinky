@@ -65,6 +65,7 @@ export type AppCommand =
   | "profiles.open"
   | "theme.open"
   | "store.sync"
+  | "fleet.open"
   | "log.down"
   | "log.up"
   | "log.page-down"
@@ -144,7 +145,8 @@ const listCommands: ReadonlyArray<CommandDefinition> = [
   { name: "upstream.check", title: "Check upstream", keys: ["u"] },
   { name: "profiles.open", title: "Open profiles", keys: ["p"] },
   { name: "theme.open", title: "Open theme picker", keys: ["t"] },
-  { name: "store.sync", title: "Sync the catalog store", keys: ["shift+s"] },
+  { name: "store.sync", title: "Sync the catalog store (the whole fleet on a leader)", keys: ["shift+s"] },
+  { name: "fleet.open", title: "Open the fleet: followers this machine leads", keys: ["m"] },
   { name: "selection.open", title: "Open selection", keys: ["return", "enter"] },
   { name: "selection.toggle", title: "Toggle selection", keys: ["space"] },
   { name: "skill.details", title: "Show skill details", keys: ["i"] },

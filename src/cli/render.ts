@@ -22,6 +22,12 @@ export function renderConvergenceEvent(event: ConvergenceEvent): void {
     if (output) console.log(output);
     return;
   }
+  if (event.type === "follower") {
+    const label = event.status === 0 ? c.green("ok") : c.red(event.status === null ? "failed (ssh did not run)" : `failed (exit ${event.status})`);
+    console.log(`\n${c.bold(event.name)}  ${label}  ${c.dim(event.target)}`);
+    for (const line of event.output.trimEnd().split("\n")) if (line) console.log(`  ${line}`);
+    return;
+  }
   const rendered = Match.value(event.tone).pipe(
     Match.when("dim", () => c.dim(event.message)),
     Match.when("error", () => c.red(event.message)),

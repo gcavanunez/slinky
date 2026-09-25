@@ -629,3 +629,115 @@ test("launch reports unpulled store commits and S syncs them down", async () => 
     destroy(setup);
   }
 });
+
+/** A leader config plus an `ssh` that runs the remote command locally, for the fleet tests. */
+function fleetHarness(fleet: ReadonlyArray<{ name: string; ssh: string; command?: string }>) {
+  const configPath = join(home, ".config", "slinky", "config.json");
+  mkdirSync(join(home, ".config", "slinky"), { recursive: true });
+  const config = fleet.length > 0 ? { version: 1, host, fleet } : { version: 1, host };
+  writeFileSync(configPath, `${JSON.stringify(config)}\n`);
+  const bin = join(root, "bin-ssh");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, "ssh"), `#!/bin/sh\nwhile [ "$1" = "-o" ]; do shift 2; done\nshift\nexec sh -c "$1"\n`, { mode: 0o755 });
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${bin}:${originalPath ?? ""}`;
+  return {
+    config: () => JSON.parse(readFileSync(configPath, "utf8")),
+    restore: () => {
+      process.env.PATH = originalPath;
+      rmSync(configPath, { force: true });
+    },
+  };
+}
+
+test("m registers, checks, edits, and removes followers", async () => {
+  const harness = fleetHarness([]);
+  const setup = await mount();
+  const press = async (key: string) => {
+    await input(async () => {
+      setup.mockInput.pressKey(key);
+      await Bun.sleep(30);
+    });
+  };
+  const type = async (text: string) => {
+    await input(async () => {
+      await setup.mockInput.typeText(text);
+      await Bun.sleep(30);
+    });
+  };
+  try {
+    await press("m");
+    await setup.waitForFrame((value) => value.includes("no followers yet"));
+
+    await press("n");
+    await setup.waitForFrame((value) => value.includes("Add follower"));
+    await type("box");
+    await input(async () => {
+      setup.mockInput.pressTab();
+      await Bun.sleep(30);
+    });
+    await type("box.local");
+    await input(async () => {
+      setup.mockInput.pressTab();
+      await Bun.sleep(30);
+    });
+    await type("echo slinky 1.2.3 #");
+    await input(async () => {
+      setup.mockInput.pressEnter();
+      await Bun.sleep(30);
+    });
+    expect(await setup.waitForFrame((value) => value.includes("Fleet") && value.includes("box.local"))).toContain("added follower box");
+    expect(harness.config().fleet).toEqual([{ name: "box", ssh: "box.local", command: "echo slinky 1.2.3 #" }]);
+
+    await press("c");
+    const deadline = Date.now() + 4_000;
+    while (!setup.captureCharFrame().includes("ok 1.2.3")) {
+      if (Date.now() > deadline) throw new Error(`check never finished:\n${setup.captureCharFrame()}`);
+      await act(() => Bun.sleep(50));
+    }
+
+    await press("e");
+    await setup.waitForFrame((value) => value.includes("Edit box"));
+    await input(async () => {
+      setup.mockInput.pressTab();
+      await Bun.sleep(30);
+    });
+    await type("x");
+    await input(async () => {
+      setup.mockInput.pressEnter();
+      await Bun.sleep(30);
+    });
+    await setup.waitForFrame((value) => value.includes("box.localx"));
+    expect(harness.config().fleet).toEqual([{ name: "box", ssh: "box.localx", command: "echo slinky 1.2.3 #" }]);
+
+    await press("d");
+    await setup.waitForFrame((value) => value.includes("Remove box?"));
+    await press("y");
+    await setup.waitForFrame((value) => value.includes("no followers yet"));
+    expect(harness.config()).not.toHaveProperty("fleet");
+  } finally {
+    destroy(setup);
+    harness.restore();
+  }
+});
+
+test("on a leader, S syncs this machine and then every follower", async () => {
+  const harness = fleetHarness([{ name: "box", ssh: "box.local", command: "echo follower-reached #" }]);
+  const setup = await mount();
+  try {
+    await input(() => setup.mockInput.pressKey("S"));
+    const deadline = Date.now() + 4_000;
+    while (!/Fleet sync.*(done|failed)/.test(setup.captureCharFrame())) {
+      if (Date.now() > deadline) throw new Error(`fleet sync never finished:\n${setup.captureCharFrame()}`);
+      await act(() => Bun.sleep(50));
+    }
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("done");
+    expect(frame).toContain("box  ok  box.local");
+    expect(frame).toContain("follower-reached");
+    expect(frame).toContain("1 follower(s) synced");
+  } finally {
+    destroy(setup);
+    harness.restore();
+  }
+});

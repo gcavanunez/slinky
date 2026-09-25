@@ -11,6 +11,8 @@ export interface SyncFlow {
   readonly error?: string;
   /** First visible line; null follows the tail as output arrives. */
   readonly scroll: number | null;
+  /** A leader's sync: this machine, then every follower over ssh. */
+  readonly fleet?: boolean;
 }
 
 const WIDTH = 86;
@@ -32,6 +34,19 @@ function eventLines(event: ConvergenceEvent): Array<{ text: string; fg: string; 
     case "git-output": {
       const output = `${event.stdout}${event.stderr}`.trim();
       return output ? output.split("\n").map((text) => ({ text, fg: colors.muted })) : [];
+    }
+    case "follower": {
+      const ok = event.status === 0;
+      const label = ok ? "ok" : event.status === null ? "failed (ssh did not run)" : `failed (exit ${event.status})`;
+      return [
+        { text: "", fg: colors.text },
+        { text: `${event.name}  ${label}  ${event.target}`, fg: ok ? colors.green : colors.error, bold: true },
+        ...event.output
+          .trimEnd()
+          .split("\n")
+          .filter(Boolean)
+          .map((text) => ({ text: `  ${text}`, fg: colors.muted })),
+      ];
     }
     case "message": {
       const fg =
@@ -62,9 +77,13 @@ export function SyncModal({ cols, rows, flow }: { cols: number; rows: number; fl
   const position = lines.length > maxRows ? ` · ${start + 1}-${start + visible.length}/${lines.length}` : "";
   return (
     <Modal
-      title="Sync"
+      title={flow.fleet ? "Fleet sync" : "Sync"}
       headerRight={`${status}${position}`}
-      subtitle={<TextLine fg={colors.muted}>{"Save, pull, reconcile, and restore live vendor drift"}</TextLine>}
+      subtitle={
+        <TextLine fg={colors.muted}>
+          {flow.fleet ? "Sync and push this machine, then every follower pulls and restores" : "Save, pull, reconcile, and restore live vendor drift"}
+        </TextLine>
+      }
       width={WIDTH}
       cols={cols}
       rows={rows}

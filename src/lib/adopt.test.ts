@@ -331,7 +331,8 @@ describe("adoptSkills transaction", () => {
           saveDiffPager: () => Effect.void,
           saveEditor: () => Effect.void,
           saveTheme: () => Effect.void,
-          saveFleet: () => Effect.void,
+          readFleet: () => Effect.succeed([]),
+          updateFleet: () => Effect.succeed([]),
         }),
       );
       const storeLayer = ManifestStore.layer.pipe(Layer.provide(hostLayer));
@@ -395,7 +396,8 @@ describe("adoptSkills transaction", () => {
         saveDiffPager: () => Effect.void,
         saveEditor: () => Effect.void,
         saveTheme: () => Effect.void,
-        saveFleet: () => Effect.void,
+        readFleet: () => Effect.succeed([]),
+        updateFleet: () => Effect.succeed([]),
       }),
     );
     const storeLayer = ManifestStore.layer.pipe(Layer.provide(hostLayer));
@@ -465,7 +467,8 @@ describe("adoptSkills transaction", () => {
         saveDiffPager: () => Effect.void,
         saveEditor: () => Effect.void,
         saveTheme: () => Effect.void,
-        saveFleet: () => Effect.void,
+        readFleet: () => Effect.succeed([]),
+        updateFleet: () => Effect.succeed([]),
       }),
     );
     const githubLayer = Layer.succeed(GitHub, GitHub.of({ contentsShas: () => Effect.succeed(new Map()) }));

@@ -117,7 +117,8 @@ Status columns are `on` (enabled), `live` (global store state), `project` (place
 - `a` on an unindexed skill indexes it: enter the source (`kitlangton/skills`) or paste its add command. Slinky verifies that the installed content matches the unindexed copy before indexing it in place or moving it to the inferred vendor path.
 - `L` links the skill into a project (copy or symlink). `p` opens the profiles: `enter` follows one, `n` creates one from what is enabled here, `e` edits its skills in a checklist, `r` renames, and `d` deletes. `u` checks vendor skills upstream.
 - `F` on a vendor skill forks it into `skills/` as your own local copy (see [Forking a vendor skill](#forking-a-vendor-skill)); the prompt is prefilled with `my-<name>`.
-- `S` runs `slinky sync` in a modal showing its output. On launch the TUI fetches the store's tracking branch in the background; when commits are waiting, the tab row shows `⇣ N to pull · S sync`.
+- `S` runs `slinky sync` in a modal showing its output. On a leader (a machine with followers registered) it runs `slinky fleet sync` instead, listing each follower's result as it arrives.
+- `m` opens the fleet: `n` registers a follower (name, ssh target, and optional remote command), `e` edits one, `d` removes one, and `c` checks that every follower is reachable and reports its slinky version. On launch the TUI fetches the store's tracking branch in the background; when commits are waiting, the tab row shows `⇣ N to pull · S sync`.
 - `t` picks a colour theme: moving through the list previews it live, `enter` records it in `~/.config/slinky/config.json`, `esc` restores the saved one.
 - Dragging across text copies it. `Ctrl-C` copies an active selection and otherwise quits. Clipboard writes use terminal OSC52 plus native platform utilities when available.
 - `?` lists every binding.
@@ -149,7 +150,7 @@ Pulling preserves machine-local state: disabled skills, recent projects, project
 
 ### Fleet
 
-A fleet has one leader: the machine that can push to the catalog upstream and reach the others over ssh. The followers only need to fetch from that upstream. The fleet is recorded in the leader's `~/.config/slinky/config.json`, so it never lands in the shared catalog.
+A fleet has one leader: the machine that can push to the catalog upstream and reach the others over ssh. The followers only need to fetch from that upstream. The fleet is recorded in the leader's `~/.config/slinky/config.json`, so it never lands in the shared catalog. In the TUI, `m` manages the followers and `S` on the leader runs the fleet sync.
 
 ```bash
 slinky fleet add devbox me@devbox.tail1234.ts.net

@@ -46,9 +46,11 @@ import { findDriftingVendors, vendorRestore } from "./vendor-ops.ts";
 export type ConvergenceTone = "dim" | "error" | "success" | "warning";
 
 export type ConvergenceEvent =
-  | { readonly type: "section"; readonly title: "save" | "pull" | "reconcile" | "restore" | "finalize" | "publish"; readonly leadingBlank: boolean }
+  | { readonly type: "section"; readonly title: "save" | "pull" | "reconcile" | "restore" | "finalize" | "publish" | "followers"; readonly leadingBlank: boolean }
   | { readonly type: "message"; readonly message: string; readonly tone?: ConvergenceTone }
-  | { readonly type: "git-output"; readonly stdout: string; readonly stderr: string };
+  | { readonly type: "git-output"; readonly stdout: string; readonly stderr: string }
+  /** One follower finished its step of a fleet sync; status is null when ssh never ran. */
+  | { readonly type: "follower"; readonly name: string; readonly target: string; readonly status: number | null; readonly output: string };
 
 export type ConvergenceEventSink = (event: ConvergenceEvent) => void;
 
