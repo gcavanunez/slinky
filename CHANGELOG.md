@@ -1,5 +1,17 @@
 # @gcavanunez/slinky
 
+## 0.4.0
+
+### Minor Changes
+
+- 0bc9df2: Add `slinky fleet` so one leader machine can keep the others current: `fleet add <name> <ssh-target>` records a follower in the leader's config, and `fleet sync` syncs and pushes the leader, then runs the new `sync --follower` (pull, reconcile, restore; never save) on every follower over ssh in parallel.
+
+  Fix `pull` and `sync` failing with "no deterministic update provenance" once a vendor skill of unknown origin matched its catalog baseline.
+
+- 737e225: Add host-local OpenCode V2 invocation preferences through `slinky autoinvoke` and the TUI's `A` key. Render invocation metadata into global installations, translate portable manual-only flags, and keep generated additions out of source hashes, vendor diffs, and accepted upstream updates.
+- 761c540: Make profiles the shared on/off state for a fleet. Enabling or disabling a skill while following a profile now records a change for this machine only instead of dropping the profile, so the machine keeps picking up profile edits on sync. `slinky profile add` and `profile remove` edit a profile in the manifest (creating it if needed), `profile promote` moves this machine's changes into its profile, `profile create`, `rename`, and `delete` complete the set, and `status`, `profile list`, and the TUI show what the machine follows. The TUI profiles modal (`p`) now creates, edits (as a skill checklist), renames, and deletes profiles too.
+- 55fdc38: Drive the fleet from the TUI. On a leader, `S` now runs the fleet sync (this machine, then every follower, each reported as it finishes), and `m` opens the fleet to add, edit, remove, and connection-check followers. Open modals also dim the view behind them.
+
 ## 0.3.0
 
 ### Minor Changes
