@@ -55,7 +55,7 @@ function helpGroups(editor: string): Array<{ title: string; lines: Array<[string
         ["L", "link skill into a project (copy or symlink)"],
         ["F", "fork a vendor skill into skills/ as your own local copy"],
         ["d", "diff live global copy vs repo baseline"],
-        ["p", "profile picker (exact-set apply)"],
+        ["p", "profiles: enter follow, n new, e edit skills, r rename, d delete"],
         ["r", "reload catalog"],
         ["drag / ctrl-c", "copy selected text to clipboard"],
         ["q / ctrl-c", "quit (ctrl-c only without a text selection)"],

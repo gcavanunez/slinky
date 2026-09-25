@@ -7,11 +7,21 @@ import { Match } from "effect";
 import { useKeyboard, usePaste, useRenderer, useSelectionHandler, useTerminalDimensions } from "@opentui/react";
 import { TextAttributes } from "@opentui/core";
 import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core";
-import { acceptVendorDrift, applyProfile, linkProjectSkill, restoreVendorDrift, setSkillsEnabled, setAutoinvoke } from "../lib/catalog-actions.ts";
+import {
+  acceptVendorDrift,
+  applyProfile,
+  deleteProfile,
+  linkProjectSkill,
+  renameProfileAction,
+  restoreVendorDrift,
+  setAutoinvoke,
+  setProfileMembers,
+  setSkillsEnabled,
+} from "../lib/catalog-actions.ts";
 import type { ActionResult } from "../lib/catalog-actions.ts";
 import { isClean, pagePatch, unifiedInstalledDiff } from "../lib/diff.ts";
 import type { DiffPager } from "../lib/diff.ts";
-import { defaultThemeId, getActiveProfile, getProfileOverrides, themeIds } from "../domain/model.ts";
+import { defaultThemeId, getActiveProfile, getProfile, getProfileOverrides, isSkillEnabled, themeIds } from "../domain/model.ts";
 import type { ThemeId } from "../domain/model.ts";
 import { addSkillFromSource, parseSkillsAddSource } from "../lib/skills-add.ts";
 import { adoptForeignSkill } from "../lib/foreign-adoption.ts";
@@ -60,6 +70,7 @@ import { ForkSkillModal } from "./modals/fork-skill-modal.tsx";
 import { HelpModal, helpLength, helpRows } from "./modals/help-modal.tsx";
 import { IndexSkillModal } from "./modals/index-skill-modal.tsx";
 import { LinkModal } from "./modals/link-modal.tsx";
+import { ProfileDeleteModal, ProfileMembersModal, ProfileNameModal } from "./modals/profile-edit-modals.tsx";
 import { ProfilesModal } from "./modals/profiles-modal.tsx";
 import { ProjectSkillModal } from "./modals/project-skill-modal.tsx";
 import { SyncModal, syncLogLength, syncLogRows } from "./modals/sync-modal.tsx";
@@ -134,6 +145,11 @@ export interface ForkFlow {
   error?: string;
 }
 
+export interface ProfileNameFlow {
+  input: string;
+  error?: string;
+}
+
 export interface AdoptFlow {
   origin: "vendor" | "local";
   running: boolean;
@@ -145,6 +161,9 @@ type Interaction =
   | { kind: "help"; scroll: number }
   | { kind: "detail"; item: SkillItem }
   | { kind: "profiles"; index: number }
+  | { kind: "profile-name"; mode: "create" | "rename"; from: string | null; returnIndex: number; flow: ProfileNameFlow }
+  | { kind: "profile-delete"; name: string; returnIndex: number; error?: string }
+  | { kind: "profile-members"; name: string; members: ReadonlyArray<string>; index: number; returnIndex: number; error?: string }
   | { kind: "theme"; index: number; saved: ThemeId }
   | { kind: "diff"; row: CatalogRow; result: DiffResult }
   | { kind: "link"; row: CatalogRow; flow: LinkFlow }
@@ -170,7 +189,16 @@ function assertNever(value: never): never {
 }
 
 function keymapStateFor(interaction: Interaction, textInputActive: boolean): AppKeymapState {
-  const inactive = { listActive: false, overlayActive: false, diffActive: false, profilesActive: false, helpActive: false, logActive: false, textInputActive };
+  const inactive = {
+    listActive: false,
+    overlayActive: false,
+    diffActive: false,
+    profilesActive: false,
+    profileManageActive: false,
+    helpActive: false,
+    logActive: false,
+    textInputActive,
+  };
   switch (interaction.kind) {
     case "browse":
       return { ...inactive, listActive: !textInputActive };
@@ -179,6 +207,7 @@ function keymapStateFor(interaction: Interaction, textInputActive: boolean): App
     case "detail":
       return { ...inactive, overlayActive: true };
     case "profiles":
+      return { ...inactive, overlayActive: true, profilesActive: true, profileManageActive: true };
     case "theme":
       return { ...inactive, overlayActive: true, profilesActive: true };
     case "diff":
@@ -189,6 +218,9 @@ function keymapStateFor(interaction: Interaction, textInputActive: boolean): App
     case "index":
     case "adopt":
     case "fork":
+    case "profile-name":
+    case "profile-delete":
+    case "profile-members":
       return inactive;
     default:
       return assertNever(interaction);
@@ -267,6 +299,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
   const notificationTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const indexTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const forkInput = useRef("");
+  const profileNameInput = useRef("");
   const syncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const storeGeneration = useRef(0);
   const storeAbort = useRef<AbortController | null>(null);
@@ -719,6 +752,104 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
     return true;
   };
 
+  // ---- profile create / rename / delete / edit ----------------------------
+
+  const profileShareHint = "; save or sync to share it";
+  const enabledHere = () => Object.keys(catalog.manifest.skills).filter((name) => isSkillEnabled(catalog.manifest, catalog.state, name));
+  const catalogSkillNames = Object.keys(catalog.manifest.skills).sort();
+
+  const typeProfileName = (next: (input: string) => string) => {
+    profileNameInput.current = next(profileNameInput.current);
+    const input = profileNameInput.current;
+    setInteraction((previous) => (previous.kind === "profile-name" ? { ...previous, flow: { input } } : previous));
+  };
+
+  const handleProfileName = (key: KeyEvent): boolean => {
+    if (interaction.kind !== "profile-name") return true;
+    const { mode, from, returnIndex } = interaction;
+    if (key.name === "escape") {
+      setInteraction({ kind: "profiles", index: returnIndex });
+      return true;
+    }
+    if (key.name === "backspace") {
+      typeProfileName((input) => input.slice(0, -1));
+      return true;
+    }
+    if (key.name === "return" || key.name === "enter") {
+      const name = profileNameInput.current.trim();
+      if (!name) {
+        setInteraction({ ...interaction, flow: { ...interaction.flow, error: "enter a profile name" } });
+        return true;
+      }
+      const outcome = mode === "rename" && from !== null ? runSyncResult(renameProfileAction(from, name)) : runSyncResult(setProfileMembers(name, enabledHere(), "create"));
+      if (!outcome.ok) {
+        setInteraction({ ...interaction, flow: { ...interaction.flow, error: outcome.message } });
+        return true;
+      }
+      refresh();
+      notify(`${outcome.value.messages[0] ?? `profile ${name}`}${profileShareHint}`);
+      // A new profile is appended; a renamed one keeps its position.
+      setInteraction({ kind: "profiles", index: mode === "create" ? profileNames.length : returnIndex });
+      return true;
+    }
+    const value = printable(key);
+    if (value) typeProfileName((input) => input + value);
+    return true;
+  };
+
+  const handleProfileDelete = (key: KeyEvent): boolean => {
+    if (interaction.kind !== "profile-delete") return true;
+    const { name, returnIndex } = interaction;
+    if (key.name === "escape" || key.name === "n") {
+      setInteraction({ kind: "profiles", index: returnIndex });
+      return true;
+    }
+    if (key.name === "y") {
+      const outcome = runSyncResult(deleteProfile(name));
+      if (!outcome.ok) {
+        setInteraction({ ...interaction, error: outcome.message });
+        return true;
+      }
+      refresh();
+      notify(`profile ${name} deleted${profileShareHint}`);
+      setInteraction({ kind: "profiles", index: clamp(returnIndex, 0, Math.max(0, profileNames.length - 2)) });
+    }
+    return true;
+  };
+
+  const handleProfileMembers = (key: KeyEvent): boolean => {
+    if (interaction.kind !== "profile-members") return true;
+    const { name, members, index, returnIndex } = interaction;
+    const last = Math.max(0, catalogSkillNames.length - 1);
+    const move = (next: number) => setInteraction({ ...interaction, index: clamp(next, 0, last), error: undefined });
+    if (key.name === "escape") {
+      setInteraction({ kind: "profiles", index: returnIndex });
+      return true;
+    }
+    if (key.name === "down" || key.name === "j") move(index + 1);
+    else if (key.name === "up" || key.name === "k") move(index - 1);
+    else if ((key.ctrl && key.name === "d") || key.name === "pagedown") move(index + 10);
+    else if ((key.ctrl && key.name === "u") || key.name === "pageup") move(index - 10);
+    else if (key.name === "home") move(0);
+    else if (key.name === "end") move(last);
+    else if (key.name === "space") {
+      const skill = catalogSkillNames[index];
+      if (!skill) return true;
+      const next = members.includes(skill) ? members.filter((member) => member !== skill) : [...members, skill];
+      setInteraction({ ...interaction, members: next, error: undefined });
+    } else if (key.name === "return" || key.name === "enter") {
+      const outcome = runSyncResult(setProfileMembers(name, members, "replace"));
+      if (!outcome.ok) {
+        setInteraction({ ...interaction, error: outcome.message });
+        return true;
+      }
+      refresh();
+      notify(`${outcome.value.messages[0] ?? `profile ${name}`}${profileShareHint}`);
+      setInteraction({ kind: "profiles", index: returnIndex });
+    }
+    return true;
+  };
+
   const handleLink = (key: KeyEvent): boolean => {
     if (interaction.kind !== "link") return true;
     const { flow, row } = interaction;
@@ -988,7 +1119,25 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
           setInteraction({ ...interaction, index });
           return;
         }
-        setInteraction((previous) => (previous.kind === "profiles" ? { ...previous, index: clamp(previous.index + delta, 0, profileNames.length - 1) } : previous));
+        setInteraction((previous) => (previous.kind === "profiles" ? { ...previous, index: clamp(previous.index + delta, 0, Math.max(0, profileNames.length - 1)) } : previous));
+        return;
+      }
+      case "profiles.new":
+        if (interaction.kind !== "profiles") return;
+        profileNameInput.current = "";
+        setInteraction({ kind: "profile-name", mode: "create", from: null, returnIndex: interaction.index, flow: { input: "" } });
+        return;
+      case "profiles.rename":
+      case "profiles.delete":
+      case "profiles.edit": {
+        if (interaction.kind !== "profiles") return;
+        const name = profileNames[interaction.index];
+        if (!name) return;
+        if (command === "profiles.rename") {
+          profileNameInput.current = name;
+          setInteraction({ kind: "profile-name", mode: "rename", from: name, returnIndex: interaction.index, flow: { input: name } });
+        } else if (command === "profiles.delete") setInteraction({ kind: "profile-delete", name, returnIndex: interaction.index });
+        else setInteraction({ kind: "profile-members", name, members: [...(getProfile(catalog.manifest, name) ?? [])], index: 0, returnIndex: interaction.index });
         return;
       }
       case "profiles.apply": {
@@ -1228,10 +1377,6 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
         return;
       }
       case "profiles.open":
-        if (profileNames.length === 0) {
-          notify("no profiles defined in skills.manifest.json", true);
-          return;
-        }
         setInteraction({ kind: "profiles", index: Math.max(0, profileNames.indexOf(getActiveProfile(catalog.manifest, catalog.state) ?? "")) });
         return;
       case "selection.open":
@@ -1302,7 +1447,8 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
     }
   };
 
-  const textInputActive = filterMode || docFind.typing || interaction.kind === "link" || interaction.kind === "index" || interaction.kind === "fork";
+  const textInputActive =
+    filterMode || docFind.typing || interaction.kind === "link" || interaction.kind === "index" || interaction.kind === "fork" || interaction.kind === "profile-name";
   useAppKeybindings(keymapStateFor(interaction, textInputActive), runAppCommand);
 
   useKeyboard((key) => {
@@ -1312,9 +1458,19 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
     else if (interaction.kind === "index") handleIndex(key);
     else if (interaction.kind === "adopt") handleAdopt(key);
     else if (interaction.kind === "fork") handleFork(key);
+    else if (interaction.kind === "profile-name") handleProfileName(key);
+    else if (interaction.kind === "profile-delete") handleProfileDelete(key);
+    else if (interaction.kind === "profile-members") handleProfileMembers(key);
   });
 
   usePaste((event) => {
+    if (interaction.kind === "profile-name") {
+      event.preventDefault();
+      event.stopPropagation();
+      const pasted = singleLinePaste(event.bytes);
+      if (pasted) typeProfileName((input) => input + pasted);
+      return;
+    }
     if ((interaction.kind !== "index" && interaction.kind !== "fork") || interaction.flow.running) return;
     event.preventDefault();
     event.stopPropagation();
@@ -1625,6 +1781,30 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
         }
       case "profiles":
         return <ProfilesModal cols={cols} rows={rowsAvail} catalog={catalog} names={profileNames} index={interaction.index} />;
+      case "profile-name":
+        return <ProfileNameModal cols={cols} rows={rowsAvail} mode={interaction.mode} from={interaction.from} flow={interaction.flow} seedCount={enabledHere().length} />;
+      case "profile-delete":
+        return (
+          <ProfileDeleteModal
+            cols={cols}
+            rows={rowsAvail}
+            name={interaction.name}
+            members={getProfile(catalog.manifest, interaction.name)?.length ?? 0}
+            {...(interaction.error === undefined ? {} : { error: interaction.error })}
+          />
+        );
+      case "profile-members":
+        return (
+          <ProfileMembersModal
+            cols={cols}
+            rows={rowsAvail}
+            name={interaction.name}
+            skills={catalogSkillNames}
+            members={interaction.members}
+            index={interaction.index}
+            {...(interaction.error === undefined ? {} : { error: interaction.error })}
+          />
+        );
       case "theme":
         return <ThemeModal cols={cols} rows={rowsAvail} index={interaction.index} saved={interaction.saved} />;
       case "diff":

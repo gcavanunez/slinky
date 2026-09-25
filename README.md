@@ -73,7 +73,7 @@ One catalog tree on the left, the selected skill's documentation on the right.
 | `/`             | filter the catalog, or search the document                                            |
 | `enter` `i`     | open the document / show details                                                      |
 | `d` `u`         | diff a drifting vendor skill / check upstream                                         |
-| `e` `a` `L` `p` | edit, index/adopt a skill, link into a project, apply a profile                       |
+| `e` `a` `L` `p` | edit, index/adopt a skill, link into a project, manage profiles                       |
 | `1` `2` `3`     | available here, all skills, skills waiting to be adopted                              |
 | `F`             | fork a vendor skill into `skills/` as your own copy                                   |
 | `S`             | run `slinky sync`; the tab row shows `⇣ N to pull` when the store has commits waiting |

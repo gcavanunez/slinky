@@ -440,6 +440,18 @@ export function withProfileMembers(manifest: Manifest, name: string, members: It
   return decodeManifest({ ...manifest, profiles });
 }
 
+/** Names that stay readable as CLI arguments and TUI labels. */
+export const profileNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/** Rename a profile in place, keeping its position; a machine following it follows the new name. */
+export function renameProfile(manifest: Manifest, state: State, from: string, to: string): CatalogSelection {
+  if (!Object.hasOwn(manifest.profiles, from)) throw new Error(`unknown profile: ${from}`);
+  if (Object.hasOwn(manifest.profiles, to)) throw new Error(`profile already exists: ${to}`);
+  const profiles = Object.fromEntries(Object.entries(manifest.profiles).map(([name, members]) => [name === from ? to : name, members]));
+  const selection = state.selection.kind === "profile" && state.selection.name === from ? { ...state.selection, name: to } : state.selection;
+  return { manifest: decodeManifest({ ...manifest, profiles }), state: decodeState({ ...state, selection }) };
+}
+
 /** Fold this machine's overrides into its active profile and clear them. */
 export interface CatalogSelection {
   readonly manifest: Manifest;

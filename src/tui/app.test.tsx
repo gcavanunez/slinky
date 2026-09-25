@@ -276,6 +276,65 @@ test("overlays are exclusive and render the payload captured when opened", async
   }
 });
 
+test("profiles can be created, edited, renamed, and deleted from the profiles modal", async () => {
+  const manifestPath = join(host, "skills.manifest.json");
+  const original = readFileSync(manifestPath);
+  const profiles = () => JSON.parse(readFileSync(manifestPath, "utf8")).profiles;
+  const setup = await mount();
+  const press = async (key: string) => {
+    await input(async () => {
+      setup.mockInput.pressKey(key);
+      await Bun.sleep(30);
+    });
+  };
+  try {
+    await press("p");
+    await setup.waitForFrame((value) => value.includes("Applying follows it exactly"));
+
+    await press("n");
+    await setup.waitForFrame((value) => value.includes("New profile"));
+    await input(async () => {
+      await setup.mockInput.typeText("work");
+      setup.mockInput.pressEnter();
+      await Bun.sleep(30);
+    });
+    expect(await setup.waitForFrame((value) => value.includes("Applying follows it exactly") && value.includes("work"))).toContain("2/2");
+    expect(profiles().work).toEqual(["alpha", "beta"]);
+
+    await press("e");
+    await setup.waitForFrame((value) => value.includes("Edit work"));
+    await press(" ");
+    await input(async () => {
+      setup.mockInput.pressEnter();
+      await Bun.sleep(30);
+    });
+    await setup.waitForFrame((value) => value.includes("Applying follows it exactly"));
+    expect(profiles().work).toEqual(["beta"]);
+
+    await press("r");
+    await setup.waitForFrame((value) => value.includes("Rename work"));
+    await input(async () => {
+      await setup.mockInput.typeText("-2");
+      setup.mockInput.pressEnter();
+      await Bun.sleep(30);
+    });
+    await setup.waitForFrame((value) => value.includes("work-2"));
+    expect(Object.keys(profiles())).toEqual(["focus", "work-2"]);
+
+    await press("d");
+    await setup.waitForFrame((value) => value.includes("Delete work-2?"));
+    await press("y");
+    expect(Object.keys(profiles())).toEqual(["focus"]);
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("profile work-2 deleted");
+    expect(frame).toMatch(/Profiles +1\/1/);
+  } finally {
+    destroy(setup);
+    writeFileSync(manifestPath, original);
+  }
+});
+
 test("a stale upstream check cannot overwrite a newer result", async () => {
   const requests = [deferredUpstream(), deferredUpstream()];
   const signals: AbortSignal[] = [];

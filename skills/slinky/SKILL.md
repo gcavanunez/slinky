@@ -93,6 +93,9 @@ slinky profile list                        # also shows what this machine follow
 slinky profile apply <name>                # follow it; clears this machine's own changes
 slinky profile add <name> <skill...>       # edit the shared set (creates the profile)
 slinky profile remove <name> <skill...>
+slinky profile create <name> [skill...]    # default: what is enabled on this machine
+slinky profile rename <name> <new-name>
+slinky profile delete <name>               # not the one this machine follows
 slinky profile promote                     # move this machine's changes into its profile
 ```
 

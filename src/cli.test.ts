@@ -1256,6 +1256,26 @@ exec sh -c "$1"
     expect(runCli(f.host, f.home, ["profile", "add", "focus", "ghost"]).stderr.toString()).toContain("unknown skill: ghost");
   });
 
+  test("profile create, rename, and delete edit the manifest and keep a following machine attached", () => {
+    const f = fixture(["bar"]);
+    initializeGitFixture(f.host, f.home);
+    const profiles = () => JSON.parse(readFileSync(join(f.host, "skills.manifest.json"), "utf8")).profiles;
+
+    expect(runCli(f.host, f.home, ["profile", "create", "here"]).exitCode).toBe(0);
+    expect(profiles().here).toEqual(["foo"]);
+    expect(runCli(f.host, f.home, ["profile", "create", "here"]).stderr.toString()).toContain("profile here already exists");
+    expect(runCli(f.host, f.home, ["profile", "create", "bad name"]).stderr.toString()).toContain("profile names use letters");
+
+    expect(runCli(f.host, f.home, ["profile", "apply", "here"]).exitCode).toBe(0);
+    expect(runCli(f.host, f.home, ["profile", "rename", "here", "there"]).exitCode).toBe(0);
+    expect(Object.keys(profiles())).toEqual(["focus", "there"]);
+    expect(stateAt(f.statePath).selection).toEqual({ kind: "profile", name: "there" });
+
+    expect(runCli(f.host, f.home, ["profile", "delete", "there"]).stderr.toString()).toContain("this machine follows there");
+    expect(runCli(f.host, f.home, ["profile", "delete", "focus"]).exitCode).toBe(0);
+    expect(Object.keys(profiles())).toEqual(["there"]);
+  });
+
   test("fleet sync refuses an unknown follower before touching the leader", () => {
     const f = fixture();
     initializeGitFixture(f.host, f.home);

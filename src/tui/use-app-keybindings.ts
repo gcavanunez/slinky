@@ -14,6 +14,10 @@ export type AppCommand =
   | "profiles.next"
   | "profiles.previous"
   | "profiles.apply"
+  | "profiles.new"
+  | "profiles.edit"
+  | "profiles.rename"
+  | "profiles.delete"
   | "view.available"
   | "view.all"
   | "view.adopt"
@@ -80,6 +84,8 @@ export interface AppKeymapState {
   readonly overlayActive: boolean;
   readonly diffActive: boolean;
   readonly profilesActive: boolean;
+  /** The profiles modal (not the theme picker, which shares navigation) can create, edit, rename, and delete. */
+  readonly profileManageActive: boolean;
   readonly helpActive: boolean;
   /** A scrollable output log (the sync modal) owns j/k and friends. */
   readonly logActive: boolean;
@@ -172,6 +178,13 @@ const profileCommands: ReadonlyArray<CommandDefinition> = [
   { name: "profiles.apply", title: "Apply selected profile", keys: ["return", "enter"] },
 ];
 
+const profileManageCommands: ReadonlyArray<CommandDefinition> = [
+  { name: "profiles.new", title: "New profile from this machine's enabled skills", keys: ["n"] },
+  { name: "profiles.edit", title: "Edit the selected profile's skills", keys: ["e"] },
+  { name: "profiles.rename", title: "Rename the selected profile", keys: ["r"] },
+  { name: "profiles.delete", title: "Delete the selected profile", keys: ["d"] },
+];
+
 function layer(definitions: ReadonlyArray<CommandDefinition>, run: (command: AppCommand, event: KeyEvent) => void) {
   return {
     commands: definitions.map((definition) => ({
@@ -212,6 +225,7 @@ export function useAppKeybindings(state: AppKeymapState, run: (command: AppComma
   useBindings(() => ({ ...layer(overlayCommands, dispatch), enabled: state.overlayActive }), [state.overlayActive]);
   useBindings(() => ({ ...layer(diffCommands, dispatch), enabled: state.diffActive }), [state.diffActive]);
   useBindings(() => ({ ...layer(profileCommands, dispatch), enabled: state.profilesActive }), [state.profilesActive]);
+  useBindings(() => ({ ...layer(profileManageCommands, dispatch), enabled: state.profileManageActive }), [state.profileManageActive]);
   useBindings(() => ({ ...layer(logCommands, dispatch), enabled: state.logActive }), [state.logActive]);
   useBindings(
     () => ({

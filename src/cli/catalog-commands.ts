@@ -8,13 +8,13 @@ import { getActiveProfile, getProfileOverrides, isSkillEnabled, invocationPrefer
 import type { Manifest, State } from "../domain/model.ts";
 import { claudeRelTarget } from "../domain/reconcile-plan.ts";
 import { findUnindexedSkills } from "../lib/adopt.ts";
-import { applyProfile, editProfile, promoteProfile, setSkillsEnabled, setAutoinvoke } from "../lib/catalog-actions.ts";
+import { applyProfile, deleteProfile, editProfile, promoteProfile, renameProfileAction, setAutoinvoke, setProfileMembers, setSkillsEnabled } from "../lib/catalog-actions.ts";
 import { verifyCatalog } from "../lib/convergence.ts";
 import { inspectInstallation, invocationInfo } from "../lib/invocation.ts";
 import { HostRepo, Paths } from "../lib/paths.ts";
 import { observe } from "../lib/reconcile.ts";
 import { c, pad, renderAction, renderConvergenceEvent, stripAnsi } from "./render.ts";
-import { dryRunFlag, forceFlag, loadHostState, skillsArg, withRepo } from "./shared.ts";
+import { dryRunFlag, forceFlag, loadHostState, optionalSkillsArg, skillsArg, withRepo } from "./shared.ts";
 
 const cmdStatus = Effect.fn("Cli.status")(function* (manifest: Manifest, state: State) {
   const paths = yield* Paths;
@@ -142,6 +142,32 @@ const makeProfileEditCommand = (verb: "add" | "remove", description: string) =>
 const profileAddCommand = makeProfileEditCommand("add", "Add skill(s) to a shared profile (creating it if needed); save and sync to share it");
 const profileRemoveCommand = makeProfileEditCommand("remove", "Remove skill(s) from a shared profile; save and sync to share it");
 
+const profileCreateCommand = Command.make("create", { name: Argument.string("profile"), skills: optionalSkillsArg, dryRun: dryRunFlag }, ({ name, skills, dryRun }) =>
+  withRepo(
+    Effect.gen(function* () {
+      const { manifest, state } = yield* loadHostState;
+      const members = skills.length > 0 ? skills : Object.keys(manifest.skills).filter((skill) => isSkillEnabled(manifest, state, skill));
+      renderAction(yield* setProfileMembers(name, members, "create", { dryRun }));
+    }),
+  ),
+).pipe(Command.withDescription("Create a shared profile from the named skills, or from what is enabled on this machine"));
+
+const profileRenameCommand = Command.make("rename", { from: Argument.string("profile"), to: Argument.string("new-name"), dryRun: dryRunFlag }, ({ from, to, dryRun }) =>
+  withRepo(
+    Effect.gen(function* () {
+      renderAction(yield* renameProfileAction(from, to, { dryRun }));
+    }),
+  ),
+).pipe(Command.withDescription("Rename a shared profile; machines following it follow the new name after they sync"));
+
+const profileDeleteCommand = Command.make("delete", { name: Argument.string("profile"), dryRun: dryRunFlag }, ({ name, dryRun }) =>
+  withRepo(
+    Effect.gen(function* () {
+      renderAction(yield* deleteProfile(name, { dryRun }));
+    }),
+  ),
+).pipe(Command.withDescription("Delete a shared profile (not the one this machine follows)"));
+
 const profilePromoteCommand = Command.make("promote", { dryRun: dryRunFlag, force: forceFlag }, ({ dryRun, force }) =>
   withRepo(
     Effect.gen(function* () {
@@ -167,7 +193,16 @@ const profileApplyCommand = Command.make(
 
 export const profileCommand = Command.make("profile", {}, () => profileList).pipe(
   Command.withDescription("List, follow, or edit shared profiles"),
-  Command.withSubcommands([profileListCommand, profileApplyCommand, profileAddCommand, profileRemoveCommand, profilePromoteCommand]),
+  Command.withSubcommands([
+    profileListCommand,
+    profileApplyCommand,
+    profileCreateCommand,
+    profileAddCommand,
+    profileRemoveCommand,
+    profileRenameCommand,
+    profileDeleteCommand,
+    profilePromoteCommand,
+  ]),
 );
 
 export const verifyCommand = Command.make("verify", {}, () =>

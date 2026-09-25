@@ -115,7 +115,7 @@ Status columns are `on` (enabled), `live` (global store state), `project` (place
 - `e` opens a local catalog skill or an unindexed local skill in your editor (the recorded `editor`, then `$VISUAL`, `$EDITOR`, then `nvim`) with the skills host as the working directory. Vendor baselines, the staging inbox, and project-only copies are excluded. The editor spec may carry flags and is tokenised with quotes respected, then spawned directly with no shell, so a skill path is never interpreted as shell syntax.
 - `d` on a drifting vendor skill opens the drift review: `a` accepts the live global copy as the repository baseline, `r` restores the global copy from the baseline, `h` reviews in Hunk, `d` in Delta.
 - `a` on an unindexed skill indexes it: enter the source (`kitlangton/skills`) or paste its add command. Slinky verifies that the installed content matches the unindexed copy before indexing it in place or moving it to the inferred vendor path.
-- `L` links the skill into a project (copy or symlink). `p` applies a profile. `u` checks vendor skills upstream.
+- `L` links the skill into a project (copy or symlink). `p` opens the profiles: `enter` follows one, `n` creates one from what is enabled here, `e` edits its skills in a checklist, `r` renames, and `d` deletes. `u` checks vendor skills upstream.
 - `F` on a vendor skill forks it into `skills/` as your own local copy (see [Forking a vendor skill](#forking-a-vendor-skill)); the prompt is prefilled with `my-<name>`.
 - `S` runs `slinky sync` in a modal showing its output. On launch the TUI fetches the store's tracking branch in the background; when commits are waiting, the tab row shows `⇣ N to pull · S sync`.
 - `t` picks a colour theme: moving through the list previews it live, `enter` records it in `~/.config/slinky/config.json`, `esc` restores the saved one.
@@ -320,8 +320,11 @@ slinky autoinvoke <skill> <on|off|inherit> [--dry-run]
 slinky disable <skill...> [--force]
 slinky profile list                          # also shows what this machine follows
 slinky profile apply <name> [--force]        # follow it and clear this machine's own changes
+slinky profile create <name> [skill...] [--dry-run]  # default: what is enabled on this machine
 slinky profile add <name> <skill...> [--dry-run]     # edit the shared set; creates the profile
 slinky profile remove <name> <skill...> [--dry-run]
+slinky profile rename <name> <new-name> [--dry-run]
+slinky profile delete <name> [--dry-run]     # not the one this machine follows
 slinky profile promote [--dry-run]           # move this machine's changes into its profile
 slinky config                         # show recorded host, diff pager, editor, and theme
 slinky config diff-pager [hunk|delta|none]
