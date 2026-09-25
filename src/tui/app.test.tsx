@@ -276,6 +276,32 @@ test("overlays are exclusive and render the payload captured when opened", async
   }
 });
 
+test("an open modal dims the view behind it", async () => {
+  const setup = await mount();
+  // The header sits above every modal, so its colour shows the backdrop alone.
+  const header = () => {
+    const span = setup.captureSpans().lines[0]?.spans.find((candidate) => candidate.text.includes("slinky"));
+    if (!span) throw new Error("header span not found");
+    return span;
+  };
+  const distance = (span: ReturnType<typeof header>) => Math.hypot(span.fg.r - span.bg.r, span.fg.g - span.bg.g, span.fg.b - span.bg.b);
+  try {
+    await setup.renderOnce();
+    const open = distance(header());
+
+    await input(() => setup.mockInput.pressKey("p"));
+    await setup.waitForFrame((value) => value.includes("Applying follows it exactly"));
+    const dimmed = distance(header());
+    await closeOverlay(setup);
+    await setup.renderOnce();
+
+    expect(dimmed).toBeLessThan(open * 0.6);
+    expect(distance(header())).toBeCloseTo(open, 5);
+  } finally {
+    destroy(setup);
+  }
+});
+
 test("profiles can be created, edited, renamed, and deleted from the profiles modal", async () => {
   const manifestPath = join(host, "skills.manifest.json");
   const original = readFileSync(manifestPath);

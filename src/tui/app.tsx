@@ -184,6 +184,9 @@ export interface AppProps {
 
 const defaultCheckForUpstream: CheckForUpstream = (manifest, signal) => runPromiseResult(checkUpstream(manifest), { signal });
 
+/** How much of the main view stays visible behind an open modal. */
+const backdropOpacity = 0.35;
+
 function assertNever(value: never): never {
   throw new Error(`unhandled interaction: ${JSON.stringify(value)}`);
 }
@@ -1890,15 +1893,18 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
 
   return (
     <box width="100%" height="100%" flexDirection="column" backgroundColor={colors.background}>
-      {header}
-      <Divider width={cols} junctions={tabRailColumns.map((at) => ({ at, char: "┬" }))} />
-      {tabs}
-      <Divider width={cols} junctions={belowTabsJunctions} />
-      <box height={viewport} flexDirection="row">
-        {panes.flatMap((pane, index) => [...(index > 0 ? [<SeparatorColumn key={`rail-${pane.key}`} height={viewport} />] : []), <box key={pane.key}>{pane.node}</box>])}
+      {/* An open modal fades everything behind it toward the background. */}
+      <box width="100%" height="100%" flexDirection="column" opacity={overlay === null ? 1 : backdropOpacity}>
+        {header}
+        <Divider width={cols} junctions={tabRailColumns.map((at) => ({ at, char: "┬" }))} />
+        {tabs}
+        <Divider width={cols} junctions={belowTabsJunctions} />
+        <box height={viewport} flexDirection="row">
+          {panes.flatMap((pane, index) => [...(index > 0 ? [<SeparatorColumn key={`rail-${pane.key}`} height={viewport} />] : []), <box key={pane.key}>{pane.node}</box>])}
+        </box>
+        <Divider width={cols} junctions={paneRailColumns.map((at) => ({ at, char: "┴" }))} />
+        {footer}
       </box>
-      <Divider width={cols} junctions={paneRailColumns.map((at) => ({ at, char: "┴" }))} />
-      {footer}
       {overlay}
     </box>
   );
