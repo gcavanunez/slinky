@@ -15,7 +15,7 @@ export function ProfilesModal({ cols, rows, catalog, names, index }: { cols: num
     <Modal
       title="Profiles"
       headerRight={`${index + 1}/${names.length}`}
-      subtitle={<TextLine fg={colors.muted}>{"Applying a profile disables everything outside it"}</TextLine>}
+      subtitle={<TextLine fg={colors.muted}>{"Applying follows it exactly and clears local changes"}</TextLine>}
       width={56}
       cols={cols}
       rows={rows}

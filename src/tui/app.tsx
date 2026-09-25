@@ -11,7 +11,7 @@ import { acceptVendorDrift, applyProfile, linkProjectSkill, restoreVendorDrift, 
 import type { ActionResult } from "../lib/catalog-actions.ts";
 import { isClean, pagePatch, unifiedInstalledDiff } from "../lib/diff.ts";
 import type { DiffPager } from "../lib/diff.ts";
-import { defaultThemeId, getActiveProfile, themeIds } from "../domain/model.ts";
+import { defaultThemeId, getActiveProfile, getProfileOverrides, themeIds } from "../domain/model.ts";
 import type { ThemeId } from "../domain/model.ts";
 import { addSkillFromSource, parseSkillsAddSource } from "../lib/skills-add.ts";
 import { adoptForeignSkill } from "../lib/foreign-adoption.ts";
@@ -1404,6 +1404,8 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
     }
   }
   const activeProfile = getActiveProfile(catalog.manifest, catalog.state);
+  const localOverrides = getProfileOverrides(catalog.state);
+  const localChanges = localOverrides.enabled.length + localOverrides.disabled.length;
   const storeBehind = store.kind === "compared" && store.behind > 0;
   const tabs = (
     <box height={1} width="100%" flexDirection="row" justifyContent="space-between">
@@ -1448,6 +1450,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
             <>
               <span fg={colors.muted}>{"profile "}</span>
               <span fg={colors.count}>{activeProfile}</span>
+              {localChanges > 0 ? <span fg={colors.yellow}>{` · ${localChanges} local change${localChanges === 1 ? "" : "s"}`}</span> : null}
             </>
           ) : null}
           <span> </span>

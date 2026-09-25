@@ -8,6 +8,8 @@ import {
   isSkillEnabled,
   Manifest,
   ProjectLink,
+  promoteProfileOverrides,
+  withProfileMembers,
   State,
   stateVersion,
   getSkill,
@@ -302,6 +304,55 @@ describe("domain schemas", () => {
     expect(isSkillEnabled(changed, profiled, "foo")).toBe(false);
     expect(isSkillEnabled(changed, profiled, "bar")).toBe(true);
     expect(profiled.selection).toEqual({ kind: "profile", name: "work" });
+  });
+
+  test("toggling a skill on a profile keeps following it with a local change", () => {
+    const manifest = Schema.decodeUnknownSync(Manifest)(manifestInput(), strict);
+    const profiled = withProfile(manifest, Schema.decodeUnknownSync(State)(stateInput(), strict), "work");
+
+    const bent = withSkillEnabled(manifest, withSkillEnabled(manifest, profiled, "bar", true), "foo", false);
+
+    expect(getActiveProfile(manifest, bent)).toBe("work");
+    expect(bent.selection).toEqual({ kind: "profile", name: "work", enabled: ["bar"], disabled: ["foo"] });
+    expect(getDisabledSkills(manifest, bent)).toEqual(["foo"]);
+    // Toggling back to what the profile says drops the local change instead of recording a redundant one.
+    expect(withSkillEnabled(manifest, bent, "foo", true).selection).toEqual({ kind: "profile", name: "work", enabled: ["bar"] });
+    // Following the profile again clears every local change.
+    expect(withProfile(manifest, bent, "work").selection).toEqual({ kind: "profile", name: "work" });
+  });
+
+  test("local changes survive a shared profile change and the retirement of their skills", () => {
+    const manifest = Schema.decodeUnknownSync(Manifest)(manifestInput(), strict);
+    const bent = withSkillEnabled(manifest, withProfile(manifest, Schema.decodeUnknownSync(State)(stateInput(), strict), "work"), "foo", false);
+    const grown = Schema.decodeUnknownSync(Manifest)({ ...manifestInput(), profiles: { work: ["foo", "bar"] } }, strict);
+    const shrunk = Schema.decodeUnknownSync(Manifest)({ ...manifestInput(), skills: { bar: manifestInput().skills.bar }, profiles: { work: ["bar"] } }, strict);
+
+    expect(getDisabledSkills(grown, bent)).toEqual(["foo"]);
+    expect(isSkillEnabled(grown, bent, "bar")).toBe(true);
+    expect(alignStateWithManifest(shrunk, bent).selection).toEqual({ kind: "profile", name: "work" });
+    const retired = Schema.decodeUnknownSync(Manifest)({ ...manifestInput(), profiles: {} }, strict);
+    expect(alignStateForTransition(manifest, retired, bent).selection).toEqual({ kind: "custom", disabledSkills: ["bar", "foo"] });
+  });
+
+  test("promoting local changes moves them into the shared profile", () => {
+    const manifest = Schema.decodeUnknownSync(Manifest)(manifestInput(), strict);
+    const bent = withSkillEnabled(manifest, withProfile(manifest, Schema.decodeUnknownSync(State)(stateInput(), strict), "work"), "bar", true);
+
+    const promoted = promoteProfileOverrides(manifest, bent);
+
+    expect(promoted.manifest.profiles).toEqual({ work: ["bar", "foo"] });
+    expect(promoted.state.selection).toEqual({ kind: "profile", name: "work" });
+    expect(getDisabledSkills(promoted.manifest, promoted.state)).toEqual([]);
+    expect(withProfileMembers(manifest, "work", []).profiles).toEqual({});
+  });
+
+  test("rejects a skill that is both a local addition and a local removal", () => {
+    const manifest = Schema.decodeUnknownSync(Manifest)(manifestInput(), strict);
+    const contradictory = { ...stateInput(), selection: { kind: "profile", name: "work", enabled: ["bar"], disabled: ["bar"] } };
+    const unknown = Schema.decodeUnknownSync(State)({ ...stateInput(), selection: { kind: "profile", name: "work", enabled: ["ghost"] } }, strict);
+
+    expect(() => Schema.decodeUnknownSync(State)(contradictory, strict)).toThrow();
+    expect(validateState(manifest, unknown)).toEqual(["local profile change is not in the manifest: ghost"]);
   });
 
   test("rejects unknown profile and prototype-like custom references", () => {

@@ -192,6 +192,10 @@ export const StateSelection = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("profile"),
     name: ProfileName,
+    /** This machine's own additions to the shared profile; never committed. */
+    enabled: Schema.optional(Schema.Array(SkillName)),
+    /** This machine's own removals from the shared profile; never committed. */
+    disabled: Schema.optional(Schema.Array(SkillName)),
   }),
 ]);
 export type StateSelection = typeof StateSelection.Type;
@@ -238,6 +242,13 @@ export const State = Schema.Struct({
     const issues: Array<Schema.FilterIssue> = [];
     if (state.selection.kind === "custom" && new Set(state.selection.disabledSkills).size !== state.selection.disabledSkills.length) {
       issues.push({ path: ["selection", "disabledSkills"], issue: "disabled skills must be unique" });
+    }
+    if (state.selection.kind === "profile") {
+      const enabled = state.selection.enabled ?? [];
+      const disabled = state.selection.disabled ?? [];
+      if (new Set(enabled).size !== enabled.length) issues.push({ path: ["selection", "enabled"], issue: "local additions must be unique" });
+      if (new Set(disabled).size !== disabled.length) issues.push({ path: ["selection", "disabled"], issue: "local removals must be unique" });
+      if (enabled.some((name) => disabled.includes(name))) issues.push({ path: ["selection"], issue: "a skill cannot be both a local addition and a local removal" });
     }
     if (new Set(state.recentProjects).size !== state.recentProjects.length) {
       issues.push({ path: ["recentProjects"], issue: "recent projects must be unique" });
@@ -358,11 +369,33 @@ export function getActiveProfile(manifest: Manifest, state: State): string | nul
   return state.selection.kind === "profile" && Object.hasOwn(manifest.profiles, state.selection.name) ? state.selection.name : null;
 }
 
+export interface ProfileOverrides {
+  readonly enabled: ReadonlyArray<string>;
+  readonly disabled: ReadonlyArray<string>;
+}
+
+/** This machine's own changes on top of its active profile; empty for a custom selection. */
+export function getProfileOverrides(state: State): ProfileOverrides {
+  if (state.selection.kind !== "profile") return { enabled: [], disabled: [] };
+  return { enabled: state.selection.enabled ?? [], disabled: state.selection.disabled ?? [] };
+}
+
+/** A profile selection that omits empty override lists, so a plain profile stays `{kind, name}`. */
+function profileSelection(name: string, enabled: Iterable<string>, disabled: Iterable<string>): StateSelection {
+  const additions = [...new Set(enabled)].sort();
+  const removals = [...new Set(disabled)].sort();
+  const base = { kind: "profile" as const, name };
+  const withAdditions = additions.length > 0 ? { ...base, enabled: additions } : base;
+  return removals.length > 0 ? { ...withAdditions, disabled: removals } : withAdditions;
+}
+
 export function getDisabledSkills(manifest: Manifest, state: State): ReadonlyArray<string> {
   if (state.selection.kind === "custom") return state.selection.disabledSkills;
   const members = getProfile(manifest, state.selection.name);
   if (!members) return [];
-  const enabled = new Set(members);
+  const { enabled: additions, disabled: removals } = getProfileOverrides(state);
+  const enabled = new Set([...members, ...additions]);
+  for (const name of removals) enabled.delete(name);
   return Object.keys(manifest.skills)
     .filter((name) => !enabled.has(name))
     .sort();
@@ -372,7 +405,23 @@ export function isSkillEnabled(manifest: Manifest, state: State, name: string): 
   return !getDisabledSkills(manifest, state).includes(name);
 }
 
+/**
+ * Turn one skill on or off for this machine. On a profile the change becomes a
+ * local override, so the machine keeps following the shared profile.
+ */
 export function withSkillEnabled(manifest: Manifest, state: State, name: string, enabled: boolean): State {
+  const profile = getActiveProfile(manifest, state);
+  if (profile !== null) {
+    const member = (getProfile(manifest, profile) ?? []).includes(name);
+    const overrides = getProfileOverrides(state);
+    const additions = new Set(overrides.enabled);
+    const removals = new Set(overrides.disabled);
+    additions.delete(name);
+    removals.delete(name);
+    if (enabled && !member) additions.add(name);
+    if (!enabled && member) removals.add(name);
+    return decodeState({ ...state, selection: profileSelection(profile, additions, removals) });
+  }
   const disabled = new Set(getDisabledSkills(manifest, state));
   if (enabled) disabled.delete(name);
   else disabled.add(name);
@@ -380,6 +429,33 @@ export function withSkillEnabled(manifest: Manifest, state: State, name: string,
     ...state,
     selection: { kind: "custom", disabledSkills: [...disabled].sort() },
   });
+}
+
+/** Set a profile's exact membership in the manifest; an empty list removes the profile. */
+export function withProfileMembers(manifest: Manifest, name: string, members: Iterable<string>): Manifest {
+  const sorted = [...new Set(members)].sort();
+  const profiles = { ...manifest.profiles };
+  if (sorted.length === 0) delete profiles[name];
+  else profiles[name] = sorted;
+  return decodeManifest({ ...manifest, profiles });
+}
+
+/** Fold this machine's overrides into its active profile and clear them. */
+export interface CatalogSelection {
+  readonly manifest: Manifest;
+  readonly state: State;
+}
+
+export function promoteProfileOverrides(manifest: Manifest, state: State): CatalogSelection {
+  const profile = getActiveProfile(manifest, state);
+  if (profile === null) throw new Error("no active profile to promote into");
+  const { enabled, disabled } = getProfileOverrides(state);
+  const members = new Set([...(getProfile(manifest, profile) ?? []), ...enabled]);
+  for (const name of disabled) members.delete(name);
+  return {
+    manifest: withProfileMembers(manifest, profile, members),
+    state: decodeState({ ...state, selection: profileSelection(profile, [], []) }),
+  };
 }
 
 export type InvocationMode = "on" | "off" | "inherit";
@@ -410,7 +486,11 @@ export function alignStateWithManifest(manifest: Manifest, state: State): State 
     state = { ...state, opencode: { autoinvoke: Object.fromEntries(Object.entries(state.opencode.autoinvoke).filter(([name]) => Object.hasOwn(manifest.skills, name))) } };
   }
   if (state.selection.kind === "profile") {
-    if (Object.hasOwn(manifest.profiles, state.selection.name)) return state;
+    if (Object.hasOwn(manifest.profiles, state.selection.name)) {
+      const { enabled, disabled } = getProfileOverrides(state);
+      const known = (name: string) => Object.hasOwn(manifest.skills, name);
+      return decodeState({ ...state, selection: profileSelection(state.selection.name, enabled.filter(known), disabled.filter(known)) });
+    }
     // A v2 profile has no cached custom complement. If it is retired, fall back
     // to the default all-enabled catalog rather than inventing stale choices.
     return decodeState({ ...state, selection: { kind: "custom", disabledSkills: [] } });
@@ -471,6 +551,11 @@ export function validateState(manifest: Manifest, state: State): ReadonlyArray<s
     }
   } else if (!Object.hasOwn(manifest.profiles, state.selection.name)) {
     issues.push(`active profile is not in the manifest: ${state.selection.name}`);
+  } else {
+    const { enabled, disabled } = getProfileOverrides(state);
+    for (const name of [...enabled, ...disabled]) {
+      if (!Object.hasOwn(manifest.skills, name)) issues.push(`local profile change is not in the manifest: ${name}`);
+    }
   }
   for (const link of state.projectLinks) {
     if (!Object.hasOwn(manifest.skills, link.skill)) {

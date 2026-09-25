@@ -20,8 +20,8 @@ The long-form reference. The [README](../README.md) covers install and everyday 
 
 - **Local skills** live under `skills/` and are symlinked into the canonical global store.
 - **Vendor skills** live under `vendor/` as committed baselines and are copied into the global store so `npx skills` can update them.
-- **Profiles** define exact enabled sets.
-- **Machine state** records disabled skills, the active profile, and project links in `.local/state.json`.
+- **Profiles** are shared enabled sets committed in the manifest. A machine that follows one picks up its edits on sync.
+- **Machine state** records disabled skills or the followed profile (plus this machine's own changes to it), and project links, in `.local/state.json`.
 - **Project links** copy or symlink a catalog skill into another repository.
 
 The application and catalog stay separate: Slinky owns the tooling, while the host repository owns `skills/`, `vendor/`, `commands/`, and `skills.manifest.json`.
@@ -162,7 +162,7 @@ slinky fleet remove pi
 
 `fleet sync` runs a full `sync` on the leader (save, pull, reconcile, restore), then pushes any commits the upstream does not have. After that it runs `ssh -o BatchMode=yes <target> slinky sync --follower` on every selected follower at once. Each follower's output appears under its name. The command exits non-zero if any follower failed, but one unreachable follower never stops the others. If the leader fails, nothing is pushed and no follower is contacted.
 
-`slinky sync --follower` is the follower step, and you can also run it on its own. It skips the save phase: it requires a clean worktree, pulls the upstream catalog, reconciles, and restores live vendor drift exactly as `sync` does. It never commits, so catalog edits made on a follower are reported rather than published. Enabled and disabled skills, the active profile, and project links remain per machine. Put a follower on a shared profile (`slinky profile apply <name>`) to have its selection follow the catalog.
+`slinky sync --follower` is the follower step, and you can also run it on its own. It skips the save phase: it requires a clean worktree, pulls the upstream catalog, reconciles, and restores live vendor drift exactly as `sync` does. It never commits, so catalog edits made on a follower are reported rather than published. Which skills are on is shared through a profile. On the leader, edit it with `slinky profile add fleet <skill...>` and `slinky profile remove fleet <skill...>`; the next `fleet sync` commits the manifest change and every follower that runs `slinky profile apply fleet` once picks it up. A follower that needs to differ runs `slinky enable` or `slinky disable` as usual: the change is recorded for that machine only (never committed), and the machine keeps following the rest of the profile. `slinky profile apply fleet` drops those changes again, and `slinky profile promote` moves them into the shared profile. Under a profile, a newly catalogued skill stays off until it is added to the profile.
 
 ## Adding and adopting skills
 
@@ -318,8 +318,11 @@ slinky fleet sync [follower...] [--dry-run]   # sync + push here, then sync --fo
 slinky enable <skill...>
 slinky autoinvoke <skill> <on|off|inherit> [--dry-run]
 slinky disable <skill...> [--force]
-slinky profile list
-slinky profile apply <name> [--force]
+slinky profile list                          # also shows what this machine follows
+slinky profile apply <name> [--force]        # follow it and clear this machine's own changes
+slinky profile add <name> <skill...> [--dry-run]     # edit the shared set; creates the profile
+slinky profile remove <name> <skill...> [--dry-run]
+slinky profile promote [--dry-run]           # move this machine's changes into its profile
 slinky config                         # show recorded host, diff pager, editor, and theme
 slinky config diff-pager [hunk|delta|none]
 slinky config editor [<command>|none] # e.g. "code -w"; falls back to $VISUAL, $EDITOR, nvim

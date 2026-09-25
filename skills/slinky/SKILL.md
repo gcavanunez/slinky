@@ -79,21 +79,24 @@ After a mutation, run `slinky status` again and report warnings or skipped actio
 
 ## Enablement And Profiles
 
-New skills are enabled by default. Change individual skills with:
+Change individual skills with:
 
 ```bash
 slinky enable <skill...>
 slinky disable <skill...>
 ```
 
-Profiles are exact enabled sets:
+Profiles are shared enabled sets committed in the manifest. A machine following a profile gets exactly its skills, and picks up profile edits when it syncs:
 
 ```bash
-slinky profile list
-slinky profile apply <name>
+slinky profile list                        # also shows what this machine follows
+slinky profile apply <name>                # follow it; clears this machine's own changes
+slinky profile add <name> <skill...>       # edit the shared set (creates the profile)
+slinky profile remove <name> <skill...>
+slinky profile promote                     # move this machine's changes into its profile
 ```
 
-Applying a profile disables every catalog skill outside it. A later individual enable or disable clears the active profile.
+Without a profile, every catalog skill is enabled unless disabled here. With a profile, a new catalog skill stays off until it is added to the profile. `enable` and `disable` on a machine that follows a profile record a change for this machine only (gitignored), and the machine keeps following the profile. Profile edits change `skills.manifest.json`; `save` and `sync` commit them like any catalog change. When the user wants a change on every machine, edit the profile rather than enabling or disabling locally.
 
 After editing a local skill under `skills/`, refresh its content hash before verification:
 
@@ -187,7 +190,7 @@ slinky fork <vendor-skill> --as <name>      # choose the name
 slinky fork <vendor-skill> --dry-run
 ```
 
-`fork` copies the committed baseline, rewrites `name:` in the copied `SKILL.md` frontmatter to the new name, indexes the copy as a local skill with `forkedFrom` provenance, and reconciles so it is live. The vendor entry stays in the catalog and stays enabled. If the user wants only the fork, run `slinky disable <vendor-skill>` afterwards; if a profile is active, add the fork to the profile or `slinky enable` it. Then edit the fork under `skills/<name>/` like any local skill and `slinky save`.
+`fork` copies the committed baseline, rewrites `name:` in the copied `SKILL.md` frontmatter to the new name, indexes the copy as a local skill with `forkedFrom` provenance, and reconciles so it is live. The vendor entry stays in the catalog and stays enabled. If the user wants only the fork, run `slinky disable <vendor-skill>` afterwards; if a profile is active, `slinky profile add <profile> <fork>` or `slinky enable` it on this machine only. Then edit the fork under `skills/<name>/` like any local skill and `slinky save`.
 
 `fork` refuses when the live vendor copy differs from the baseline; resolve that with `slinky diff`, then `vendor` or `restore`, before forking. `--force` forks the committed baseline anyway and is a user decision. In the TUI, `F` on a vendor skill opens the same flow.
 

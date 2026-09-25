@@ -85,7 +85,7 @@ One catalog tree on the left, the selected skill's documentation on the right.
 
 - **Local skills** in `skills/` are symlinked into `~/.agents/skills`. When OpenCode invocation metadata is needed, the symlink points to a generated copy refreshed during reconciliation.
 - **Vendor skills** in `vendor/` are committed baselines, copied into the store so `npx skills` can update them; `slinky update` shows you the diff before anything changes in the catalog.
-- **Profiles** in the manifest are exact enabled sets. **Machine state** (`.local/state.json`, gitignored) records what's disabled here and which projects have links.
+- **Profiles** in the manifest are shared enabled sets; a machine following one gets its edits on sync, and can still enable or disable a skill for itself. **Machine state** (`.local/state.json`, gitignored) records what this machine follows or disables, and which projects have links.
 - **Project links** copy or symlink a catalog skill into another repository, excluded from that repo's git by default.
 
 ### OpenCode invocation

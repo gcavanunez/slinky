@@ -243,7 +243,7 @@ test("overlays are exclusive and render the payload captured when opened", async
 
     // List bindings are inactive while an overlay owns the interaction state.
     await input(() => setup.mockInput.pressKey("p"));
-    expect(await setup.waitForFrame((value) => value.includes("gamma unindexed fixture skill."))).not.toContain("Applying a profile");
+    expect(await setup.waitForFrame((value) => value.includes("gamma unindexed fixture skill."))).not.toContain("Applying follows it exactly");
     await closeOverlay(setup);
 
     await input(() => setup.mockInput.pressKey("a"));
@@ -266,10 +266,10 @@ test("overlays are exclusive and render the payload captured when opened", async
     await closeOverlay(setup);
 
     await input(() => setup.mockInput.pressKey("p"));
-    const profiles = await setup.waitForFrame((value) => value.includes("Applying a profile disables"));
+    const profiles = await setup.waitForFrame((value) => value.includes("Applying follows it exactly"));
     expect(profiles).toContain("focus");
     await closeOverlay(setup);
-    expect(await setup.waitForFrame((value) => !value.includes("Applying a profile disables"))).toContain("alpha");
+    expect(await setup.waitForFrame((value) => !value.includes("Applying follows it exactly"))).toContain("alpha");
   } finally {
     destroy(setup);
     rmSync(gamma, { recursive: true, force: true });

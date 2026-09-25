@@ -154,7 +154,7 @@ cat > "$HOME/${name}-input"
 }
 
 function stateAt(path: string): {
-  selection: { kind: "custom"; disabledSkills: string[] } | { kind: "profile"; name: string };
+  selection: { kind: "custom"; disabledSkills: string[] } | { kind: "profile"; name: string; enabled?: string[]; disabled?: string[] };
   projectLinks: Array<{ skill: string; project: string }>;
 } {
   return JSON.parse(readFileSync(path, "utf8"));
@@ -1208,6 +1208,53 @@ exec sh -c "$1"
     expect(readFileSync(join(followerHome, ".agents", "skills", "foo", "SKILL.md"), "utf8")).toBe("# foo v2 from the leader\n");
     expect(readFileSync(join(leader.root, "ssh-destinations"), "utf8").trim().split("\n").sort()).toEqual(["box.local", "box.local", "gone.local"]);
   }, 60_000);
+
+  test("a shared profile edited on the leader reaches a follower that keeps its own change", () => {
+    const { leader, follower, followerHome } = leaderWithFollower("profile");
+    const ok = (result: ReturnType<typeof runCli>) => {
+      if (result.exitCode !== 0) throw new Error(failed(result));
+      return result.stdout.toString();
+    };
+    const live = (name: string) => existsSync(join(followerHome, ".agents", "skills", name));
+    expect(ok(runCli(leader.host, leader.home, ["profile", "add", "fleet", "foo"]))).toContain("profile fleet (new): +foo");
+    ok(runCli(leader.host, leader.home, ["sync"]));
+    ok(runCli(leader.host, leader.home, ["push"]));
+
+    ok(runCli(follower, followerHome, ["sync", "--follower"]));
+    ok(runCli(follower, followerHome, ["profile", "apply", "fleet"]));
+    ok(runCli(follower, followerHome, ["enable", "bar"]));
+    expect(stateAt(join(follower, ".local", "state.json")).selection).toEqual({ kind: "profile", name: "fleet", enabled: ["bar"] });
+    expect([live("foo"), live("bar"), live("drifting")]).toEqual([true, true, false]);
+
+    ok(runCli(leader.host, leader.home, ["profile", "add", "fleet", "drifting"]));
+    ok(runCli(leader.host, leader.home, ["profile", "remove", "fleet", "foo"]));
+    ok(runCli(leader.host, leader.home, ["sync"]));
+    ok(runCli(leader.host, leader.home, ["push"]));
+
+    ok(runCli(follower, followerHome, ["sync", "--follower"]));
+
+    expect([live("foo"), live("bar"), live("drifting")]).toEqual([false, true, true]);
+    expect(ok(runCli(follower, followerHome, ["status"]))).toContain("selection: profile fleet (+bar on this machine)");
+    expect(runGit(follower, ["status", "--porcelain"]).stdout.toString()).toBe("");
+  }, 60_000);
+
+  test("profile promote moves this machine's changes into the shared profile", () => {
+    const f = fixture();
+    initializeGitFixture(f.host, f.home);
+    const manifestPath = join(f.host, "skills.manifest.json");
+    expect(runCli(f.host, f.home, ["profile", "apply", "focus"]).exitCode).toBe(0);
+    expect(runCli(f.host, f.home, ["enable", "bar"]).exitCode).toBe(0);
+    expect(runCli(f.host, f.home, ["profile", "promote", "--dry-run"]).stdout.toString()).toContain("profile focus: +bar");
+    expect(JSON.parse(readFileSync(manifestPath, "utf8")).profiles.focus).toEqual(["foo"]);
+
+    const promoted = runCli(f.host, f.home, ["profile", "promote"]);
+
+    expect(promoted.exitCode).toBe(0);
+    expect(JSON.parse(readFileSync(manifestPath, "utf8")).profiles.focus).toEqual(["bar", "foo"]);
+    expect(stateAt(f.statePath).selection).toEqual({ kind: "profile", name: "focus" });
+    expect(runCli(f.host, f.home, ["profile", "remove", "focus", "foo", "bar"]).stderr.toString()).toContain("profile focus would be empty");
+    expect(runCli(f.host, f.home, ["profile", "add", "focus", "ghost"]).stderr.toString()).toContain("unknown skill: ghost");
+  });
 
   test("fleet sync refuses an unknown follower before touching the leader", () => {
     const f = fixture();

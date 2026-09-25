@@ -105,7 +105,13 @@ Machine-local `.local/state.json` records either custom exceptions to the defaul
 }
 ```
 
-Profile selection uses `{"kind":"profile","name":"default"}` and derives enabled skills from the current manifest profile membership. If that profile is retired, state normalizes to an all-enabled custom selection. Version-1 state is migrated on load; existing profile identity wins, while a retired profile keeps its still-valid disabled skills as a custom selection. Project links and custom disabled skills must reference manifest skills.
+Profile selection uses `{"kind":"profile","name":"default"}` and derives enabled skills from the current manifest profile membership. A machine that bends the shared profile records its own changes on the selection:
+
+```json
+{ "kind": "profile", "name": "fleet", "enabled": ["fizzy"], "disabled": ["tdd"] }
+```
+
+The enabled set is the profile's members plus `enabled`, minus `disabled`. Both lists are optional and omitted when empty; a skill may not appear in both, and each must reference a manifest skill (changes to retired skills are dropped on load). State with these lists does not load on Slinky releases that predate them. When a pull or save retires the followed profile, the machine keeps its previously effective selection as a custom selection; a state file naming a profile that is already gone normalizes to an all-enabled custom selection. Version-1 state is migrated on load; existing profile identity wins, while a retired profile keeps its still-valid disabled skills as a custom selection. Project links and custom disabled skills must reference manifest skills.
 
 Version-2 state also accepts optional host-local OpenCode invocation preferences:
 

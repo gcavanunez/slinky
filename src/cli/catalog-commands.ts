@@ -4,11 +4,11 @@ import { Effect } from "effect";
 import { Argument, Command } from "effect/unstable/cli";
 import { classifyPlacement } from "../domain/catalog-inspection.ts";
 import type { CatalogLiveStatus, LiveEntry } from "../domain/catalog-inspection.ts";
-import { getActiveProfile, isSkillEnabled, invocationPreference } from "../domain/model.ts";
+import { getActiveProfile, getProfileOverrides, isSkillEnabled, invocationPreference } from "../domain/model.ts";
 import type { Manifest, State } from "../domain/model.ts";
 import { claudeRelTarget } from "../domain/reconcile-plan.ts";
 import { findUnindexedSkills } from "../lib/adopt.ts";
-import { applyProfile, setSkillsEnabled, setAutoinvoke } from "../lib/catalog-actions.ts";
+import { applyProfile, editProfile, promoteProfile, setSkillsEnabled, setAutoinvoke } from "../lib/catalog-actions.ts";
 import { verifyCatalog } from "../lib/convergence.ts";
 import { inspectInstallation, invocationInfo } from "../lib/invocation.ts";
 import { HostRepo, Paths } from "../lib/paths.ts";
@@ -21,7 +21,7 @@ const cmdStatus = Effect.fn("Cli.status")(function* (manifest: Manifest, state: 
   const { repo } = yield* HostRepo;
   const obs = yield* observe();
   const nameW = Math.max(4, ...Object.keys(manifest.skills).map((n) => n.length)) + 2;
-  console.log(c.dim(`host: ${repo}\n`));
+  console.log(c.dim(`host: ${repo}\nselection: ${describeSelection(manifest, state)}\n`));
   console.log(c.bold(`${pad("NAME", nameW)}${pad("ORIGIN", 8)}${pad("ENABLED", 9)}${pad("LIVE", 10)}${pad("CLAUDE", 8)}OPENCODE INVOCATION`));
   for (const [name, meta] of Object.entries(manifest.skills)) {
     const enabled = isSkillEnabled(manifest, state, name);
@@ -106,19 +106,49 @@ export const autoinvokeCommand = Command.make(
     ),
 ).pipe(Command.withDescription("Set host-local OpenCode automatic discovery: on, off (manual), or inherit"));
 
+/** One line describing what this machine follows, e.g. `profile fleet (+fizzy -tdd on this machine)`. */
+export function describeSelection(manifest: Manifest, state: State): string {
+  const profile = getActiveProfile(manifest, state);
+  if (profile === null) return "custom selection (not following a profile)";
+  const { enabled, disabled } = getProfileOverrides(state);
+  const local = [...enabled.map((name) => `+${name}`), ...disabled.map((name) => `-${name}`)];
+  return `profile ${profile}${local.length > 0 ? ` (${local.join(" ")} on this machine)` : ""}`;
+}
+
 const profileList = withRepo(
   Effect.gen(function* () {
     const { manifest, state } = yield* loadHostState;
     const entries = Object.entries(manifest.profiles);
-    if (entries.length === 0) console.log(c.dim("no profiles defined (edit skills.manifest.json)"));
+    if (entries.length === 0) console.log(c.dim("no profiles defined; create one with `slinky profile add <name> <skill...>`"));
     for (const [name, skills] of entries) {
       const active = getActiveProfile(manifest, state) === name ? c.green(" (active)") : "";
       console.log(`${c.bold(name)}${active}: ${skills.join(", ")}`);
     }
+    console.log(c.dim(`\nthis machine: ${describeSelection(manifest, state)}`));
   }),
 );
 
 const profileListCommand = Command.make("list", {}, () => profileList).pipe(Command.withDescription("List profiles"));
+
+const makeProfileEditCommand = (verb: "add" | "remove", description: string) =>
+  Command.make(verb, { name: Argument.string("profile"), skills: skillsArg, dryRun: dryRunFlag, force: forceFlag }, ({ name, skills, dryRun, force }) =>
+    withRepo(
+      Effect.gen(function* () {
+        renderAction(yield* editProfile(name, verb === "add" ? skills : [], verb === "remove" ? skills : [], { dryRun, force }));
+      }),
+    ),
+  ).pipe(Command.withDescription(description));
+
+const profileAddCommand = makeProfileEditCommand("add", "Add skill(s) to a shared profile (creating it if needed); save and sync to share it");
+const profileRemoveCommand = makeProfileEditCommand("remove", "Remove skill(s) from a shared profile; save and sync to share it");
+
+const profilePromoteCommand = Command.make("promote", { dryRun: dryRunFlag, force: forceFlag }, ({ dryRun, force }) =>
+  withRepo(
+    Effect.gen(function* () {
+      renderAction(yield* promoteProfile({ dryRun, force }));
+    }),
+  ),
+).pipe(Command.withDescription("Move this machine's own enable/disable changes into the profile it follows"));
 
 const profileApplyCommand = Command.make(
   "apply",
@@ -133,11 +163,11 @@ const profileApplyCommand = Command.make(
         renderAction(yield* applyProfile(name, { dryRun, force }));
       }),
     ),
-).pipe(Command.withDescription("Enable exactly the profile's skills"));
+).pipe(Command.withDescription("Follow a profile: enable exactly its skills and clear this machine's own changes"));
 
 export const profileCommand = Command.make("profile", {}, () => profileList).pipe(
-  Command.withDescription("List profiles or apply one"),
-  Command.withSubcommands([profileListCommand, profileApplyCommand]),
+  Command.withDescription("List, follow, or edit shared profiles"),
+  Command.withSubcommands([profileListCommand, profileApplyCommand, profileAddCommand, profileRemoveCommand, profilePromoteCommand]),
 );
 
 export const verifyCommand = Command.make("verify", {}, () =>

@@ -4,7 +4,18 @@ import { dirname, join } from "node:path";
 import { Cause, Effect, Exit } from "effect";
 import { errorDetail, OperationFailed } from "../domain/model.ts";
 import type { Manifest, SkillLockDecodeError, State } from "../domain/model.ts";
-import { getProfile, getSkill, withProfile, withSkillEnabled, withAutoinvoke } from "../domain/model.ts";
+import {
+  alignStateWithManifest,
+  getActiveProfile,
+  getProfile,
+  getProfileOverrides,
+  getSkill,
+  promoteProfileOverrides,
+  withAutoinvoke,
+  withProfile,
+  withProfileMembers,
+  withSkillEnabled,
+} from "../domain/model.ts";
 import type { InvocationMode } from "../domain/model.ts";
 import { ManifestStore } from "./manifest.ts";
 import { applyUnlink, linkSkill, prepareUnlink, unlinkSkill } from "./linker.ts";
@@ -71,6 +82,53 @@ export const applyProfile = Effect.fn("Catalog.applyProfile")(function* (name: s
   const state = yield* store.loadState(manifest);
   if (!getProfile(manifest, name)) return yield* Effect.fail(new OperationFailed({ message: `unknown profile: ${name}` }));
   return yield* changeState(manifest, withProfile(manifest, state, name), options);
+});
+
+/**
+ * Change a shared profile's membership in the manifest (committed by the next
+ * save), then reconcile this machine if it follows that profile.
+ */
+export const editProfile = Effect.fn("Catalog.editProfile")(function* (
+  name: string,
+  additions: ReadonlyArray<string>,
+  removals: ReadonlyArray<string>,
+  options: MutationOptions = {},
+) {
+  const store = yield* ManifestStore;
+  const manifest = yield* store.loadManifest();
+  const state = yield* store.loadState(manifest);
+  for (const skill of [...additions, ...removals]) {
+    if (!getSkill(manifest, skill)) return yield* Effect.fail(new OperationFailed({ message: `unknown skill: ${skill}` }));
+  }
+  const current = getProfile(manifest, name) ?? [];
+  const members = new Set([...current, ...additions]);
+  for (const skill of removals) members.delete(skill);
+  if (members.size === 0) return yield* Effect.fail(new OperationFailed({ message: `profile ${name} would be empty; remove it from skills.manifest.json instead` }));
+  const nextManifest = withProfileMembers(manifest, name, members);
+  const added = [...members].filter((skill) => !current.includes(skill)).sort();
+  const dropped = current.filter((skill) => !members.has(skill)).sort();
+  const summary = `profile ${name}${current.length === 0 ? " (new)" : ""}: ${[...added.map((skill) => `+${skill}`), ...dropped.map((skill) => `-${skill}`)].join(" ") || "unchanged"}`;
+  if (!options.dryRun) yield* store.saveManifest(nextManifest);
+  const result = yield* changeState(nextManifest, alignStateWithManifest(nextManifest, state), options);
+  return { ...result, messages: [summary, ...result.messages] };
+});
+
+/** Fold this machine's local profile changes into the shared profile. */
+export const promoteProfile = Effect.fn("Catalog.promoteProfile")(function* (options: MutationOptions = {}) {
+  const store = yield* ManifestStore;
+  const manifest = yield* store.loadManifest();
+  const state = yield* store.loadState(manifest);
+  const profile = getActiveProfile(manifest, state);
+  if (profile === null) return yield* Effect.fail(new OperationFailed({ message: "this machine is not following a profile; run `slinky profile apply <name>` first" }));
+  const { enabled, disabled } = getProfileOverrides(state);
+  if (enabled.length === 0 && disabled.length === 0) {
+    return { messages: [`no local changes to promote into ${profile}`], warnings: [], dryRun: options.dryRun ?? false } satisfies ActionResult;
+  }
+  const promoted = promoteProfileOverrides(manifest, state);
+  const summary = `profile ${profile}: ${[...enabled.map((skill) => `+${skill}`), ...disabled.map((skill) => `-${skill}`)].join(" ")}`;
+  if (!options.dryRun) yield* store.saveManifest(promoted.manifest);
+  const result = yield* changeState(promoted.manifest, promoted.state, options);
+  return { ...result, messages: [summary, ...result.messages] };
 });
 
 export const linkProjectSkill = Effect.fn("Catalog.linkProjectSkill")(function* (options: LinkOptions) {
