@@ -8,6 +8,7 @@ import { State, stateVersion } from "../domain/model.ts";
 import {
   diffSkill,
   discoverProjectSkills,
+  gitProjectFor,
   isSkillAvailableHere,
   projectForCwd,
   projectPlacement,
@@ -16,6 +17,7 @@ import {
   projectSkillPath,
   projectSkillsFor,
   readProjectSkillFile,
+  tildePath,
   verifyRow,
 } from "./data.ts";
 import type { CatalogRow } from "./data.ts";
@@ -59,6 +61,33 @@ describe("projectForCwd", () => {
 
   test("falls back to cwd outside recorded projects", () => {
     expect(projectForCwd(state, "/workspace/other")).toBe("/workspace/other");
+  });
+});
+
+describe("gitProjectFor", () => {
+  test("finds the work tree root from a nested directory, including worktree .git files", () => {
+    const root = mkdtempSync(join(tmpdir(), "slinky-git-project-"));
+    roots.push(root);
+    mkdirSync(join(root, "repo", ".git"), { recursive: true });
+    mkdirSync(join(root, "repo", "packages", "app"), { recursive: true });
+    mkdirSync(join(root, "worktree", "src"), { recursive: true });
+    writeFileSync(join(root, "worktree", ".git"), "gitdir: ../repo/.git/worktrees/worktree\n");
+    expect(gitProjectFor(join(root, "repo", "packages", "app"))).toBe(join(root, "repo"));
+    expect(gitProjectFor(join(root, "worktree", "src"))).toBe(join(root, "worktree"));
+  });
+
+  test("is null outside any git repository", () => {
+    const root = mkdtempSync(join(tmpdir(), "slinky-no-git-"));
+    roots.push(root);
+    expect(gitProjectFor(root)).toBeNull();
+  });
+});
+
+describe("tildePath", () => {
+  test("abbreviates paths under home only", () => {
+    expect(tildePath("/home/me/code/app", "/home/me")).toBe("~/code/app");
+    expect(tildePath("/home/me", "/home/me")).toBe("~");
+    expect(tildePath("/home/meta/app", "/home/me")).toBe("/home/meta/app");
   });
 });
 

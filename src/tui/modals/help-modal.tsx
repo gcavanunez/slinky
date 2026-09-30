@@ -53,7 +53,7 @@ function helpGroups(editor: string): Array<{ title: string; lines: Array<[string
         ["u", "check vendor skills for upstream updates"],
         ["S", "sync the store: save, pull, reconcile, restore; on a leader, then every follower (j/k scroll its log)"],
         ["m", "fleet: followers this machine leads (n add, e edit, d remove, c check connections)"],
-        ["L", "link skill into a project (copy or symlink)"],
+        ["L", "link into this project, or turn it on globally"],
         ["F", "fork a vendor skill into skills/ as your own local copy"],
         ["d", "diff live global copy vs repo baseline"],
         ["p", "profiles: enter follow, n new, e edit skills, r rename, d delete"],

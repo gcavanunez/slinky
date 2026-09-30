@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { Effect } from "effect";
 import { readdirIfExists } from "../lib/fs.ts";
@@ -214,6 +214,23 @@ export function linksForSkill(state: State, name: string): ReadonlyArray<Project
 
 export function expandHome(path: string): string {
   return path === "~" || path.startsWith("~/") ? join(homedir(), path.slice(1)) : path;
+}
+
+/** Show a path under $HOME as ~/…, the inverse of expandHome. */
+export function tildePath(path: string, home: string = homedir()): string {
+  if (path === home) return "~";
+  return path.startsWith(`${home}${sep}`) ? `~${path.slice(home.length)}` : path;
+}
+
+/** The git work tree containing cwd: the nearest ancestor with a `.git` entry, or null outside git. */
+export function gitProjectFor(cwd: string = process.cwd()): string | null {
+  let dir = resolve(cwd);
+  while (true) {
+    if (existsSync(join(dir, ".git"))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
 }
 
 function filesAt(root: string): string[] {

@@ -1,6 +1,6 @@
 /** @jsxImportSource @opentui/react */
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AppProps } from "./app.tsx";
@@ -262,7 +262,7 @@ test("overlays are exclusive and render the payload captured when opened", async
 
     await input(() => setup.mockInput.pressKey("l", { shift: true }));
     const link = await setup.waitForFrame((value) => value.includes("Link alpha"));
-    expect(link).toContain("Project directory");
+    expect(link).toContain("[x] hide from git");
     await closeOverlay(setup);
 
     await input(() => setup.mockInput.pressKey("p"));
@@ -479,6 +479,83 @@ test("A cycles host-local OpenCode invocation for the selected skill", async () 
     expect(readFileSync(join(host, "skills/alpha/SKILL.md"), "utf8")).not.toContain("opencode/autoinvoke");
   } finally {
     destroy(setup);
+  }
+});
+
+async function openLinkForm(setup: Awaited<ReturnType<typeof mount>>, skill: string, prepare?: () => Promise<void>) {
+  await setup.waitForFrame((value) => value.includes("slinky"));
+  await input(() => setup.mockInput.pressKey("2"));
+  await input(() => setup.mockInput.pressKey("/"));
+  await input(() => setup.mockInput.typeText(skill));
+  await input(() => setup.mockInput.pressEnter());
+  await prepare?.();
+  await input(() => setup.mockInput.pressKey("l", { shift: true }));
+  return setup.waitForFrame((value) => value.includes(`Link ${skill}`));
+}
+
+test("L links a skill into the working directory's git project from one form", async () => {
+  const statePath = join(host, ".local", "state.json");
+  const savedState = readFileSync(statePath, "utf8");
+  mkdirSync(join(project, ".git", "info"), { recursive: true });
+  const setup = await mount();
+  try {
+    const form = await openLinkForm(setup, "alpha");
+    // The git project around cwd, truncated from the left so its name stays visible.
+    expect(form).toMatch(/\(\*\) this project +\S*\/project +│/);
+    // alpha is already on, so the global target is shown but unavailable.
+    expect(form).toContain("( ) global          already on");
+    expect(form).toContain("(*) copy");
+    expect(form).toContain("[x] hide from git");
+
+    // tab skips the unavailable global row: project -> copy -> symlink.
+    await input(() => setup.mockInput.pressTab());
+    await input(() => setup.mockInput.pressKey("j"));
+    await input(() => setup.mockInput.pressKey(" "));
+    expect(await setup.waitForFrame((value) => value.includes("(*) symlink"))).toContain("( ) copy");
+
+    // symlink -> hide from git -> .claude/skills, then back up and untick hide from git.
+    await input(() => setup.mockInput.pressKey("j"));
+    await input(() => setup.mockInput.pressKey("j"));
+    await input(() => setup.mockInput.pressTab({ shift: true }));
+    await input(() => setup.mockInput.pressKey(" "));
+    const ready = await setup.waitForFrame((value) => value.includes("[ ] hide from git"));
+    expect(ready).toContain("[x] .claude/skills");
+
+    await input(() => setup.mockInput.pressEnter());
+    await setup.waitForFrame((value) => value.includes("linked alpha (symlink) into"));
+    expect(lstatSync(join(project, ".agents", "skills", "alpha")).isSymbolicLink()).toBe(true);
+    const links = JSON.parse(readFileSync(statePath, "utf8")).projectLinks;
+    expect(links).toEqual([expect.objectContaining({ skill: "alpha", mode: "symlink", excludedTargets: [] })]);
+  } finally {
+    destroy(setup);
+    rmSync(join(project, ".agents"), { recursive: true, force: true });
+    rmSync(join(project, ".git"), { recursive: true, force: true });
+    writeFileSync(statePath, savedState);
+  }
+});
+
+test("L turns a skill on globally when there is no git project here", async () => {
+  const statePath = join(host, ".local", "state.json");
+  const savedState = readFileSync(statePath, "utf8");
+  const setup = await mount();
+  try {
+    const form = await openLinkForm(setup, "beta", async () => {
+      await input(() => setup.mockInput.pressKey(" "));
+      await setup.waitForFrame((value) => value.includes("disabled beta"));
+    });
+    expect(form).toContain("( ) this project    not inside a git repository");
+    expect(form).toContain("(*) global");
+    // Mode and options only apply to a project link.
+    expect(form).toContain("mode  project only");
+    expect(form).toContain("enter turn on");
+
+    await input(() => setup.mockInput.pressEnter());
+    await setup.waitForFrame((value) => value.includes("enabled beta globally"));
+    expect(JSON.parse(readFileSync(statePath, "utf8")).selection.disabledSkills).not.toContain("beta");
+    expect(lstatSync(join(home, ".agents", "skills", "beta")).isSymbolicLink()).toBe(true);
+  } finally {
+    destroy(setup);
+    writeFileSync(statePath, savedState);
   }
 });
 

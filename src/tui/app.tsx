@@ -1,7 +1,7 @@
 /** @jsxImportSource @opentui/react */
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { existsSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { basename, extname, join } from "node:path";
 import { Effect, Match } from "effect";
 import { useKeyboard, usePaste, useRenderer, useSelectionHandler, useTerminalDimensions } from "@opentui/react";
@@ -71,7 +71,8 @@ import { ForeignSkillModal } from "./modals/foreign-skill-modal.tsx";
 import { ForkSkillModal } from "./modals/fork-skill-modal.tsx";
 import { HelpModal, helpLength, helpRows } from "./modals/help-modal.tsx";
 import { IndexSkillModal } from "./modals/index-skill-modal.tsx";
-import { LinkModal } from "./modals/link-modal.tsx";
+import { LinkModal, linkStopEnabled, linkStops } from "./modals/link-modal.tsx";
+import type { LinkTargets } from "./modals/link-modal.tsx";
 import { FleetModal, FollowerFormModal, FollowerRemoveModal } from "./modals/fleet-modal.tsx";
 import type { FollowerCheck, FollowerFormFields } from "./modals/fleet-modal.tsx";
 import { ProfileDeleteModal, ProfileMembersModal, ProfileNameModal } from "./modals/profile-edit-modals.tsx";
@@ -83,8 +84,9 @@ import { ThemeModal } from "./modals/theme-modal.tsx";
 import { UnindexedSkillModal } from "./modals/unindexed-skill-modal.tsx";
 import {
   diffSkill,
-  expandHome,
   foreignSkillFiles,
+  gitProjectFor,
+  tildePath,
   foreignSkillLocation,
   isSkillAvailableHere,
   loadCatalog,
@@ -127,10 +129,19 @@ function ownerOf(row: CatalogRow): string {
   return row.meta.path.split("/")[1] ?? "vendor";
 }
 
+/** Whether two paths name the same directory once symlinks (macOS /var → /private/var) resolve. */
+function samePath(a: string, b: string): boolean {
+  try {
+    return realpathSync(a) === realpathSync(b);
+  } catch {
+    return a === b;
+  }
+}
+
 export interface LinkFlow {
-  step: "project" | "mode" | "options";
-  input: string;
-  recentIndex: number; // -1 = free text
+  /** Index into linkStops: a target, a mode, or an option. */
+  focus: number;
+  target: "project" | "global";
   mode: "copy" | "symlink";
   exclude: boolean;
   claude: boolean;
@@ -170,7 +181,7 @@ type Interaction =
   | { kind: "profile-members"; name: string; members: ReadonlyArray<string>; index: number; returnIndex: number; error?: string }
   | { kind: "theme"; index: number; saved: ThemeId }
   | { kind: "diff"; row: CatalogRow; result: DiffResult }
-  | { kind: "link"; row: CatalogRow; flow: LinkFlow }
+  | { kind: "link"; row: CatalogRow; flow: LinkFlow; targets: LinkTargets }
   | { kind: "index"; skill: UnindexedSkill; flow: IndexFlow }
   | { kind: "adopt"; skill: ForeignSkill; flow: AdoptFlow }
   | { kind: "fork"; row: CatalogRow; flow: ForkFlow }
@@ -312,6 +323,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
   const notificationTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const indexTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const forkInput = useRef("");
+  const linkFlow = useRef<LinkFlow | null>(null);
   const profileNameInput = useRef("");
   const followerForm = useRef<FollowerFormFields>({ name: "", ssh: "", command: "" });
   const followerField = useRef(0);
@@ -634,7 +646,14 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
     return true;
   };
 
-  const patchLinkFlow = (fn: (prev: LinkFlow) => LinkFlow) => setInteraction((previous) => (previous.kind === "link" ? { ...previous, flow: fn(previous.flow) } : previous));
+  // Keys can arrive faster than React re-renders, so the form lives in a ref
+  // updated eagerly here, and the rendered interaction mirrors it.
+  const updateLinkFlow = (fn: (prev: LinkFlow) => LinkFlow) => {
+    if (!linkFlow.current) return;
+    const flow = fn(linkFlow.current);
+    linkFlow.current = flow;
+    setInteraction((previous) => (previous.kind === "link" ? { ...previous, flow } : previous));
+  };
 
   const patchIndexFlow = (fn: (prev: IndexFlow) => IndexFlow) => setInteraction((previous) => (previous.kind === "index" ? { ...previous, flow: fn(previous.flow) } : previous));
 
@@ -865,86 +884,112 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
     return true;
   };
 
+  const openLink = (row: CatalogRow) => {
+    const project = gitProjectFor();
+    const projectBlocked = project === null ? "not inside a git repository" : samePath(project, catalog.repo) ? "this is the catalog repository" : null;
+    const targets: LinkTargets = {
+      project: projectBlocked === null ? project : null,
+      projectBlocked,
+      globalStore: tildePath(catalog.agentsSkills),
+      globalOn: row.enabled,
+    };
+    const target = targets.project === null && !targets.globalOn ? "global" : "project";
+    linkFlow.current = {
+      focus: linkStops.findIndex((stop) => stop.kind === "target" && stop.target === target),
+      target,
+      mode: "copy",
+      exclude: true,
+      claude: true,
+    };
+    setInteraction({ kind: "link", row, flow: linkFlow.current, targets });
+  };
+
+  /** space or a click on a form row: focus it, then choose or toggle it. Unavailable rows ignore both. */
+  const activateLinkStop = (index: number) => {
+    if (interaction.kind !== "link" || !linkFlow.current) return;
+    const stop = linkStops[index];
+    if (!stop || !linkStopEnabled(stop, linkFlow.current, interaction.targets)) return;
+    updateLinkFlow((flow) => {
+      const focused = { ...flow, focus: index, error: undefined };
+      if (stop.kind === "target") return { ...focused, target: stop.target };
+      if (stop.kind === "mode") return { ...focused, mode: stop.mode };
+      return stop.option === "exclude" ? { ...focused, exclude: !flow.exclude } : { ...focused, claude: !flow.claude };
+    });
+  };
+
+  /** Next available row in `step` direction, wrapping; stays put when nothing else is available. */
+  const moveLinkFocus = (step: 1 | -1) => {
+    if (interaction.kind !== "link") return;
+    const { targets } = interaction;
+    updateLinkFlow((flow) => {
+      for (let offset = 1; offset < linkStops.length; offset += 1) {
+        const index = (flow.focus + step * offset + linkStops.length) % linkStops.length;
+        const stop = linkStops[index];
+        if (stop && linkStopEnabled(stop, flow, targets)) return { ...flow, focus: index };
+      }
+      return flow;
+    });
+  };
+
+  const closeLink = () => {
+    linkFlow.current = null;
+    setInteraction({ kind: "browse" });
+    refresh();
+  };
+
+  const submitLink = () => {
+    if (interaction.kind !== "link" || !linkFlow.current) return;
+    const { row, targets } = interaction;
+    const flow = linkFlow.current;
+    if (flow.target === "global") {
+      if (targets.globalOn) {
+        updateLinkFlow((current) => ({ ...current, error: `${row.name} is already on globally` }));
+        return;
+      }
+      const outcome = runSyncResult(setSkillsEnabled([row.name], true));
+      if (!outcome.ok) {
+        updateLinkFlow((current) => ({ ...current, error: outcome.message }));
+        return;
+      }
+      closeLink();
+      reportAction(`enabled ${row.name} globally`, outcome.value);
+      return;
+    }
+    if (targets.project === null) {
+      updateLinkFlow((current) => ({ ...current, error: `no project to link into: ${targets.projectBlocked ?? "unknown"}` }));
+      return;
+    }
+    const project = targets.project;
+    const outcome = runSyncResult(
+      linkProjectSkill({
+        skill: row.name,
+        project,
+        mode: flow.mode,
+        gitExclude: flow.exclude,
+        claude: flow.claude,
+      }),
+    );
+    if (!outcome.ok) {
+      updateLinkFlow((current) => ({ ...current, error: outcome.message }));
+      return;
+    }
+    closeLink();
+    notify(`linked ${row.name} (${flow.mode}) into ${project}`);
+  };
+
   const handleLink = (key: KeyEvent): boolean => {
-    if (interaction.kind !== "link") return true;
-    const { flow, row } = interaction;
-    if (key.name === "escape") {
+    if (interaction.kind !== "link" || !linkFlow.current) return true;
+    if (key.name === "escape" || key.name === "q") {
+      linkFlow.current = null;
       setInteraction({ kind: "browse" });
       return true;
     }
-    if (flow.step === "project") {
-      const recents = catalog.state.recentProjects;
-      if (key.name === "up" || key.name === "down") {
-        if (recents.length === 0) return true;
-        const dir = key.name === "down" ? 1 : -1;
-        patchLinkFlow((f) => {
-          const next = clamp(f.recentIndex + dir, 0, recents.length - 1);
-          return { ...f, recentIndex: next, input: recents[next] ?? f.input };
-        });
-        return true;
-      }
-      if (key.name === "return" || key.name === "enter") {
-        patchLinkFlow((f) => {
-          const path = expandHome(f.input.trim());
-          if (!path || !existsSync(path)) {
-            return { ...f, error: `not a directory: ${path || "(empty)"}` };
-          }
-          return { ...f, input: path, step: "mode", error: undefined };
-        });
-        return true;
-      }
-      if (key.name === "backspace") {
-        patchLinkFlow((f) => ({ ...f, input: f.input.slice(0, -1), recentIndex: -1 }));
-        return true;
-      }
-      const p = printable(key);
-      if (p) patchLinkFlow((f) => ({ ...f, input: f.input + p, recentIndex: -1 }));
+    if (key.name === "tab" || key.name === "down" || key.name === "up" || key.name === "j" || key.name === "k") {
+      moveLinkFocus(key.name === "up" || key.name === "k" || (key.name === "tab" && key.shift) ? -1 : 1);
       return true;
     }
-    if (flow.step === "mode") {
-      if (key.name === "j" || key.name === "k" || key.name === "up" || key.name === "down") {
-        patchLinkFlow((f) => ({ ...f, mode: f.mode === "copy" ? "symlink" : "copy" }));
-        return true;
-      }
-      if (key.name === "c") {
-        patchLinkFlow((f) => ({ ...f, mode: "copy" }));
-        return true;
-      }
-      if (key.name === "s") {
-        patchLinkFlow((f) => ({ ...f, mode: "symlink" }));
-        return true;
-      }
-      if (key.name === "return" || key.name === "enter") {
-        patchLinkFlow((f) => ({ ...f, step: "options" }));
-        return true;
-      }
-      return true;
-    }
-    // options
-    if (key.name === "e") {
-      patchLinkFlow((f) => ({ ...f, exclude: !f.exclude }));
-      return true;
-    }
-    if (key.name === "c") {
-      patchLinkFlow((f) => ({ ...f, claude: !f.claude }));
-      return true;
-    }
-    if (key.name === "return" || key.name === "enter") {
-      const outcome = runSyncResult(
-        linkProjectSkill({
-          skill: row.name,
-          project: flow.input,
-          mode: flow.mode,
-          gitExclude: flow.exclude,
-          claude: flow.claude,
-        }),
-      );
-      if (outcome.ok) notify(`linked ${row.name} (${flow.mode}) into ${flow.input}`);
-      else notify(outcome.message, true);
-      setInteraction({ kind: "browse" });
-      refresh();
-      return true;
-    }
+    if (key.name === "space") activateLinkStop(linkFlow.current.focus);
+    else if (key.name === "return" || key.name === "enter") submitLink();
     return true;
   };
 
@@ -1585,31 +1630,13 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
         } else notify(`${current.name} is already a local skill; fork applies to vendor skills`, true);
         return;
       case "skill.link":
-        if (!current) return;
-        setInteraction({
-          kind: "link",
-          row: current,
-          flow: {
-            step: "project",
-            input: process.cwd() !== catalog.repo ? process.cwd() : (catalog.state.recentProjects[0] ?? ""),
-            recentIndex: -1,
-            mode: "copy",
-            exclude: true,
-            claude: true,
-          },
-        });
+        if (current) openLink(current);
         return;
     }
   };
 
   const textInputActive =
-    filterMode ||
-    docFind.typing ||
-    interaction.kind === "link" ||
-    interaction.kind === "index" ||
-    interaction.kind === "fork" ||
-    interaction.kind === "profile-name" ||
-    interaction.kind === "follower-form";
+    filterMode || docFind.typing || interaction.kind === "index" || interaction.kind === "fork" || interaction.kind === "profile-name" || interaction.kind === "follower-form";
   useAppKeybindings(keymapStateFor(interaction, textInputActive), runAppCommand);
 
   useKeyboard((key) => {
@@ -1996,7 +2023,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
       case "diff":
         return <DiffModal cols={cols} rows={rowsAvail} row={interaction.row} result={interaction.result} />;
       case "link":
-        return <LinkModal cols={cols} rows={rowsAvail} row={interaction.row} flow={interaction.flow} recents={catalog.state.recentProjects} />;
+        return <LinkModal cols={cols} rows={rowsAvail} row={interaction.row} flow={interaction.flow} targets={interaction.targets} onClick={activateLinkStop} />;
       case "index":
         return <IndexSkillModal cols={cols} rows={rowsAvail} skill={interaction.skill} flow={interaction.flow} />;
       case "adopt":
