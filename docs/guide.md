@@ -255,6 +255,8 @@ slinky link frontend-design /path/to/project
 
 By default Slinky adds its created paths to the project's `.git/info/exclude`. It also creates a `.claude/skills` symlink when the project already has a `.claude/` directory. Use `--no-exclude` or `--no-claude` to disable those behaviors.
 
+In a linked Git worktree the exclude lines go to the main checkout's `.git/info/exclude`, the only one Git reads, so every worktree of that repository shares them. Unlinking from one worktree keeps a line while another recorded link still uses it.
+
 Or keep the project connected to the host copy:
 
 ```bash
@@ -269,6 +271,8 @@ slinky unlink frontend-design /path/to/project
 ```
 
 Slinky refuses to remove modified copies or replaced symlinks unless `--force` is explicitly requested.
+
+If a linked skill's `.agents/skills/<name>` disappears outside Slinky, for example deleted by hand or lost when a worktree is removed and recreated at the same path, linking it again replaces the stale record instead of asking you to unlink first.
 
 ## Configuration
 

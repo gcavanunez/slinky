@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
 export const EXCLUDE_MARKER = "# managed by my-agent-skills";
 
@@ -29,17 +29,46 @@ export function removeExcludeLines(existing: string, lines: string[]): string {
   return out.join("\n");
 }
 
-/** Resolve <project>/.git/info/exclude, or null when not a plain git dir. */
+/** The git dir of a work tree: `.git` itself, or where a `.git` file points (linked worktrees, submodules). */
+function gitDirFor(project: string): string | null {
+  const dotGit = join(project, ".git");
+  try {
+    if (statSync(dotGit).isDirectory()) return dotGit;
+    const pointer = readFileSync(dotGit, "utf8").match(/^gitdir:\s*(.+?)\s*$/m)?.[1];
+    return pointer ? resolve(project, pointer) : null;
+  } catch {
+    return null;
+  }
+}
+
+function commonDirFor(gitDir: string): string {
+  try {
+    return resolve(gitDir, readFileSync(join(gitDir, "commondir"), "utf8").trim());
+  } catch {
+    return gitDir;
+  }
+}
+
+/**
+ * The `info/exclude` git reads for a work tree, or null outside git.
+ *
+ * A linked worktree has its own git dir, but git only reads `info/exclude` from the common dir, so
+ * every worktree of a repository shares the main checkout's file.
+ */
 export function excludeFilePath(project: string): string | null {
-  const gitPath = join(project, ".git");
-  if (!existsSync(gitPath) || !statSync(gitPath).isDirectory()) return null;
-  return join(gitPath, "info", "exclude");
+  const gitDir = gitDirFor(project);
+  if (!gitDir) return null;
+  try {
+    return join(realpathSync(commonDirFor(gitDir)), "info", "exclude");
+  } catch {
+    return null;
+  }
 }
 
 export function updateExcludeFile(project: string, op: "add" | "remove", lines: string[]): string[] {
   const file = excludeFilePath(project);
   if (!file) return [];
-  mkdirSync(join(project, ".git", "info"), { recursive: true });
+  mkdirSync(dirname(file), { recursive: true });
   const existing = existsSync(file) ? readFileSync(file, "utf8") : "";
   const present = new Set(existing.split("\n").map((line) => line.trim()));
   const affected = lines.filter((line) => (op === "add" ? !present.has(line.trim()) : present.has(line.trim())));

@@ -144,6 +144,8 @@ A copy project link records:
 
 Symlink links use `"mode": "symlink"` and omit `snapshotHash`. Targets are limited to the canonical `.agents/skills/<name>` path and the optional `.claude/skills/<name>` link.
 
+`excludedTargets` lists the targets the link hides through Git's `info/exclude`: lines it added, plus lines already claimed by another link that shares the same exclude file, as linked worktrees of one repository do. Unlinking removes a line only when no remaining link claims it.
+
 ## Config
 
 `slinky init` writes `~/.config/slinky/config.json`:

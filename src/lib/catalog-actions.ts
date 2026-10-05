@@ -207,7 +207,7 @@ export const unlinkProjectSkill = Effect.fn("Catalog.unlinkProjectSkill")(functi
   const state = yield* store.loadState(manifest);
   const result = yield* prepareUnlink(manifest, state, skill, project, options);
   yield* store.saveState(result.state);
-  const warnings = yield* Effect.sync(() => applyUnlink(result.link)).pipe(
+  const warnings = yield* Effect.sync(() => applyUnlink(result.link, result.state)).pipe(
     // Removal failed: restore the previously persisted state.
     Effect.onError(() => store.saveState(state).pipe(Effect.ignore)),
   );

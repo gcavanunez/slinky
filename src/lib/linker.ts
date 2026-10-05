@@ -3,7 +3,7 @@ import { basename, dirname, join, posix, resolve } from "node:path";
 import { Effect, Schema } from "effect";
 import { formatUtc, getSkill, nowUtc, OperationFailed, ProjectLink, withoutProjectLink, withProjectLink } from "../domain/model.ts";
 import type { Manifest, State } from "../domain/model.ts";
-import { updateExcludeFile } from "./exclude.ts";
+import { excludeFilePath, updateExcludeFile } from "./exclude.ts";
 import { contentHash } from "./hash.ts";
 import { tryOp } from "./ops.ts";
 import { HostRepo, Paths } from "./paths.ts";
@@ -50,14 +50,45 @@ export function findLink(state: State, skill: string, project: string): ProjectL
   return state.projectLinks.find((link) => link.skill === skill && resolve(link.project) === resolved);
 }
 
-function linkSkillSync(repo: string, manifest: Manifest, state: State, opts: LinkOptions): LinkResult {
+/**
+ * Targets the recorded links hide through one exclude file. Worktrees of a repository share that
+ * file, so a line stays while any of their links still lists it.
+ */
+function excludesClaimed(state: State, file: string | null): ReadonlySet<string> {
+  const claimed = new Set<string>();
+  if (file === null) return claimed;
+  for (const link of state.projectLinks) {
+    if (link.excludedTargets.length > 0 && excludeFilePath(link.project) === file) {
+      for (const target of link.excludedTargets) claimed.add(target);
+    }
+  }
+  return claimed;
+}
+
+/**
+ * Drop a recorded link whose canonical path is gone, e.g. deleted by hand or lost with a removed
+ * and recreated worktree. Secondary symlinks are removed only while they still point at the
+ * canonical path; anything else at those paths is left alone.
+ */
+function retireStaleLink(state: State, link: ProjectLink): State {
+  const canonicalRel = link.targets[0];
+  const canonical = join(link.project, canonicalRel);
+  const owned = link.targets.slice(1).filter((rel) => symlinkPointsTo(join(link.project, rel), canonical));
+  const next = withoutProjectLink(state, link);
+  applyUnlink({ ...link, targets: [canonicalRel, ...owned] }, next);
+  return next;
+}
+
+function linkSkillSync(repo: string, manifest: Manifest, recordedState: State, opts: LinkOptions): LinkResult {
   const meta = getSkill(manifest, opts.skill);
   if (!meta) throw new OperationFailed({ message: `unknown skill: ${opts.skill}` });
   const project = resolve(opts.project);
   if (!existsSync(project)) throw new OperationFailed({ message: `project dir not found: ${project}` });
-  if (findLink(state, opts.skill, project)) {
+  const recorded = findLink(recordedState, opts.skill, project);
+  if (recorded && exists(join(recorded.project, recorded.targets[0]))) {
     throw new OperationFailed({ message: `${opts.skill} is already linked into ${project} (unlink first)` });
   }
+  const state = recorded ? retireStaleLink(recordedState, recorded) : recordedState;
 
   const source = join(repo, meta.path);
   const destRel = posix.join(".agents", "skills", opts.skill);
@@ -65,7 +96,7 @@ function linkSkillSync(repo: string, manifest: Manifest, state: State, opts: Lin
   if (exists(dest)) throw new OperationFailed({ message: `destination already exists: ${dest}` });
 
   const targets: [string, ...string[]] = [destRel];
-  let excludedTargets: string[] = [];
+  let addedExcludes: string[] = [];
   try {
     mkdirSync(join(project, ".agents", "skills"), { recursive: true });
     if (opts.mode === "copy") {
@@ -85,10 +116,14 @@ function linkSkillSync(repo: string, manifest: Manifest, state: State, opts: Lin
       }
     }
 
+    let excludedTargets: string[] = [];
     if (opts.gitExclude ?? true) {
       const lines = targets.map(excludeLine);
       const added = new Set(updateExcludeFile(project, "add", lines));
-      excludedTargets = targets.filter((target) => added.has(excludeLine(target)));
+      addedExcludes = targets.filter((target) => added.has(excludeLine(target)));
+      // A line another worktree's link added is shared, not the user's own: claim it too.
+      const shared = excludesClaimed(state, excludeFilePath(project));
+      excludedTargets = targets.filter((target) => added.has(excludeLine(target)) || shared.has(target));
     }
 
     const common = {
@@ -103,8 +138,8 @@ function linkSkillSync(repo: string, manifest: Manifest, state: State, opts: Lin
 
     return { state: withProjectLink(state, link), link };
   } catch (error) {
-    if (excludedTargets.length > 0) {
-      updateExcludeFile(project, "remove", excludedTargets.flatMap(excludeLinesForRemoval));
+    if (addedExcludes.length > 0) {
+      updateExcludeFile(project, "remove", addedExcludes.flatMap(excludeLinesForRemoval));
     }
     for (const target of [...targets].reverse()) {
       const path = join(project, target);
@@ -198,7 +233,8 @@ export const prepareUnlink = Effect.fn("Linker.prepareUnlink")(function* (manife
   return yield* tryOp(() => prepareUnlinkSync(repo, manifest, state, skill, project, opts));
 });
 
-export function applyUnlink(link: ProjectLink): ReadonlyArray<string> {
+/** Remove a link's paths, and its exclude lines unless a link in `remaining` still claims them. */
+export function applyUnlink(link: ProjectLink, remaining: State): ReadonlyArray<string> {
   for (const rel of [...link.targets].reverse()) {
     const path = join(link.project, rel);
     if (exists(path)) rmSync(path, { recursive: true, force: true });
@@ -206,7 +242,9 @@ export function applyUnlink(link: ProjectLink): ReadonlyArray<string> {
   const warnings: string[] = [];
   if (link.excludedTargets.length > 0) {
     try {
-      updateExcludeFile(link.project, "remove", link.excludedTargets.flatMap(excludeLinesForRemoval));
+      const shared = excludesClaimed(remaining, excludeFilePath(link.project));
+      const released = link.excludedTargets.filter((target) => !shared.has(target));
+      if (released.length > 0) updateExcludeFile(link.project, "remove", released.flatMap(excludeLinesForRemoval));
     } catch (error) {
       warnings.push(`could not clean .git/info/exclude in ${link.project}: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -216,7 +254,7 @@ export function applyUnlink(link: ProjectLink): ReadonlyArray<string> {
 
 export const unlinkSkill = Effect.fn("Linker.unlinkSkill")(function* (manifest: Manifest, state: State, skill: string, project: string, opts: { force?: boolean } = {}) {
   const prepared = yield* prepareUnlink(manifest, state, skill, project, opts);
-  applyUnlink(prepared.link);
+  applyUnlink(prepared.link, prepared.state);
   return prepared;
 });
 

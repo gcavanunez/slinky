@@ -154,16 +154,16 @@ describe("link construction", () => {
   });
 });
 
-describe("link safety", () => {
-  function emptyState() {
-    return Schema.decodeUnknownSync(State)({
-      version: stateVersion,
-      selection: { kind: "custom", disabledSkills: [] },
-      projectLinks: [],
-      recentProjects: [],
-    });
-  }
+function emptyState() {
+  return Schema.decodeUnknownSync(State)({
+    version: stateVersion,
+    selection: { kind: "custom", disabledSkills: [] },
+    projectLinks: [],
+    recentProjects: [],
+  });
+}
 
+describe("link safety", () => {
   test("refuses a project whose .agents/skills is the global store", () => {
     // $HOME: linking here would copy the skill over its own global entry.
     const home = mkdtempSync(join(tmpdir(), "slinky-home-"));
@@ -209,6 +209,123 @@ describe("link safety", () => {
   });
 });
 
+describe("hiding from git in worktrees", () => {
+  const git = (cwd: string, ...args: string[]) => {
+    const result = Bun.spawnSync(["git", "-c", "user.name=slinky", "-c", "user.email=slinky@example.com", "-c", "commit.gpgsign=false", ...args], { cwd });
+    if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr.toString()}`);
+  };
+  const ignored = (cwd: string, path: string) => Bun.spawnSync(["git", "check-ignore", "-q", path], { cwd }).exitCode === 0;
+
+  function repoWithWorktrees(...names: string[]) {
+    const root = mkdtempSync(join(tmpdir(), "slinky-worktrees-"));
+    roots.push(root);
+    const main = join(root, "main");
+    mkdirSync(main);
+    git(main, "init", "-q");
+    git(main, "commit", "-q", "--allow-empty", "-m", "init");
+    const worktrees = names.map((name) => {
+      const path = join(root, name);
+      git(main, "worktree", "add", "-q", "-b", name, path);
+      return path;
+    });
+    return { exclude: join(main, ".git", "info", "exclude"), worktrees };
+  }
+
+  test("hides a worktree link through the repository's shared exclude file", () => {
+    const {
+      exclude,
+      worktrees: [worktree = ""],
+    } = repoWithWorktrees("feature");
+    const { manifest } = fixtures(worktree);
+
+    const result = run(linkSkill(manifest, emptyState(), { skill: "foo", project: worktree, mode: "symlink", gitExclude: true, claude: false }));
+
+    expect(result.link.excludedTargets).toEqual([".agents/skills/foo"]);
+    expect(readFileSync(exclude, "utf8")).toContain("/.agents/skills/foo\n");
+    expect(ignored(worktree, ".agents/skills/foo")).toBe(true);
+  });
+
+  test("keeps a shared exclude line until the last worktree using it unlinks", () => {
+    const {
+      exclude,
+      worktrees: [first = "", second = ""],
+    } = repoWithWorktrees("first", "second");
+    const { manifest } = fixtures(first);
+    const options = { skill: "foo", mode: "symlink", gitExclude: true, claude: false } as const;
+    const linkedFirst = run(linkSkill(manifest, emptyState(), { ...options, project: first }));
+    const linkedBoth = run(linkSkill(manifest, linkedFirst.state, { ...options, project: second }));
+    expect(linkedBoth.link.excludedTargets).toEqual([".agents/skills/foo"]);
+
+    const unlinkedFirst = run(unlinkSkill(manifest, linkedBoth.state, "foo", first));
+    expect(ignored(second, ".agents/skills/foo")).toBe(true);
+
+    run(unlinkSkill(manifest, unlinkedFirst.state, "foo", second));
+    expect(readFileSync(exclude, "utf8")).not.toContain("/.agents/skills/foo");
+  });
+});
+
+describe("relinking over a recorded link", () => {
+  function recordedState(project: string, targets: string[], excludedTargets: string[]) {
+    return Schema.decodeUnknownSync(State)({
+      version: stateVersion,
+      selection: { kind: "custom", disabledSkills: [] },
+      projectLinks: [{ mode: "symlink", project, skill: "foo", targets, excludedTargets, linkedAt: "2026-07-13T12:00:00.000Z" }],
+      recentProjects: [],
+    });
+  }
+
+  test("still refuses while the recorded link is on disk", () => {
+    const project = mkdtempSync(join(tmpdir(), "slinky-link-"));
+    roots.push(project);
+    mkdirSync(join(project, ".agents", "skills"), { recursive: true });
+    symlinkSync(resolve(REPO, "skills", "foo"), join(project, ".agents", "skills", "foo"));
+    const { manifest, state } = fixtures(project);
+
+    const message = failureMessage(linkSkill(manifest, state, { skill: "foo", project, mode: "symlink", gitExclude: false, claude: false }));
+
+    expect(message).toContain("already linked");
+  });
+
+  test("replaces a record whose files were removed by hand", () => {
+    const project = mkdtempSync(join(tmpdir(), "slinky-link-"));
+    roots.push(project);
+    expect(Bun.spawnSync(["git", "init", "-q", project]).exitCode).toBe(0);
+    const agents = join(project, ".agents", "skills", "foo");
+    const claude = join(project, ".claude", "skills", "foo");
+    mkdirSync(join(project, ".claude", "skills"), { recursive: true });
+    // The .agents entry is gone; the .claude symlink to it dangles.
+    symlinkSync(join("..", "..", ".agents", "skills", "foo"), claude);
+    writeFileSync(join(project, ".git", "info", "exclude"), "# managed by my-agent-skills\n/.agents/skills/foo\n/.claude/skills/foo\n");
+    const { manifest } = fixtures(project);
+    const state = recordedState(project, [".agents/skills/foo", ".claude/skills/foo"], [".agents/skills/foo", ".claude/skills/foo"]);
+
+    const result = run(linkSkill(manifest, state, { skill: "foo", project, mode: "symlink", gitExclude: true, claude: true }));
+
+    expect(result.state.projectLinks).toEqual([result.link]);
+    expect(result.link.targets).toEqual([".agents/skills/foo", ".claude/skills/foo"]);
+    expect(result.link.excludedTargets).toEqual([".agents/skills/foo", ".claude/skills/foo"]);
+    expect(lstatSync(agents).isSymbolicLink()).toBe(true);
+    expect(lstatSync(claude).isSymbolicLink()).toBe(true);
+    const exclude = readFileSync(join(project, ".git", "info", "exclude"), "utf8");
+    expect(exclude.match(/^\/\.agents\/skills\/foo$/gm)).toHaveLength(1);
+  });
+
+  test("leaves a .claude entry the stale record no longer owns", () => {
+    const project = mkdtempSync(join(tmpdir(), "slinky-link-"));
+    roots.push(project);
+    const claude = join(project, ".claude", "skills", "foo");
+    mkdirSync(claude, { recursive: true });
+    writeFileSync(join(claude, "user-file.txt"), "keep me");
+    const { manifest } = fixtures(project);
+    const state = recordedState(project, [".agents/skills/foo", ".claude/skills/foo"], []);
+
+    const result = run(linkSkill(manifest, state, { skill: "foo", project, mode: "symlink", gitExclude: false, claude: true }));
+
+    expect(result.link.targets).toEqual([".agents/skills/foo"]);
+    expect(readFileSync(join(claude, "user-file.txt"), "utf8")).toBe("keep me");
+  });
+});
+
 describe("unlink safety", () => {
   test("refuses to delete a directory that replaced a managed symlink", () => {
     const project = mkdtempSync(join(tmpdir(), "slinky-link-"));
@@ -237,7 +354,7 @@ describe("unlink safety", () => {
     expect(linkExists(target)).toBe(true);
     expect(prepared.state.projectLinks).toEqual([]);
 
-    applyUnlink(prepared.link);
+    applyUnlink(prepared.link, prepared.state);
     expect(linkExists(target)).toBe(false);
   });
 });
