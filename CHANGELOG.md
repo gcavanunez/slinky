@@ -1,5 +1,16 @@
 # @gcavanunez/slinky
 
+## 0.5.0
+
+### Minor Changes
+
+- b55dfe4: `L` in the TUI now opens a single form instead of a three-step wizard. Pick the target, either this project (the git repository around the working directory) or global (turn the skill on in the global stores), then for a project choose copy or symlink and the `[x]` options for hiding it from Git and adding the `.claude/skills` symlink. `tab` or the arrow keys move between rows, skipping ones that do not apply, `space` chooses or toggles, `enter` links, and a failed link keeps the form open with its error.
+
+### Patch Changes
+
+- f6276f5: "Hide from git" now works when the project is a linked Git worktree. Slinky used to skip it silently there because `.git` is a file, so the linked skill showed up in `git status`. The exclude lines now go to the main checkout's `.git/info/exclude`, the file Git actually reads for every worktree. Since that file is shared, unlinking a skill from one worktree keeps its line while another worktree's link still uses it. Links made in a worktree before this fix are still recorded as tracked; unlink and link them again to hide them.
+- f6276f5: Linking a skill into a project no longer fails with "already linked (unlink first)" when the recorded link's files are gone, such as after deleting `.agents/skills/<name>` by hand or recreating a removed worktree at the same path. The stale record is replaced, its dangling `.claude/skills` symlink and `.git/info/exclude` lines are cleaned up, and the skill is linked fresh.
+
 ## 0.4.0
 
 ### Minor Changes
