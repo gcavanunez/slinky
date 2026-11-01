@@ -164,7 +164,7 @@ export const runSkillsUpdate = Effect.fn("Update.runSkillsUpdate")(function* (ma
       for (const name of names) {
         const meta = getSkill(manifest, name);
         const live = join(paths.agentsSkills, name);
-        if (meta && observeEntry(live).kind === "dir") decorateInstalled(live, join(repo, meta.path), invocationPreference(state, name));
+        if (meta && observeEntry(live).kind === "dir") decorateInstalled(live, join(repo, meta.path), invocationPreference(manifest, state, name));
       }
     }
   });

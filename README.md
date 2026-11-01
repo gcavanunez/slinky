@@ -40,7 +40,7 @@ Starting from nothing? The [guide](docs/guide.md#bootstrap) shows how to create 
 ```bash
 slinky status                            # catalog, live state, drift
 slinky enable <skill>                    # or disable, or profile apply <name>
-slinky autoinvoke <skill> off            # keep installed; activate explicitly in OpenCode
+slinky autoinvoke <skill> off            # keep installed; run only when called by name
 slinky skills add owner/repo --skill x   # vendor a skill from skills.sh
 slinky update --check                    # anything new upstream?
 slinky update                            # review and accept changes
@@ -68,7 +68,7 @@ One catalog tree on the left, the selected skill's documentation on the right.
 | --------------- | ------------------------------------------------------------------------------------- |
 | `j/k` `h/l`     | move; fold or unfold a group                                                          |
 | `space`         | toggle a skill, or every skill in a group from its heading                            |
-| `A`             | cycle OpenCode invocation: manual, automatic, inherit                                 |
+| `A`             | cycle this machine's invocation: manual, automatic, inherit                           |
 | `z` / `Z`       | fold one group / fold all                                                             |
 | `/`             | filter the catalog, or search the document                                            |
 | `enter` `i`     | open the document / show details                                                      |
@@ -84,27 +84,38 @@ One catalog tree on the left, the selected skill's documentation on the right.
 
 ## How it fits together
 
-- **Local skills** in `skills/` are symlinked into `~/.agents/skills`. When OpenCode invocation metadata is needed, the symlink points to a generated copy refreshed during reconciliation.
+- **Local skills** in `skills/` are symlinked into `~/.agents/skills`. When invocation metadata is needed, the symlink points to a generated copy refreshed during reconciliation.
 - **Vendor skills** in `vendor/` are committed baselines, copied into the store so `npx skills` can update them; `slinky update` shows you the diff before anything changes in the catalog.
 - **Profiles** in the manifest are shared enabled sets; a machine following one gets its edits on sync, and can still enable or disable a skill for itself. **Machine state** (`.local/state.json`, gitignored) records what this machine follows or disables, and which projects have links.
 - **Project links** copy or symlink a catalog skill into another repository, excluded from that repo's git by default.
 
-### OpenCode invocation
+### Automatic invocation
 
-Keep a skill available for explicit use without advertising it to OpenCode's model:
+Keep a skill installed but stop agents from loading it on their own, so it runs only when called by name:
 
 ```bash
 slinky autoinvoke make-pr off --dry-run
 slinky autoinvoke make-pr off
-slinky autoinvoke make-pr on         # explicitly allow automatic discovery
-slinky autoinvoke make-pr inherit    # follow the skill's frontmatter again
+slinky autoinvoke make-pr on                    # explicitly allow automatic invocation
+slinky autoinvoke make-pr inherit               # follow the skill's frontmatter again
+slinky autoinvoke make-pr off --profile fleet   # for every machine following fleet
 ```
 
-Preferences live in the catalog's gitignored `.local/state.json` and survive disable/re-enable and profile changes. `status` shows the effective setting and whether it comes from this host, upstream metadata, compatibility translation, or the default.
+Each skill takes the first setting it has from this list:
 
-Slinky adds `metadata.opencode/autoinvoke` to global installations while preserving catalog sources and upstream provenance. Without a host preference, explicit upstream OpenCode metadata wins; otherwise `disable-model-invocation: true` translates to manual invocation. Skills with neither field retain OpenCode's default behavior.
+1. **This machine's choice**, made without `--profile`. It lives in the catalog's gitignored `.local/state.json` and survives disable/re-enable and profile changes.
+2. **The followed profile's choice**, made with `--profile`. It lives in `skills.manifest.json`, so the next save and sync share it. `slinky profile promote` moves this machine's choices into the profile.
+3. The skill's own `metadata.opencode/autoinvoke`.
+4. The skill's own `disable-model-invocation: true`, which means manual.
+5. Otherwise, automatic.
 
-`off` keeps explicit activation available. It does not change slash-command visibility. These preferences apply to global copies; project-local definitions and higher-priority OpenCode sources can take precedence. See [OpenCode V2's skill documentation](https://opencode.ai/v2/docs/skills/) for discovery rules.
+`status` shows the effective setting and where it comes from: `host`, `profile`, `upstream`, `compatibility`, or `default`.
+
+Slinky writes the result into global installations, never into catalog sources or upstream provenance. OpenCode gets `metadata.opencode/autoinvoke`. When the setting comes from this machine or a profile, Claude Code also gets `disable-model-invocation`, since `~/.claude/skills` links to the same installed copy; otherwise Claude Code keeps the skill author's own flag.
+
+`off` keeps explicit activation available. It does not change slash-command visibility. These settings apply to global copies; project-local definitions and higher-priority sources can take precedence. See [OpenCode V2's skill documentation](https://opencode.ai/v2/docs/skills/) and [Claude Code's skill documentation](https://code.claude.com/docs/en/skills) for discovery rules.
+
+Releases before profile choices refuse a manifest that has them, so upgrade every machine that pulls the catalog before setting one.
 
 The catalog repo is yours; Slinky only owns the tooling. Save it with `slinky save`, share it with `slinky push`, and each machine's `slinky sync` keeps up.
 

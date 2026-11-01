@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { parse } from "yaml";
 import { invocationInfo, renderInvocation, undecorate } from "./invocation.ts";
 
-describe("OpenCode invocation rendering", () => {
+describe("invocation rendering", () => {
   test("inherits native metadata before translating the portable manual-only flag", () => {
     const text = "---\nname: review\ndisable-model-invocation: true\nmetadata: {opencode/autoinvoke: true, owner: team}\n---\nBody\n";
     expect(invocationInfo(text)).toEqual({ automatic: true, source: "upstream" });
@@ -33,7 +33,7 @@ describe("OpenCode invocation rendering", () => {
   test("merges an empty frontmatter block without turning the old delimiters into body text", () => {
     const text = "---\n---\n# Body\n";
     const rendered = renderInvocation(text, false);
-    expect(rendered.text).toBe("---\nmetadata:\n  opencode/autoinvoke: false # slinky:autoinvoke\n---\n# Body\n");
+    expect(rendered.text).toBe("---\nmetadata:\n  opencode/autoinvoke: false # slinky:autoinvoke\ndisable-model-invocation: true # slinky:autoinvoke\n---\n# Body\n");
     expect(undecorate(rendered.text, { ...rendered.receipt!, source: "/foo" })).toBe(text);
   });
 
@@ -45,6 +45,38 @@ describe("OpenCode invocation rendering", () => {
     expect(source).toContain("owner: updated");
     expect(source).toContain("New body");
     expect(source).not.toContain("opencode/autoinvoke");
+    expect(source).not.toContain("disable-model-invocation");
+  });
+
+  test("a host or profile choice also sets Claude Code's flag, and undecorating restores the author's", () => {
+    const header = (text: string) => parse(text.split("---")[1]!);
+    const plain = "---\nname: foo\n---\nBody\n";
+    const manual = renderInvocation(plain, false);
+    expect(header(manual.text)).toEqual({ name: "foo", metadata: { "opencode/autoinvoke": false }, "disable-model-invocation": true });
+    expect(undecorate(manual.text, { ...manual.receipt!, source: "/foo" })).toBe(plain);
+
+    const authored = "---\nname: foo\ndisable-model-invocation: true\n---\nBody\n";
+    const automatic = renderInvocation(authored, true);
+    expect(header(automatic.text)).toEqual({ name: "foo", metadata: { "opencode/autoinvoke": true }, "disable-model-invocation": false });
+    expect(undecorate(automatic.text, { ...automatic.receipt!, source: "/foo" })).toBe(authored);
+  });
+
+  test("without a host or profile choice, Claude Code keeps the author's flag", () => {
+    const upstream = "---\nname: foo\nmetadata:\n  opencode/autoinvoke: false\n---\nBody\n";
+    expect(renderInvocation(upstream).text).toBe(upstream);
+    const portable = "---\nname: foo\ndisable-model-invocation: true\n---\nBody\n";
+    expect(renderInvocation(portable).text).toContain("disable-model-invocation: true\n");
+  });
+
+  test("a Claude-only decoration is undone after an unrelated header edit, and edits to it are refused", () => {
+    const upstream = "---\nname: foo\nmetadata:\n  opencode/autoinvoke: false\n---\nBody\n";
+    const rendered = renderInvocation(upstream, false);
+    expect(rendered.text).toContain("disable-model-invocation: true # slinky:autoinvoke");
+    expect(rendered.text).not.toContain("opencode/autoinvoke: false # slinky:autoinvoke");
+    const receipt = { ...rendered.receipt!, source: "/foo" };
+    const edited = rendered.text.replace("name: foo", "name: foo\ndescription: added");
+    expect(undecorate(edited, receipt)).toBe("---\nname: foo\ndescription: added\nmetadata:\n  opencode/autoinvoke: false\n---\nBody\n");
+    expect(() => undecorate(edited.replace("disable-model-invocation: true", "disable-model-invocation: false"), receipt)).toThrow("metadata was edited");
   });
 
   test("fresh upstream metadata is not stripped by an old receipt", () => {

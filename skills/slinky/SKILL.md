@@ -58,7 +58,7 @@ skills host
 slinky link ──────────────> project-local skill directories
 ```
 
-Local skills are symlinked from the host, or from a generated copy when global OpenCode invocation metadata is needed. Vendor skills are real directories in the global store so `npx skills` can update them, while the host retains the reviewable baseline.
+Local skills are symlinked from the host, or from a generated copy when global invocation metadata is needed. Vendor skills are real directories in the global store so `npx skills` can update them, while the host retains the reviewable baseline.
 
 ## Default Workflow
 
@@ -135,19 +135,22 @@ A staged copy that differs from an already-indexed baseline is left alone: updat
 
 For an unindexed skill, select it in the TUI and press `a`. Enter the source alone or paste the matching `skills add <source> --skill <name>` command. Slinky indexes existing `skills/` and `vendor/` directories in place; it removes an old host-local `.agents` copy only when its content matches the global installation.
 
-## OpenCode invocation
+## Automatic invocation
 
-To keep a global skill installed but omit it from OpenCode V2's model-facing list:
+To keep a global skill installed but stop agents from loading it on their own:
 
 ```bash
 slinky autoinvoke <skill> off --dry-run
-slinky autoinvoke <skill> off
+slinky autoinvoke <skill> off                    # this machine only
+slinky autoinvoke <skill> off --profile <name>   # every machine following the profile
 slinky status
 ```
 
-Use `on` for explicit automatic discovery and `inherit` to remove the host preference. Preferences persist in gitignored machine state across enablement and profile changes. Inherit follows upstream `metadata.opencode/autoinvoke`, then translates `disable-model-invocation: true` to manual invocation, otherwise leaves the default. Explicit activation by ID remains available; slash-command visibility is separate.
+Use `on` for explicit automatic invocation and `inherit` to remove the choice. Each skill takes the first setting it has: this machine's choice (gitignored state, kept across enablement and profile changes), then the followed profile's choice (in the manifest, shared on save and sync), then upstream `metadata.opencode/autoinvoke`, then `disable-model-invocation: true` as manual, otherwise the default. `slinky profile promote` moves this machine's choices into its profile. Explicit activation by ID remains available; slash-command visibility is separate.
 
-The command reconciles the catalog, so review every action in its preview. Slinky decorates global installations and tracks its additions in receipts outside skill discovery directories. Edit local skills in the host; generated copies refresh on reconciliation. Use Slinky's diff, vendor, and update commands so host-local additions stay out of accepted source content. Project links use catalog sources and do not receive host invocation preferences.
+Installed copies get `metadata.opencode/autoinvoke` for OpenCode. A choice from this machine or a profile also sets `disable-model-invocation` for Claude Code, which reads the same copy through `~/.claude/skills`. A manifest with profile choices does not load on older releases, so upgrade every machine that pulls the catalog before setting one.
+
+The command reconciles the catalog, so review every action in its preview. Slinky decorates global installations and tracks its additions in receipts outside skill discovery directories. Edit local skills in the host; generated copies refresh on reconciliation. Use Slinky's diff, vendor, and update commands so host-local additions stay out of accepted source content. Project links use catalog sources and do not receive invocation choices.
 
 The TUI's `A` key cycles manual, automatic, and inherit for the selected skill. Details show the effective setting and its source.
 

@@ -128,7 +128,7 @@ export const vendorRestore = Effect.fn("Vendor.restore")(function* (manifest: Ma
     forgetInvocation(live);
     const store = yield* ManifestStore;
     const state = yield* store.loadState(manifest);
-    decorateInstalled(live, source, invocationPreference(state, name));
+    decorateInstalled(live, source, invocationPreference(manifest, state, name));
   } finally {
     rmSync(staging, { recursive: true, force: true });
   }

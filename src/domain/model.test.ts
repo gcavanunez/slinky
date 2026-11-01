@@ -5,10 +5,15 @@ import {
   alignStateForTransition,
   getActiveProfile,
   getDisabledSkills,
+  invocationPreference,
+  invocationSetting,
   isSkillEnabled,
   Manifest,
   ProjectLink,
   promoteProfileOverrides,
+  renameProfile,
+  withAutoinvoke,
+  withProfileAutoinvoke,
   withProfileMembers,
   State,
   stateVersion,
@@ -344,6 +349,49 @@ describe("domain schemas", () => {
     expect(promoted.state.selection).toEqual({ kind: "profile", name: "work" });
     expect(getDisabledSkills(promoted.manifest, promoted.state)).toEqual([]);
     expect(withProfileMembers(manifest, "work", []).profiles).toEqual({});
+  });
+
+  test("a profile's invocation choices apply to machines following it, after their own", () => {
+    const manifest = Schema.decodeUnknownSync(Manifest)({ ...manifestInput(), autoinvoke: { work: { foo: false } } }, strict);
+    const custom = Schema.decodeUnknownSync(State)(stateInput(), strict);
+    const following = withProfile(manifest, custom, "work");
+
+    expect(invocationSetting(manifest, custom, "foo")).toBeUndefined();
+    expect(invocationSetting(manifest, following, "foo")).toEqual({ automatic: false, scope: "profile" });
+    expect(invocationSetting(manifest, withAutoinvoke(following, "foo", "on"), "foo")).toEqual({ automatic: true, scope: "host" });
+    expect(invocationPreference(manifest, following, "bar")).toBeUndefined();
+  });
+
+  test("rejects invocation choices for unknown profiles, unknown skills, or non-boolean values", () => {
+    const decode = (autoinvoke: Record<string, Record<string, boolean | string>>) => Schema.decodeUnknownSync(Manifest)({ ...manifestInput(), autoinvoke }, strict);
+
+    expect(() => decode({ missing: { foo: false } })).toThrow("unknown profile: missing");
+    expect(() => decode({ work: { ghost: false } })).toThrow("unknown skill: ghost");
+    expect(() => decode({ work: { foo: "false" } })).toThrow();
+  });
+
+  test("invocation choices follow profile renames and deletions, and the field is omitted once empty", () => {
+    const manifest = Schema.decodeUnknownSync(Manifest)(manifestInput(), strict);
+    const set = withProfileAutoinvoke(manifest, "work", "bar", "off");
+    const state = withProfile(set, Schema.decodeUnknownSync(State)(stateInput(), strict), "work");
+
+    expect(set.autoinvoke).toEqual({ work: { bar: false } });
+    // Releases without this field refuse unknown manifest keys, so it must disappear rather than linger empty.
+    expect(withProfileAutoinvoke(set, "work", "bar", "inherit")).not.toHaveProperty("autoinvoke");
+    expect(renameProfile(set, state, "work", "fleet").manifest.autoinvoke).toEqual({ fleet: { bar: false } });
+    expect(withProfileMembers(set, "work", [])).not.toHaveProperty("autoinvoke");
+  });
+
+  test("promoting moves this machine's invocation choices into the profile and clears them", () => {
+    const manifest = Schema.decodeUnknownSync(Manifest)({ ...manifestInput(), autoinvoke: { work: { foo: true } } }, strict);
+    const following = withProfile(manifest, Schema.decodeUnknownSync(State)(stateInput(), strict), "work");
+    const own = withAutoinvoke(withAutoinvoke(following, "foo", "off"), "bar", "on");
+
+    const promoted = promoteProfileOverrides(manifest, own);
+
+    expect(promoted.manifest.autoinvoke).toEqual({ work: { bar: true, foo: false } });
+    expect(promoted.state.opencode).toBeUndefined();
+    expect(invocationSetting(promoted.manifest, promoted.state, "foo")).toEqual({ automatic: false, scope: "profile" });
   });
 
   test("rejects a skill that is both a local addition and a local removal", () => {

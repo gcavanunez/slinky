@@ -110,7 +110,7 @@ function applySync(agentsSkills: string, claudeSkills: string, plan: Plan, opts:
         rmIfExists(live);
         symlinkSync(target, live);
       }
-      done.push(`configured OpenCode invocation for ${a.skill}`);
+      done.push(`configured invocation for ${a.skill}`);
     }),
     Match.discriminator("type")("remove-claude", (a) => {
       const claudePath = join(claudeSkills, a.skill);
@@ -258,7 +258,7 @@ export function planInstallation(
       (meta.origin === "vendor" && entry.kind === "dir");
     if (!owned && !opts.force) continue;
     if (!existsSync(join(source, "SKILL.md"))) continue;
-    const preference = invocationPreference(state, name);
+    const preference = invocationPreference(manifest, state, name);
     const sourceText = readFileSync(join(source, "SKILL.md"), "utf8");
     if (meta.origin === "local") {
       const target = localInstallationTarget(source, live, preference);

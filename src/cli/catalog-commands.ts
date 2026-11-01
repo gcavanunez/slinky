@@ -1,14 +1,24 @@
 import { join, resolve } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
-import { Effect } from "effect";
-import { Argument, Command } from "effect/unstable/cli";
+import { Effect, Option } from "effect";
+import { Argument, Command, Flag } from "effect/unstable/cli";
 import { classifyPlacement } from "../domain/catalog-inspection.ts";
 import type { CatalogLiveStatus, LiveEntry } from "../domain/catalog-inspection.ts";
-import { getActiveProfile, getProfileOverrides, isSkillEnabled, invocationPreference } from "../domain/model.ts";
+import { getActiveProfile, getProfileAutoinvoke, getProfileOverrides, invocationSetting, isSkillEnabled } from "../domain/model.ts";
 import type { Manifest, State } from "../domain/model.ts";
 import { claudeRelTarget } from "../domain/reconcile-plan.ts";
 import { findUnindexedSkills } from "../lib/adopt.ts";
-import { applyProfile, deleteProfile, editProfile, promoteProfile, renameProfileAction, setAutoinvoke, setProfileMembers, setSkillsEnabled } from "../lib/catalog-actions.ts";
+import {
+  applyProfile,
+  deleteProfile,
+  editProfile,
+  promoteProfile,
+  renameProfileAction,
+  setAutoinvoke,
+  setProfileAutoinvoke,
+  setProfileMembers,
+  setSkillsEnabled,
+} from "../lib/catalog-actions.ts";
 import { verifyCatalog } from "../lib/convergence.ts";
 import { inspectInstallation, invocationInfo } from "../lib/invocation.ts";
 import { HostRepo, Paths } from "../lib/paths.ts";
@@ -22,16 +32,17 @@ const cmdStatus = Effect.fn("Cli.status")(function* (manifest: Manifest, state: 
   const obs = yield* observe();
   const nameW = Math.max(4, ...Object.keys(manifest.skills).map((n) => n.length)) + 2;
   console.log(c.dim(`host: ${repo}\nselection: ${describeSelection(manifest, state)}\n`));
-  console.log(c.bold(`${pad("NAME", nameW)}${pad("ORIGIN", 8)}${pad("ENABLED", 9)}${pad("LIVE", 10)}${pad("CLAUDE", 8)}OPENCODE INVOCATION`));
+  console.log(c.bold(`${pad("NAME", nameW)}${pad("ORIGIN", 8)}${pad("ENABLED", 9)}${pad("LIVE", 10)}${pad("CLAUDE", 8)}INVOCATION`));
   for (const [name, meta] of Object.entries(manifest.skills)) {
     const enabled = isSkillEnabled(manifest, state, name);
     const live: LiveEntry = Object.hasOwn(obs.agents, name) ? obs.agents[name]! : { kind: "missing" };
     const claudeEntry: LiveEntry = Object.hasOwn(obs.claude, name) ? obs.claude[name]! : { kind: "missing" };
     const claude = classifyPlacement(claudeEntry, resolve(paths.claudeSkills, claudeRelTarget(name))) === "expected-symlink" ? "yes" : c.dim("-");
     const source = resolve(repo, meta.path);
-    const preference = invocationPreference(state, name);
+    const setting = invocationSetting(manifest, state, name);
+    const preference = setting?.automatic;
     const file = join(source, "SKILL.md");
-    const invocation = invocationInfo(existsSync(file) ? readFileSync(file, "utf8") : "", preference);
+    const invocation = invocationInfo(existsSync(file) ? readFileSync(file, "utf8") : "", preference, setting?.scope);
     const inspection = inspectInstallation({
       origin: meta.origin,
       enabled,
@@ -96,15 +107,16 @@ export const autoinvokeCommand = Command.make(
   {
     name: Argument.string("skill"),
     mode: Argument.choice("mode", ["on", "off", "inherit"] as const),
+    profile: Flag.string("profile").pipe(Flag.optional, Flag.withDescription("Record it on this shared profile instead of this machine; save and sync to share it")),
     dryRun: dryRunFlag,
   },
-  ({ name, mode, dryRun }) =>
+  ({ name, mode, profile, dryRun }) =>
     withRepo(
       Effect.gen(function* () {
-        renderAction(yield* setAutoinvoke(name, mode, { dryRun }));
+        renderAction(yield* Option.isSome(profile) ? setProfileAutoinvoke(profile.value, name, mode, { dryRun }) : setAutoinvoke(name, mode, { dryRun }));
       }),
     ),
-).pipe(Command.withDescription("Set host-local OpenCode automatic discovery: on, off (manual), or inherit"));
+).pipe(Command.withDescription("Set automatic invocation for this machine, or with --profile for every machine following a profile: on, off (manual), or inherit"));
 
 /** One line describing what this machine follows, e.g. `profile fleet (+fizzy -tdd on this machine)`. */
 export function describeSelection(manifest: Manifest, state: State): string {
@@ -123,6 +135,8 @@ const profileList = withRepo(
     for (const [name, skills] of entries) {
       const active = getActiveProfile(manifest, state) === name ? c.green(" (active)") : "";
       console.log(`${c.bold(name)}${active}: ${skills.join(", ")}`);
+      const choices = Object.entries(getProfileAutoinvoke(manifest, name)).map(([skill, automatic]) => `${skill} ${automatic ? "on" : "off"}`);
+      if (choices.length > 0) console.log(c.dim(`  autoinvoke: ${choices.join(", ")}`));
     }
     console.log(c.dim(`\nthis machine: ${describeSelection(manifest, state)}`));
   }),
@@ -174,7 +188,7 @@ const profilePromoteCommand = Command.make("promote", { dryRun: dryRunFlag, forc
       renderAction(yield* promoteProfile({ dryRun, force }));
     }),
   ),
-).pipe(Command.withDescription("Move this machine's own enable/disable changes into the profile it follows"));
+).pipe(Command.withDescription("Move this machine's own enable/disable changes and autoinvoke settings into the profile it follows"));
 
 const profileApplyCommand = Command.make(
   "apply",
