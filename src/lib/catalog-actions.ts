@@ -10,11 +10,13 @@ import {
   getProfile,
   getProfileOverrides,
   getSkill,
+  hostInvocationPreference,
   profileNamePattern,
   promoteProfileOverrides,
   renameProfile,
   withAutoinvoke,
   withProfile,
+  withProfileAutoinvoke,
   withProfileMembers,
   withSkillEnabled,
 } from "../domain/model.ts";
@@ -75,7 +77,7 @@ export const setAutoinvoke = Effect.fn("Catalog.setAutoinvoke")(function* (name:
   const state = yield* store.loadState(manifest);
   if (!getSkill(manifest, name)) return yield* Effect.fail(new OperationFailed({ message: `unknown skill: ${name}` }));
   const result = yield* changeState(manifest, withAutoinvoke(state, name, mode), options);
-  return { ...result, messages: [...result.messages, `${name}: OpenCode autoinvoke ${mode}`] };
+  return { ...result, messages: [...result.messages, `${name}: autoinvoke ${mode} for this machine`] };
 });
 
 export const applyProfile = Effect.fn("Catalog.applyProfile")(function* (name: string, options: MutationOptions = {}) {
@@ -129,6 +131,27 @@ export const editProfile = Effect.fn("Catalog.editProfile")(function* (
   return yield* writeProfile(manifest, state, name, members, options);
 });
 
+/**
+ * Change one skill's shared invocation choice on a profile (committed by the
+ * next save), then reconcile this machine if it follows that profile.
+ */
+export const setProfileAutoinvoke = Effect.fn("Catalog.setProfileAutoinvoke")(function* (profile: string, name: string, mode: InvocationMode, options: MutationOptions = {}) {
+  const store = yield* ManifestStore;
+  const manifest = yield* store.loadManifest();
+  const state = yield* store.loadState(manifest);
+  if (!getProfile(manifest, profile)) return yield* bail(`unknown profile: ${profile}`);
+  if (!getSkill(manifest, name)) return yield* bail(`unknown skill: ${name}`);
+  const nextManifest = withProfileAutoinvoke(manifest, profile, name, mode);
+  if (!options.dryRun) yield* store.saveManifest(nextManifest);
+  const result = yield* changeState(nextManifest, state, options);
+  const shadowed = getActiveProfile(manifest, state) === profile && hostInvocationPreference(state, name) !== undefined;
+  return {
+    ...result,
+    messages: [`profile ${profile}: ${name} autoinvoke ${mode}`, ...result.messages],
+    warnings: [...(shadowed ? [`${name}: this machine's own setting still wins; run \`slinky autoinvoke ${name} inherit\` to follow the profile`] : []), ...result.warnings],
+  };
+});
+
 /** Replace a profile's membership exactly; `create` refuses an existing name, otherwise the profile must exist. */
 export const setProfileMembers = Effect.fn("Catalog.setProfileMembers")(function* (
   name: string,
@@ -179,11 +202,13 @@ export const promoteProfile = Effect.fn("Catalog.promoteProfile")(function* (opt
   const profile = getActiveProfile(manifest, state);
   if (profile === null) return yield* Effect.fail(new OperationFailed({ message: "this machine is not following a profile; run `slinky profile apply <name>` first" }));
   const { enabled, disabled } = getProfileOverrides(state);
-  if (enabled.length === 0 && disabled.length === 0) {
+  const choices = Object.entries(state.opencode?.autoinvoke ?? {}).map(([skill, automatic]) => `${skill} ${automatic ? "on" : "off"}`);
+  if (enabled.length === 0 && disabled.length === 0 && choices.length === 0) {
     return { messages: [`no local changes to promote into ${profile}`], warnings: [], dryRun: options.dryRun ?? false } satisfies ActionResult;
   }
   const promoted = promoteProfileOverrides(manifest, state);
-  const summary = `profile ${profile}: ${[...enabled.map((skill) => `+${skill}`), ...disabled.map((skill) => `-${skill}`)].join(" ")}`;
+  const membership = [...enabled.map((skill) => `+${skill}`), ...disabled.map((skill) => `-${skill}`)].join(" ");
+  const summary = `profile ${profile}: ${[membership, choices.length > 0 ? `autoinvoke ${choices.join(", ")}` : ""].filter(Boolean).join("; ")}`;
   if (!options.dryRun) yield* store.saveManifest(promoted.manifest);
   const result = yield* changeState(promoted.manifest, promoted.state, options);
   return { ...result, messages: [summary, ...result.messages] };

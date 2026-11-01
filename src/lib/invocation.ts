@@ -4,12 +4,20 @@ import { basename, dirname, join, resolve } from "node:path";
 import { isMap, isScalar, parseDocument } from "yaml";
 import { Schema } from "effect";
 import { OperationFailed } from "../domain/model.ts";
+import type { InvocationScope } from "../domain/model.ts";
 import { contentHash } from "./hash.ts";
 import { inspectCatalogEntry } from "../domain/catalog-inspection.ts";
 import type { LiveEntry } from "../domain/catalog-inspection.ts";
 
 const key = "opencode/autoinvoke";
+/** Claude Code's manual-only flag; it reads no OpenCode metadata. */
+const claudeKey = "disable-model-invocation";
 const marker = "slinky:autoinvoke";
+/** Frontmatter fields Slinky may own, each with the value it holds when invocation is automatic. */
+const managedFields = [
+  { path: ["metadata", key], whenAutomatic: true },
+  { path: [claudeKey], whenAutomatic: false },
+] as const;
 
 function split(text: string) {
   const match = text.match(/^(?:\uFEFF)?---\r?\n(?:([\s\S]*?)\r?\n)?---(?:\r?\n|$)/);
@@ -29,13 +37,20 @@ function boolean(value: unknown): boolean | undefined {
   return value === true || value === "true" ? true : value === false || value === "false" ? false : undefined;
 }
 
-export function invocationInfo(text: string, preference?: boolean) {
+function markedNode(doc: ReturnType<typeof document>, value: boolean) {
+  const node = doc.createNode(value);
+  node.comment = ` ${marker}`;
+  return node;
+}
+
+/** `scope` names who set `preference`: this machine or the profile it follows. */
+export function invocationInfo(text: string, preference?: boolean, scope: InvocationScope = "host") {
   const doc = document(split(text).yaml);
   const native = boolean(doc.getIn(["metadata", key]));
-  const manual = boolean(doc.get("disable-model-invocation")) === true;
+  const manual = boolean(doc.get(claudeKey)) === true;
   return {
     automatic: preference ?? native ?? !manual,
-    source: preference !== undefined ? "host" : native !== undefined ? "upstream" : manual ? "compatibility" : "default",
+    source: preference !== undefined ? scope : native !== undefined ? "upstream" : manual ? "compatibility" : "default",
   } as const;
 }
 
@@ -55,12 +70,16 @@ export function renderInvocation(text: string, preference?: boolean) {
   const doc = document(parts.yaml);
   const info = invocationInfo(text, preference);
   const native = boolean(doc.getIn(["metadata", key]));
-  if (native === info.automatic || (preference === undefined && info.source === "default")) return { text, info };
-  const metadata = doc.get("metadata", true);
-  if (metadata !== undefined && !isMap(metadata)) throw new OperationFailed({ message: "skill metadata must be a YAML mapping to set OpenCode invocation" });
-  const node = doc.createNode(info.automatic);
-  node.comment = ` ${marker}`;
-  doc.setIn(["metadata", key], node);
+  const openCode = native !== info.automatic && !(preference === undefined && info.source === "default");
+  // Without a host or profile choice, Claude Code keeps the author's own flag.
+  const claude = preference !== undefined && (boolean(doc.get(claudeKey)) === true) === info.automatic;
+  if (!openCode && !claude) return { text, info };
+  if (openCode) {
+    const metadata = doc.get("metadata", true);
+    if (metadata !== undefined && !isMap(metadata)) throw new OperationFailed({ message: "skill metadata must be a YAML mapping to set OpenCode invocation" });
+    doc.setIn(["metadata", key], markedNode(doc, info.automatic));
+  }
+  if (claude) doc.set(claudeKey, markedNode(doc, !info.automatic));
   const newline = parts.header.includes("\r\n") ? "\r\n" : "\n";
   const header = `---\n${doc.toString()}---\n`.replaceAll("\n", newline);
   return { text: header + parts.body, info, receipt: { before: parts.header, after: header, automatic: info.automatic } };
@@ -82,20 +101,27 @@ export function readReceipt(live: string): InvocationReceipt | undefined {
   }
 }
 
-/** Undo only the field identified by Slinky's marker and receipt. Fresh upstream metadata survives. */
+/** Undo only the fields identified by Slinky's marker and receipt. Fresh upstream metadata survives. */
 export function undecorate(text: string, receipt?: InvocationReceipt): string {
   const parts = split(text);
   if (receipt && parts.header === receipt.after) return receipt.before + parts.body;
   if (!parts.yaml.includes(marker)) return text;
   const doc = document(parts.yaml);
-  const node = doc.getIn(["metadata", key], true);
-  if (!isScalar(node) || node.comment?.trim() !== marker) return text;
+  const owned = managedFields.flatMap((field) => {
+    const node = doc.getIn(field.path, true);
+    return isScalar(node) && node.comment?.trim() === marker ? [{ ...field, node }] : [];
+  });
+  if (owned.length === 0) return text;
   if (!receipt) throw new OperationFailed({ message: "managed invocation metadata has no receipt; restore the skill from its catalog" });
-  if (boolean(node.value) !== receipt.automatic) throw new OperationFailed({ message: "managed invocation metadata was edited; use slinky autoinvoke or restore the skill" });
+  if (owned.some(({ node, whenAutomatic }) => boolean(node.value) !== (receipt.automatic === whenAutomatic))) {
+    throw new OperationFailed({ message: "managed invocation metadata was edited; use slinky autoinvoke or restore the skill" });
+  }
   const original = document(split(receipt.before).yaml);
-  const originalNode = original.getIn(["metadata", key], true);
-  if (originalNode !== undefined) doc.setIn(["metadata", key], originalNode);
-  else doc.deleteIn(["metadata", key]);
+  for (const { path } of owned) {
+    const originalNode = original.getIn(path, true);
+    if (originalNode !== undefined) doc.setIn(path, originalNode);
+    else doc.deleteIn(path);
+  }
   const metadata = doc.get("metadata", true);
   if (!original.has("metadata") && isMap(metadata) && metadata.items.length === 0) doc.delete("metadata");
   return `---\n${doc.toString()}---\n${parts.body}`;

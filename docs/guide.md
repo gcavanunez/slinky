@@ -94,11 +94,11 @@ The catalog is one tree: a heading per author (or `local`, `unindexed`, `project
 | `h` | fold | jump to its heading |
 | `l` | unfold, else next pane | next pane |
 | `i` | summarise the group | details |
-| `A` | no action | cycle OpenCode invocation: manual, automatic, inherit |
+| `A` | no action | cycle this machine's invocation: manual, automatic, inherit |
 
 Filtering with `/` shows every matching group open and hides the rest; the fold state returns when the filter clears. `1` shows only skills discoverable globally or through the current project's `.agents` and `.claude` directories; `2` shows the complete catalog.
 
-OpenCode invocation is separate from installed enablement. `A` changes the selected skill's host preference; details show its effective setting and source. See [OpenCode invocation](../README.md#opencode-invocation) for CLI examples, inheritance, and global scope.
+Invocation is separate from installed enablement. `A` changes the selected skill's setting on this machine; details show its effective setting and source, including a choice inherited from the followed profile. See [Automatic invocation](../README.md#automatic-invocation) for CLI examples, profile choices, inheritance, and global scope.
 
 Status columns are `on` (enabled), `live` (global store state), `project` (placement in the current project), and `up` (upstream: `^` update available, `×` gone, `=` current). Placement values `link·hid` and `copy·hid` are excluded through `.git/info/exclude`; `link·git` and `copy·git` are visible to Git.
 
@@ -164,6 +164,8 @@ slinky fleet remove pi
 `fleet sync` runs a full `sync` on the leader (save, pull, reconcile, restore), then pushes any commits the upstream does not have. After that it runs `ssh -o BatchMode=yes <target> slinky sync --follower` on every selected follower at once. Each follower's output appears under its name. The command exits non-zero if any follower failed, but one unreachable follower never stops the others. If the leader fails, nothing is pushed and no follower is contacted.
 
 `slinky sync --follower` is the follower step, and you can also run it on its own. It skips the save phase: it requires a clean worktree, pulls the upstream catalog, reconciles, and restores live vendor drift exactly as `sync` does. It never commits, so catalog edits made on a follower are reported rather than published. Which skills are on is shared through a profile. On the leader, edit it with `slinky profile add fleet <skill...>` and `slinky profile remove fleet <skill...>`; the next `fleet sync` commits the manifest change and every follower that runs `slinky profile apply fleet` once picks it up. A follower that needs to differ runs `slinky enable` or `slinky disable` as usual: the change is recorded for that machine only (never committed), and the machine keeps following the rest of the profile. `slinky profile apply fleet` drops those changes again, and `slinky profile promote` moves them into the shared profile. Under a profile, a newly catalogued skill stays off until it is added to the profile.
+
+Whether an agent may load a skill on its own is shared the same way. `slinky autoinvoke <skill> off --profile fleet` makes the skill manual-only on every machine following `fleet`, in OpenCode and Claude Code; `on` explicitly allows it, and `inherit` removes the profile's choice. A machine's own `slinky autoinvoke <skill> on|off` still wins, and `slinky profile promote` moves those choices into the profile too. Every follower must run a release that knows profile choices before the first one is pushed, because older releases refuse the manifest.
 
 ## Adding and adopting skills
 
@@ -321,7 +323,7 @@ slinky fleet add <name> <ssh-target> [--command <remote-slinky>]
 slinky fleet remove <name>
 slinky fleet sync [follower...] [--dry-run]   # sync + push here, then sync --follower over ssh
 slinky enable <skill...>
-slinky autoinvoke <skill> <on|off|inherit> [--dry-run]
+slinky autoinvoke <skill> <on|off|inherit> [--profile <name>] [--dry-run]
 slinky disable <skill...> [--force]
 slinky profile list                          # also shows what this machine follows
 slinky profile apply <name> [--force]        # follow it and clear this machine's own changes

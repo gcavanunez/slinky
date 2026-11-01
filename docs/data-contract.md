@@ -42,6 +42,16 @@ Slinky validates its owned JSON documents with Effect Schema. Unknown properties
 
 Local paths must stay below `skills/` and end with the skill name. Vendor paths must use `vendor/<owner>/<name>`. Profile members must reference skills in the same manifest.
 
+A manifest may also carry shared invocation choices, keyed by profile:
+
+```json
+"autoinvoke": {
+  "default": { "their-skill": false }
+}
+```
+
+Each profile key must name a profile in the same manifest, and each skill key a catalog skill; the skill does not have to be a member, so a choice also covers machines that enable it themselves. `false` means manual invocation and `true` explicitly allows automatic invocation; a missing key means inherit. A machine following the profile applies these after its own state preferences and before the skill's frontmatter. Deleting a profile drops its choices, and renaming one carries them over. The field is omitted when no profile has a choice, because releases that predate it refuse a manifest that contains it.
+
 A local skill created by `slinky fork` also carries an optional `forkedFrom`:
 
 ```json
@@ -113,7 +123,7 @@ Profile selection uses `{"kind":"profile","name":"default"}` and derives enabled
 
 The enabled set is the profile's members plus `enabled`, minus `disabled`. Both lists are optional and omitted when empty; a skill may not appear in both, and each must reference a manifest skill (changes to retired skills are dropped on load). State with these lists does not load on Slinky releases that predate them. When a pull or save retires the followed profile, the machine keeps its previously effective selection as a custom selection; a state file naming a profile that is already gone normalizes to an all-enabled custom selection. Version-1 state is migrated on load; existing profile identity wins, while a retired profile keeps its still-valid disabled skills as a custom selection. Project links and custom disabled skills must reference manifest skills.
 
-Version-2 state also accepts optional host-local OpenCode invocation preferences:
+Version-2 state also accepts optional host-local invocation preferences:
 
 ```json
 "opencode": {
@@ -124,7 +134,9 @@ Version-2 state also accepts optional host-local OpenCode invocation preferences
 }
 ```
 
-Each key is a catalog skill ID. `false` means manual invocation; `true` explicitly allows automatic discovery. A missing key means inherit. Preferences survive selection changes; entries for retired catalog skills are pruned on state alignment. The manifest and upstream hashes always describe source content, without host-local additions.
+Each key is a catalog skill ID. `false` means manual invocation; `true` explicitly allows automatic discovery. A missing key means inherit, first to the followed profile's manifest choice. Preferences survive selection changes; entries for retired catalog skills are pruned on state alignment. Promoting a profile moves them into that profile's manifest choices and removes them from state. The manifest and upstream hashes always describe source content, without host-local additions.
+
+Installed copies receive `metadata.opencode/autoinvoke`. When a state preference or profile choice decides the setting, they also receive Claude Code's `disable-model-invocation`; otherwise the author's own value is left untouched. Each field Slinky sets carries a `# slinky:autoinvoke` comment.
 
 Global installation receipts live in `~/.agents/.slinky/receipts/<skill>.json`. They record the original and rendered frontmatter and the source path. Generated local copies live in `~/.agents/.slinky/rendered/<skill>`, outside discovery roots, with the usual `~/.agents/skills/<skill>` symlink pointing there. Receipts also record generated-copy hashes to detect direct edits. Vendor copies remain real directories. Diff, vendor acceptance, and updates use receipts to remove only Slinky's marked metadata; source hashes exclude those additions.
 

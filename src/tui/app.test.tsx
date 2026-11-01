@@ -459,7 +459,7 @@ test("clicking a pane does not hand key bindings to a focused renderable", async
   }
 });
 
-test("A cycles host-local OpenCode invocation for the selected skill", async () => {
+test("A cycles this machine's invocation for the selected skill", async () => {
   const setup = await mount();
   try {
     await setup.waitForFrame((value) => value.includes("slinky"));
@@ -468,13 +468,13 @@ test("A cycles host-local OpenCode invocation for the selected skill", async () 
     await input(() => setup.mockInput.typeText("alpha"));
     await input(() => setup.mockInput.pressEnter());
     await input(() => setup.mockInput.pressKey("a", { shift: true }));
-    expect(await setup.waitForFrame((value) => value.includes("invocation off"))).toContain("invocation off");
+    expect(await setup.waitForFrame((value) => value.includes("autoinvoke off for this machine"))).toContain("autoinvoke off for this machine");
     expect(JSON.parse(readFileSync(join(host, ".local/state.json"), "utf8")).opencode.autoinvoke.alpha).toBe(false);
     await input(() => setup.mockInput.pressKey("a", { shift: true }));
-    expect(await setup.waitForFrame((value) => value.includes("invocation on"))).toContain("invocation on");
+    expect(await setup.waitForFrame((value) => value.includes("autoinvoke on for this machine"))).toContain("autoinvoke on for this machine");
     expect(JSON.parse(readFileSync(join(host, ".local/state.json"), "utf8")).opencode.autoinvoke.alpha).toBe(true);
     await input(() => setup.mockInput.pressKey("a", { shift: true }));
-    await setup.waitForFrame((value) => value.includes("invocation inherit"));
+    await setup.waitForFrame((value) => value.includes("autoinvoke inherit for this machine"));
     expect(JSON.parse(readFileSync(join(host, ".local/state.json"), "utf8")).opencode.autoinvoke.alpha).toBeUndefined();
     expect(readFileSync(join(host, "skills/alpha/SKILL.md"), "utf8")).not.toContain("opencode/autoinvoke");
   } finally {

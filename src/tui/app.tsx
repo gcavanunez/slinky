@@ -1501,7 +1501,7 @@ export function App({ clipboard, checkForUpstream = defaultCheckForUpstream }: A
         if (!current) return;
         const preference = current.invocation?.preference;
         const mode = preference === undefined ? "off" : preference === false ? "on" : "inherit";
-        reportAction(`${current.name}: OpenCode invocation ${mode}`, runSync(setAutoinvoke(current.name, mode)));
+        reportAction(`${current.name}: autoinvoke ${mode} for this machine`, runSync(setAutoinvoke(current.name, mode)));
         refresh();
         return;
       }

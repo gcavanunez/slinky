@@ -51,6 +51,8 @@ const writeOwnedFile = <E>(path: string, contents: string, ErrorClass: FileError
     });
   });
 
+const sortedByKey = <Value>(record: Readonly<Record<string, Value>>) => Object.fromEntries(Object.entries(record).sort(([a], [b]) => a.localeCompare(b)));
+
 const writeOwnedJson = <E>(path: string, value: Schema.Json, ErrorClass: FileErrorClass<E>) => writeOwnedFile(path, `${JSON.stringify(value, null, 2)}\n`, ErrorClass);
 
 export interface PersistenceSnapshot {
@@ -112,9 +114,10 @@ export class ManifestStore extends Context.Service<ManifestStore, ManifestStoreI
           );
           const sorted = {
             ...encoded,
-            skills: Object.fromEntries(Object.entries(encoded.skills).sort(([a], [b]) => a.localeCompare(b))),
-            profiles: Object.fromEntries(Object.entries(encoded.profiles).sort(([a], [b]) => a.localeCompare(b))),
+            skills: sortedByKey(encoded.skills),
+            profiles: sortedByKey(encoded.profiles),
           };
+          if (encoded.autoinvoke) sorted.autoinvoke = Object.fromEntries(Object.entries(sortedByKey(encoded.autoinvoke)).map(([name, choices]) => [name, sortedByKey(choices)]));
           yield* writeOwnedJson(manifestPath, sorted, ManifestFileError);
         }),
 

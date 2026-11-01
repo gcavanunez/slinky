@@ -164,7 +164,7 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-describe("OpenCode invocation", () => {
+describe("invocation", () => {
   const command = (f: ReturnType<typeof fixture>, args: string[]) => {
     const result = runCli(f.host, f.home, args);
     expect(result.exitCode, result.stderr.toString() + result.stdout.toString()).toBe(0);
@@ -239,6 +239,38 @@ describe("OpenCode invocation", () => {
     command(f, ["profile", "apply", "focus"]);
     expect(readFileSync(join(live, "SKILL.md"), "utf8")).toContain("opencode/autoinvoke: true");
     expect(JSON.parse(readFileSync(f.statePath, "utf8")).opencode.autoinvoke.foo).toBe(true);
+  });
+
+  test("a profile's choice reaches the machines following it in OpenCode and Claude Code; this machine's own still wins", () => {
+    const f = fixture();
+    const shared = () => JSON.parse(readFileSync(join(f.host, "skills.manifest.json"), "utf8")).autoinvoke;
+    const live = join(f.home, ".agents/skills/foo");
+    command(f, ["profile", "apply", "focus"]);
+
+    expect(command(f, ["autoinvoke", "foo", "off", "--profile", "focus", "--dry-run"])).toContain("configure-invocation foo");
+    expect(shared()).toBeUndefined();
+    command(f, ["autoinvoke", "foo", "off", "--profile", "focus"]);
+    expect(shared()).toEqual({ focus: { foo: false } });
+    expect(readFileSync(join(live, "SKILL.md"), "utf8")).toContain("opencode/autoinvoke: false");
+    expect(readFileSync(join(live, "SKILL.md"), "utf8")).toContain("disable-model-invocation: true");
+    expect(command(f, ["status"])).toMatch(/foo[^\n]*manual \(profile\)/);
+    expect(command(f, ["profile", "list"])).toContain("autoinvoke: foo off");
+
+    command(f, ["autoinvoke", "foo", "on"]);
+    expect(command(f, ["status"])).toMatch(/foo[^\n]*auto \(host\)/);
+    expect(command(f, ["autoinvoke", "foo", "off", "--profile", "focus"])).toContain("this machine's own setting still wins");
+
+    command(f, ["profile", "promote"]);
+    expect(shared()).toEqual({ focus: { foo: true } });
+    expect(JSON.parse(readFileSync(f.statePath, "utf8")).opencode).toBeUndefined();
+    expect(command(f, ["status"])).toMatch(/foo[^\n]*auto \(profile\)/);
+
+    command(f, ["autoinvoke", "foo", "inherit", "--profile", "focus"]);
+    expect(shared()).toBeUndefined();
+    expect(realpathSync(live)).toBe(realpathSync(join(f.host, "skills/foo")));
+    const missing = runCli(f.host, f.home, ["autoinvoke", "foo", "off", "--profile", "missing"]);
+    expect(missing.exitCode).not.toBe(0);
+    expect(missing.stderr.toString() + missing.stdout.toString()).toContain("unknown profile: missing");
   });
 
   test("vendor additions are clean in status/diff and never accepted into source", () => {

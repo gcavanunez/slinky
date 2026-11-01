@@ -109,10 +109,15 @@ const VendorSkill = Schema.Struct({
 export const Skill = Schema.Union([LocalSkill, VendorSkill]);
 export type Skill = typeof Skill.Type;
 
+/** Skill ID to automatic invocation: `false` is manual-only, `true` explicitly allows it. */
+const InvocationSettings = Schema.Record(SkillName, Schema.Boolean);
+
 export const Manifest = Schema.Struct({
   version: Schema.Literal(version),
   skills: Schema.Record(SkillName, Skill),
   profiles: Schema.Record(ProfileName, Schema.Array(SkillName)),
+  /** Shared invocation choices, keyed by profile. Omitted when no profile has any, so older releases can still read the manifest. */
+  autoinvoke: Schema.optional(Schema.Record(ProfileName, InvocationSettings)),
 }).check(
   Schema.makeFilter((manifest) => {
     const issues: Array<Schema.FilterIssue> = [];
@@ -132,6 +137,13 @@ export const Manifest = Schema.Struct({
         if (!skillNames.has(member)) {
           issues.push({ path: ["profiles", name], issue: `unknown skill: ${member}` });
         }
+      }
+    }
+
+    for (const [name, settings] of Object.entries(manifest.autoinvoke ?? {})) {
+      if (!Object.hasOwn(manifest.profiles, name)) issues.push({ path: ["autoinvoke", name], issue: `unknown profile: ${name}` });
+      for (const skill of Object.keys(settings)) {
+        if (!skillNames.has(skill)) issues.push({ path: ["autoinvoke", name], issue: `unknown skill: ${skill}` });
       }
     }
 
@@ -352,6 +364,27 @@ export function getProfile(manifest: Manifest, name: string): ReadonlyArray<stri
   return Object.hasOwn(manifest.profiles, name) ? manifest.profiles[name] : undefined;
 }
 
+/** A profile's shared invocation choices; empty when it has none. */
+export function getProfileAutoinvoke(manifest: Manifest, name: string): Readonly<Record<string, boolean>> {
+  const settings = manifest.autoinvoke;
+  return settings && Object.hasOwn(settings, name) ? settings[name]! : {};
+}
+
+/** Replace every profile's invocation choices, dropping empty ones so a manifest without any stays readable by older releases. */
+function withAutoinvokeSettings(manifest: Manifest, settings: Readonly<Record<string, Readonly<Record<string, boolean>>>>): Manifest {
+  const kept = Object.entries(settings).filter(([, choices]) => Object.keys(choices).length > 0);
+  const { autoinvoke: _replaced, ...rest } = manifest;
+  return decodeManifest(kept.length > 0 ? { ...rest, autoinvoke: Object.fromEntries(kept) } : rest);
+}
+
+/** Set or clear one skill's shared invocation choice on a profile. */
+export function withProfileAutoinvoke(manifest: Manifest, profile: string, name: string, mode: InvocationMode): Manifest {
+  const choices = { ...getProfileAutoinvoke(manifest, profile) };
+  if (mode === "inherit") delete choices[name];
+  else choices[name] = mode === "on";
+  return withAutoinvokeSettings(manifest, { ...manifest.autoinvoke, [profile]: choices });
+}
+
 export function withManifestSkill(manifest: Manifest, name: string, skill: Skill): Manifest {
   return decodeManifest({ ...manifest, skills: { ...manifest.skills, [name]: skill } });
 }
@@ -431,13 +464,16 @@ export function withSkillEnabled(manifest: Manifest, state: State, name: string,
   });
 }
 
-/** Set a profile's exact membership in the manifest; an empty list removes the profile. */
+/** Set a profile's exact membership in the manifest; an empty list removes the profile and its invocation choices. */
 export function withProfileMembers(manifest: Manifest, name: string, members: Iterable<string>): Manifest {
   const sorted = [...new Set(members)].sort();
   const profiles = { ...manifest.profiles };
-  if (sorted.length === 0) delete profiles[name];
-  else profiles[name] = sorted;
-  return decodeManifest({ ...manifest, profiles });
+  const settings = { ...manifest.autoinvoke };
+  if (sorted.length === 0) {
+    delete profiles[name];
+    delete settings[name];
+  } else profiles[name] = sorted;
+  return withAutoinvokeSettings({ ...manifest, profiles }, settings);
 }
 
 /** Names that stay readable as CLI arguments and TUI labels. */
@@ -447,34 +483,62 @@ export const profileNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 export function renameProfile(manifest: Manifest, state: State, from: string, to: string): CatalogSelection {
   if (!Object.hasOwn(manifest.profiles, from)) throw new Error(`unknown profile: ${from}`);
   if (Object.hasOwn(manifest.profiles, to)) throw new Error(`profile already exists: ${to}`);
-  const profiles = Object.fromEntries(Object.entries(manifest.profiles).map(([name, members]) => [name === from ? to : name, members]));
+  const renamed = <Value>(entries: Readonly<Record<string, Value>>) => Object.fromEntries(Object.entries(entries).map(([name, value]) => [name === from ? to : name, value]));
   const selection = state.selection.kind === "profile" && state.selection.name === from ? { ...state.selection, name: to } : state.selection;
-  return { manifest: decodeManifest({ ...manifest, profiles }), state: decodeState({ ...state, selection }) };
+  return {
+    manifest: withAutoinvokeSettings({ ...manifest, profiles: renamed(manifest.profiles) }, renamed(manifest.autoinvoke ?? {})),
+    state: decodeState({ ...state, selection }),
+  };
 }
 
-/** Fold this machine's overrides into its active profile and clear them. */
 export interface CatalogSelection {
   readonly manifest: Manifest;
   readonly state: State;
 }
 
+/** Fold this machine's enable/disable changes and invocation choices into its active profile, then clear them. */
 export function promoteProfileOverrides(manifest: Manifest, state: State): CatalogSelection {
   const profile = getActiveProfile(manifest, state);
   if (profile === null) throw new Error("no active profile to promote into");
   const { enabled, disabled } = getProfileOverrides(state);
   const members = new Set([...(getProfile(manifest, profile) ?? []), ...enabled]);
   for (const name of disabled) members.delete(name);
+  const promoted = withProfileMembers(manifest, profile, members);
+  const choices = { ...getProfileAutoinvoke(manifest, profile), ...state.opencode?.autoinvoke };
+  const { opencode: _promoted, ...rest } = state;
   return {
-    manifest: withProfileMembers(manifest, profile, members),
-    state: decodeState({ ...state, selection: profileSelection(profile, [], []) }),
+    manifest: Object.hasOwn(promoted.profiles, profile) ? withAutoinvokeSettings(promoted, { ...promoted.autoinvoke, [profile]: choices }) : promoted,
+    state: decodeState({ ...rest, selection: profileSelection(profile, [], []) }),
   };
 }
 
 export type InvocationMode = "on" | "off" | "inherit";
 
-export function invocationPreference(state: State, name: string): boolean | undefined {
+/** Who decided a skill's invocation: this machine, or the profile it follows. */
+export type InvocationScope = "host" | "profile";
+
+export interface InvocationSetting {
+  readonly automatic: boolean;
+  readonly scope: InvocationScope;
+}
+
+/** This machine's own choice, from `slinky autoinvoke`; never committed. */
+export function hostInvocationPreference(state: State, name: string): boolean | undefined {
   const entries = state.opencode?.autoinvoke;
   return entries && Object.hasOwn(entries, name) ? entries[name] : undefined;
+}
+
+/** This machine's own choice wins over the shared choice of the profile it follows. */
+export function invocationSetting(manifest: Manifest, state: State, name: string): InvocationSetting | undefined {
+  const host = hostInvocationPreference(state, name);
+  if (host !== undefined) return { automatic: host, scope: "host" };
+  const profile = getActiveProfile(manifest, state);
+  const shared = profile === null ? {} : getProfileAutoinvoke(manifest, profile);
+  return Object.hasOwn(shared, name) ? { automatic: shared[name]!, scope: "profile" } : undefined;
+}
+
+export function invocationPreference(manifest: Manifest, state: State, name: string): boolean | undefined {
+  return invocationSetting(manifest, state, name)?.automatic;
 }
 
 export function withAutoinvoke(state: State, name: string, mode: InvocationMode): State {

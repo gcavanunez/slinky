@@ -13,7 +13,7 @@ import type { ForeignSkill, UnindexedSkill } from "../lib/adopt.ts";
 import type { DirDiff } from "../lib/diff.ts";
 import type { EditorCommand } from "../lib/editor.ts";
 import { isGlobalStoreProject } from "../lib/linker.ts";
-import { isSkillEnabled, invocationPreference } from "../domain/model.ts";
+import { hostInvocationPreference, invocationSetting, isSkillEnabled } from "../domain/model.ts";
 import type { Manifest, ProjectLink, Skill, State, ThemeId } from "../domain/model.ts";
 import { ManifestStore } from "../lib/manifest.ts";
 import { claudeRelTarget } from "../domain/reconcile-plan.ts";
@@ -135,9 +135,10 @@ export const loadCatalog = Effect.fn("Tui.loadCatalog")(function* () {
     const enabled = isSkillEnabled(manifest, state, name);
     const liveEntry: LiveEntry = Object.hasOwn(obs.agents, name) ? obs.agents[name]! : { kind: "missing" };
     const source = resolve(repo, meta.path);
-    const preference = invocationPreference(state, name);
+    const setting = invocationSetting(manifest, state, name);
+    const preference = setting?.automatic;
     const file = join(source, "SKILL.md");
-    const invocation = invocationInfo(existsSync(file) ? readFileSync(file, "utf8") : "", preference);
+    const invocation = invocationInfo(existsSync(file) ? readFileSync(file, "utf8") : "", preference, setting?.scope);
     const inspection = inspectInstallation({
       origin: meta.origin,
       enabled,
@@ -161,7 +162,8 @@ export const loadCatalog = Effect.fn("Tui.loadCatalog")(function* () {
       projectLink,
       projectSkill: projectSkillsByName.get(name) ?? null,
       meta,
-      invocation: { ...invocation, preference },
+      // `A` cycles this machine's own choice, so expose that rather than the effective one.
+      invocation: { ...invocation, preference: hostInvocationPreference(state, name) },
     };
   });
   return {
