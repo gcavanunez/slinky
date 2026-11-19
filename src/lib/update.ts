@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { join, posix, resolve } from "node:path";
-import { Cache, Context, Duration, Effect, Exit, Layer, Schedule, Schema } from "effect";
+import { Cache, Config, Context, Duration, Effect, Exit, Layer, Option, Schedule, Schema } from "effect";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
 import { errorDetail, ExternalToolError, isSkillEnabled, getSkill } from "../domain/model.ts";
 import type { Manifest, State } from "../domain/model.ts";
@@ -54,6 +54,17 @@ const GitHubContents = Schema.Array(
   }),
 );
 
+/** The GitHub CLI's token, when `gh` is installed and signed in. */
+function ghCliToken(): string | undefined {
+  try {
+    const result = spawnSync("gh", ["auth", "token"], { encoding: "utf8", timeout: 5_000 });
+    const value = result.status === 0 ? result.stdout.trim() : "";
+    return value === "" ? undefined : value;
+  } catch {
+    return undefined;
+  }
+}
+
 export class GitHubError extends Schema.TaggedError<GitHubError>()("GitHubError", {
   message: Schema.String,
 }) {}
@@ -67,8 +78,24 @@ export class GitHub extends Context.Service<GitHub, GitHubInterface>()("slinky/G
   static readonly layer: Layer.Layer<GitHub, never, HttpClient.HttpClient> = Layer.effect(
     GitHub,
     Effect.gen(function* () {
+      const envToken = yield* Config.option(Config.string("GITHUB_TOKEN")).pipe(
+        Effect.flatMap((token) => (Option.isSome(token) ? Effect.succeed(token) : Config.option(Config.string("GH_TOKEN")))),
+        Effect.map(Option.filter((value) => value.trim() !== "")),
+        Effect.orDie,
+      );
+      // Anonymous GitHub API access allows 60 requests an hour, too few for a large
+      // catalog. Resolved on the first request so commands that never check pay nothing.
+      let token: string | undefined | null = null;
+      const githubToken = () => {
+        if (token === null) token = Option.getOrUndefined(envToken) ?? ghCliToken();
+        return token;
+      };
       const client = (yield* HttpClient.HttpClient).pipe(
         HttpClient.mapRequest(HttpClientRequest.setHeader("User-Agent", "slinky-skill-manager")),
+        HttpClient.mapRequest((request) => {
+          const value = githubToken();
+          return value === undefined ? request : HttpClientRequest.bearerToken(request, value);
+        }),
         HttpClient.filterStatusOk,
         HttpClient.retryTransient({
           times: 3,
