@@ -1731,6 +1731,28 @@ printf '%s\\n' '# beta upstream' > "$HOME/.agents/skills/beta/SKILL.md"
     expect(readFileSync(liveFile, "utf8")).toBe(upstream);
   });
 
+  test("update removes disabled skills that skills.sh installed globally", () => {
+    const f = fixture();
+    addUpdatableVendor(f, "alpha");
+    addUpdatableVendor(f, "beta");
+    initializeGitFixture(f.host, f.home);
+    expect(runCli(f.host, f.home, ["disable", "beta"]).exitCode).toBe(0);
+    const betaLive = join(f.home, ".agents/skills/beta");
+    expect(existsSync(betaLive)).toBe(false);
+    const bin = join(f.root, "update-bin");
+    mkdirSync(bin);
+    // skills.sh installs every skill it is asked to update, enabled or not.
+    writeFileSync(join(bin, "npx"), '#!/bin/sh\nmkdir -p "$HOME/.agents/skills/beta"\nprintf "# beta upstream\\n" > "$HOME/.agents/skills/beta/SKILL.md"\n');
+    chmodSync(join(bin, "npx"), 0o755);
+
+    const result = runCli(f.host, f.home, ["update", "--yes"], { PATH: `${bin}:${process.env.PATH ?? ""}` });
+
+    expect(result.exitCode, result.stderr.toString() + result.stdout.toString()).toBe(0);
+    expect(readFileSync(join(f.host, "vendor/kitlangton/beta/SKILL.md"), "utf8")).toBe("# beta upstream\n");
+    expect(existsSync(betaLive)).toBe(false);
+    expect(existsSync(join(f.home, ".agents/skills/alpha"))).toBe(true);
+  });
+
   test("a failed update reapplies OpenCode invocation before reporting the failure", () => {
     const f = fixture();
     addUpdatableVendor(f, "alpha");

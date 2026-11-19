@@ -345,11 +345,11 @@ export const updateCommand = Command.make(
           selectedNames.filter((name) => !outcome.unowned.includes(name)),
         );
 
-        // 5. resurrect enabled skills that upstream deleted
-        if (outcome.missing.length > 0) {
-          console.log(c.yellow(`\ngone upstream, restoring from vendored baseline: ${outcome.missing.join(", ")}`));
-          yield* runSyncCmd(manifest, state, {});
-        }
+        // 5. reconcile: skills.sh installs every named skill globally, so disabled skills
+        // must come back out, and enabled skills that upstream deleted come back from baseline.
+        if (outcome.missing.length > 0) console.log(c.yellow(`\ngone upstream, restoring from vendored baseline: ${outcome.missing.join(", ")}`));
+        console.log(c.bold("\nreconcile"));
+        yield* runSyncCmd(manifest, state, {});
 
         console.log(
           `\n${c.bold("summary:")} ${accepted.length} accepted, ${rejected.length} rejected, ` +
