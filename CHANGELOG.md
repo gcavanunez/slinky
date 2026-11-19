@@ -1,5 +1,12 @@
 # @gcavanunez/slinky
 
+## 0.6.1
+
+### Patch Changes
+
+- 06ce2cc: Authenticate upstream update checks with `GITHUB_TOKEN`, `GH_TOKEN`, or the signed-in GitHub CLI, so large catalogs are no longer cut off by the anonymous 60-request limit.
+- 7c2dfc3: `slinky update` reconciles when it finishes, so skills that skills.sh installed globally but that are disabled on this machine are removed again.
+
 ## 0.6.0
 
 ### Minor Changes
